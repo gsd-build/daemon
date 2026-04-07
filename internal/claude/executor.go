@@ -4,19 +4,21 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 )
 
 // Options configures a Claude process.
 type Options struct {
-	BinaryPath     string // defaults to "claude"
+	BinaryPath     string   // defaults to "claude"
 	CWD            string
 	Model          string
 	Effort         string
 	PermissionMode string
 	SystemPrompt   string
-	ResumeSession  string // claude session id to resume; empty = new session
+	ResumeSession  string   // claude session id to resume; empty = new session
+	Env            []string // extra environment variables (e.g. for tests); nil = inherit
 }
 
 // Executor owns a single `claude -p` subprocess.
@@ -79,6 +81,9 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 
 	cmd := exec.CommandContext(ctx, e.opts.BinaryPath, args...)
 	cmd.Dir = e.opts.CWD
+	if len(e.opts.Env) > 0 {
+		cmd.Env = append(os.Environ(), e.opts.Env...)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		e.mu.Unlock()

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -87,5 +88,110 @@ func TestExecutorRoundTrip(t *testing.T) {
 	_ = json.Unmarshal(last.Raw, &payload)
 	if payload["session_id"] != "fake-session-123" {
 		t.Errorf("expected session_id=fake-session-123, got %v", payload["session_id"])
+	}
+}
+
+// readArgsFile reads the argv written by fake-claude when FAKE_CLAUDE_ARGS_FILE is set.
+func readArgsFile(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	var argv []string
+	if err := json.Unmarshal(data, &argv); err != nil {
+		t.Fatalf("unmarshal args file: %v", err)
+	}
+	return argv
+}
+
+// TestExecutorResumeFlag verifies that a non-empty ResumeSession option
+// causes the executor to pass --resume <id> in the subprocess argv.
+func TestExecutorResumeFlag(t *testing.T) {
+	binPath := buildFakeClaude(t)
+
+	argsFile := filepath.Join(t.TempDir(), "argv.json")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const resumeID = "test-claude-session-abc"
+
+	e := NewExecutor(Options{
+		BinaryPath:    binPath,
+		CWD:           t.TempDir(),
+		ResumeSession: resumeID,
+		Env:           []string{"FAKE_CLAUDE_ARGS_FILE=" + argsFile},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = e.Start(ctx, func(_ Event) error { return nil })
+	}()
+
+	// Give fake-claude time to write the args file, then close it.
+	time.Sleep(50 * time.Millisecond)
+	_ = e.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("executor did not exit")
+	}
+
+	argv := readArgsFile(t, argsFile)
+
+	found := false
+	for i, arg := range argv {
+		if arg == "--resume" && i+1 < len(argv) && argv[i+1] == resumeID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --resume %s in argv, got: %v", resumeID, argv)
+	}
+}
+
+// TestExecutorNoResumeFlag verifies that an empty ResumeSession does not
+// add --resume to the subprocess argv.
+func TestExecutorNoResumeFlag(t *testing.T) {
+	binPath := buildFakeClaude(t)
+
+	argsFile := filepath.Join(t.TempDir(), "argv.json")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	e := NewExecutor(Options{
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		// ResumeSession intentionally empty
+		Env: []string{"FAKE_CLAUDE_ARGS_FILE=" + argsFile},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = e.Start(ctx, func(_ Event) error { return nil })
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	_ = e.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("executor did not exit")
+	}
+
+	argv := readArgsFile(t, argsFile)
+
+	for _, arg := range argv {
+		if arg == "--resume" {
+			t.Errorf("expected no --resume in argv, got: %v", argv)
+			break
+		}
 	}
 }

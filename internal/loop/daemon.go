@@ -146,6 +146,7 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			Effort:         msg.Effort,
 			PermissionMode: msg.PermissionMode,
 			SystemPrompt:   msg.PersonaSystemPrompt,
+			ResumeSession:  msg.ClaudeSessionID,
 		})
 		if err != nil {
 			return d.client.Send(&protocol.TaskError{

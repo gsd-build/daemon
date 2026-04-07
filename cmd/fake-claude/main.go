@@ -14,6 +14,14 @@ import (
 )
 
 func main() {
+	// If FAKE_CLAUDE_ARGS_FILE is set, write argv as JSON to that file.
+	// This lets executor tests inspect the flags passed by the daemon
+	// without polluting the stdout stream that the parser reads.
+	if argsFile := os.Getenv("FAKE_CLAUDE_ARGS_FILE"); argsFile != "" {
+		data, _ := json.Marshal(os.Args[1:])
+		_ = os.WriteFile(argsFile, data, 0o600)
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
