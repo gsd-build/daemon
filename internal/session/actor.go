@@ -300,6 +300,85 @@ func denialNames(denials []struct {
 	return out
 }
 
+// GetClaudeSessionID returns the most recent Claude session id observed.
+func (a *Actor) GetClaudeSessionID() string {
+	v := a.claudeSessionID.Load()
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// HandlePermissionResponse processes a permission response from the relay.
+// On Approve: schedules an executor restart with --allowedTools (Task 16).
+// On Deny: sends a follow-up user message saying the request was denied.
+func (a *Actor) HandlePermissionResponse(resp *protocol.PermissionResponse) error {
+	pdAny := a.pendingDenial.Load()
+	pd, ok := pdAny.(*pendingDenial)
+	if !ok || pd == nil {
+		return fmt.Errorf("no pending denial for session %s", a.opts.SessionID)
+	}
+
+	if resp.Approved {
+		// Approve path: restart the executor with --allowedTools.
+		// Implementation lives in Task 16. For now, treat as deny.
+		return a.handleDeny(pd, "user approved but restart-on-approve not yet implemented")
+	}
+
+	return a.handleDeny(pd, "user denied the permission request")
+}
+
+// HandleQuestionResponse processes an answer to a question.
+func (a *Actor) HandleQuestionResponse(resp *protocol.QuestionResponse) error {
+	pdAny := a.pendingDenial.Load()
+	pd, ok := pdAny.(*pendingDenial)
+	if !ok || pd == nil {
+		return fmt.Errorf("no pending question for session %s", a.opts.SessionID)
+	}
+	_ = pd // we don't need pd state for the answer flow
+
+	a.pendingDenial.Store((*pendingDenial)(nil))
+	answerMsg := fmt.Sprintf("My answer: %s", resp.Answer)
+	if err := a.executor.Send(answerMsg); err != nil {
+		return fmt.Errorf("send answer to claude: %w", err)
+	}
+
+	tc, _ := a.taskInFlight.Load().(*taskContext)
+	if tc != nil {
+		_ = a.opts.Relay.Send(&protocol.TaskComplete{
+			Type:            protocol.MsgTypeTaskComplete,
+			TaskID:          tc.TaskID,
+			SessionID:       a.opts.SessionID,
+			ChannelID:       a.opts.ChannelID,
+			ClaudeSessionID: a.GetClaudeSessionID(),
+		})
+		a.taskInFlight.Store((*taskContext)(nil))
+	}
+
+	return nil
+}
+
+func (a *Actor) handleDeny(pd *pendingDenial, reason string) error {
+	a.pendingDenial.Store((*pendingDenial)(nil))
+	denyMsg := fmt.Sprintf("The previous tool request was denied: %s. Please continue without using that tool.", reason)
+	if err := a.executor.Send(denyMsg); err != nil {
+		return err
+	}
+
+	tc, _ := a.taskInFlight.Load().(*taskContext)
+	if tc != nil {
+		_ = a.opts.Relay.Send(&protocol.TaskComplete{
+			Type:            protocol.MsgTypeTaskComplete,
+			TaskID:          tc.TaskID,
+			SessionID:       a.opts.SessionID,
+			ChannelID:       a.opts.ChannelID,
+			ClaudeSessionID: a.GetClaudeSessionID(),
+		})
+		a.taskInFlight.Store((*taskContext)(nil))
+	}
+	return nil
+}
+
 // Stop closes the Claude process and the WAL.
 func (a *Actor) Stop() error {
 	a.stopOnce.Do(func() {

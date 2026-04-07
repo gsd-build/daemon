@@ -123,6 +123,10 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleBrowse(msg)
 	case *protocol.ReadFile:
 		return d.handleRead(msg)
+	case *protocol.PermissionResponse:
+		return d.handlePermissionResponse(msg)
+	case *protocol.QuestionResponse:
+		return d.handleQuestionResponse(msg)
 	case *protocol.Ack:
 		return d.handleAck(msg)
 	case *protocol.ReplayRequest:
@@ -229,6 +233,22 @@ func (d *Daemon) handleReplay(msg *protocol.ReplayRequest) error {
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {
+	actor := d.manager.Get(msg.SessionID)
+	if actor == nil {
+		return fmt.Errorf("no actor for session %s", msg.SessionID)
+	}
+	return actor.HandlePermissionResponse(msg)
+}
+
+func (d *Daemon) handleQuestionResponse(msg *protocol.QuestionResponse) error {
+	actor := d.manager.Get(msg.SessionID)
+	if actor == nil {
+		return fmt.Errorf("no actor for session %s", msg.SessionID)
+	}
+	return actor.HandleQuestionResponse(msg)
 }
 
 func configHomeDir() (string, error) {
