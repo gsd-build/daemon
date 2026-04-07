@@ -1,8 +1,15 @@
 // fake-claude is a test helper that mimics `claude -p --input-format stream-json
 // --output-format stream-json`. It reads NDJSON from stdin and emits scripted
-// responses based on the content.
+// responses based on the content and on environment variables.
 //
-// Usage: go run ./cmd/fake-claude  (during tests)
+// Env vars:
+//
+//	FAKE_CLAUDE_DENY_TOOL=<name>  — emit a permission_denials for the first turn
+//	                                (or any turn where the tool is not in --allowedTools)
+//	FAKE_CLAUDE_SESSION_ID=<id>   — override the synthetic session id
+//	FAKE_CLAUDE_ARGS_FILE=<path>  — write os.Args[1:] as JSON to this file (preserved from Task 9)
+//
+// Usage: invoked by the daemon as `claude -p ...` during tests.
 package main
 
 import (
@@ -10,7 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
+	"strings"
 )
 
 func main() {
@@ -22,6 +29,25 @@ func main() {
 		_ = os.WriteFile(argsFile, data, 0o600)
 	}
 
+	denyTool := os.Getenv("FAKE_CLAUDE_DENY_TOOL")
+	sessionID := os.Getenv("FAKE_CLAUDE_SESSION_ID")
+	if sessionID == "" {
+		sessionID = "fake-session-123"
+	}
+
+	// Detect whether the daemon spawned us with --allowedTools (which means
+	// the user has approved a tool). If the deny tool is in the allowed list,
+	// suppress the deny.
+	allowedSet := make(map[string]bool)
+	for i, arg := range os.Args {
+		if arg == "--allowedTools" && i+1 < len(os.Args) {
+			for _, t := range strings.Split(os.Args[i+1], ",") {
+				allowedSet[strings.TrimSpace(t)] = true
+			}
+		}
+	}
+
+	turnNum := 0
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
@@ -30,8 +56,18 @@ func main() {
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue
 		}
+		turnNum++
 
-		// Echo back an assistant event + a result event
+		// Emit a tiny stream_event partial (relay will skip persisting it)
+		streamEvent := map[string]any{
+			"type": "stream_event",
+			"event": map[string]any{
+				"delta": map[string]any{"text": "fake delta"},
+			},
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(streamEvent)
+
+		// Emit an assistant text block
 		assistant := map[string]any{
 			"type": "assistant",
 			"message": map[string]any{
@@ -42,21 +78,35 @@ func main() {
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(assistant)
 
+		// Build result
 		result := map[string]any{
 			"type":           "result",
+			"subtype":        "success",
 			"total_cost_usd": 0.0001,
 			"duration_ms":    42,
 			"usage": map[string]int{
 				"input_tokens":  10,
 				"output_tokens": 5,
 			},
-			"session_id": "fake-session-123",
+			"session_id": sessionID,
 		}
+
+		// On the first turn, emit a permission_denial unless the tool is now allowed
+		if turnNum == 1 && denyTool != "" && !allowedSet[denyTool] {
+			result["permission_denials"] = []map[string]any{
+				{
+					"tool_name":   denyTool,
+					"tool_use_id": "toolu_fake_001",
+					"tool_input": map[string]any{
+						"file_path": "/tmp/fake.txt",
+						"content":   "fake content",
+					},
+				},
+			}
+		}
+
 		_ = json.NewEncoder(os.Stdout).Encode(result)
 		os.Stdout.Sync()
-
-		// Simulate work
-		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Fprintln(os.Stderr, "fake-claude: stdin closed, exiting")
 }
