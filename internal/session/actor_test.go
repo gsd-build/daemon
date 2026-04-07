@@ -380,11 +380,19 @@ func TestActorRestartsWithAllowedToolsOnApproval(t *testing.T) {
 	relay := &fakeRelay{}
 	tmpDir := t.TempDir()
 
+	// Use the fake-claude binary so that RestartWithGrant's new executor
+	// actually starts and Send unblocks. Without a real binary the executor
+	// would block forever on its `ready` channel and the test would only ever
+	// observe state via races.
+	binPath := buildFakeClaude(t)
+
 	actor, err := NewActor(Options{
-		SessionID: "s-restart",
-		ChannelID: "c",
-		WALPath:   filepath.Join(tmpDir, "s-restart.jsonl"),
-		Relay:     relay,
+		SessionID:  "s-restart",
+		ChannelID:  "c",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		WALPath:    filepath.Join(tmpDir, "s-restart.jsonl"),
+		Relay:      relay,
 	})
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
@@ -403,44 +411,30 @@ func TestActorRestartsWithAllowedToolsOnApproval(t *testing.T) {
 		Prompt:  "Write hello.txt",
 	})
 
-	// HandlePermissionResponse clears pendingDenial synchronously before calling
-	// RestartWithGrant, and RestartWithGrant appends to allowedTools synchronously
-	// before the executor.Send blocks waiting for the process to start.
-	// Run in a goroutine so the test isn't blocked by the Send waiting on a
-	// process that never starts (no BinaryPath set).
-	done := make(chan error, 1)
-	go func() {
-		done <- actor.HandlePermissionResponse(&protocol.PermissionResponse{
-			Type:      protocol.MsgTypePermissionResponse,
-			SessionID: "s-restart",
-			ChannelID: "c",
-			RequestID: "toolu_001",
-			Approved:  true,
-		})
-	}()
-
-	// Give RestartWithGrant time to update allowedTools (synchronous) before
-	// it reaches the 500ms sleep + Send (which will block on no process).
-	// 200ms is well within the window before the sleep fires.
-	time.Sleep(200 * time.Millisecond)
-
-	// allowedTools must be updated by now (happens before time.Sleep in RestartWithGrant)
-	if len(actor.allowedTools) != 1 || actor.allowedTools[0] != "Write" {
-		t.Errorf("allowedTools: %+v", actor.allowedTools)
+	// HandlePermissionResponse runs synchronously: it appends to allowedTools,
+	// closes the (nil) old executor, builds + starts the new executor, and
+	// re-sends the original prompt. Send blocks on the new executor's ready
+	// channel which is closed by cmd.Start, so this returns once fake-claude
+	// is spawned and the prompt is delivered.
+	if err := actor.HandlePermissionResponse(&protocol.PermissionResponse{
+		Type:      protocol.MsgTypePermissionResponse,
+		SessionID: "s-restart",
+		ChannelID: "c",
+		RequestID: "toolu_001",
+		Approved:  true,
+	}); err != nil {
+		t.Fatalf("HandlePermissionResponse: %v", err)
 	}
 
-	// pendingDenial is cleared before RestartWithGrant is even called
+	// allowedTools is now updated. Read via the lock-protected accessor.
+	allowed := actor.AllowedTools()
+	if len(allowed) != 1 || allowed[0] != "Write" {
+		t.Errorf("allowedTools: %+v", allowed)
+	}
+
+	// pendingDenial is cleared before RestartWithGrant is even called.
 	if pd, ok := actor.pendingDenial.Load().(*pendingDenial); ok && pd != nil {
 		t.Error("pending denial should be cleared after approval")
-	}
-
-	// Cancel by closing the actor — this causes the executor's context to die
-	// and unblocks the goroutine.
-	actor.Stop()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Error("HandlePermissionResponse goroutine did not return after Stop")
 	}
 }
 

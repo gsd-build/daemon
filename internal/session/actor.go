@@ -37,20 +37,34 @@ type Options struct {
 }
 
 // Actor drives a single Claude session.
+//
+// Concurrency model: the actor's mutable executor lifecycle (executor pointer,
+// the goroutine running it, allowedTools) is protected by mu. Callers from
+// arbitrary goroutines (the relay loop's HandlePermissionResponse, the daemon
+// shutdown path's Stop, the request handler's SendTask) must go through
+// snapshotExecutor / setExecutor / withLock helpers rather than touching
+// a.executor directly.
 type Actor struct {
-	opts     Options
-	log      *wal.Log
-	executor *claude.Executor
+	opts Options
+	log  *wal.Log
 
-	seq          atomic.Int64
-	taskInFlight atomic.Value // *taskContext
+	mu       sync.Mutex
+	executor *claude.Executor
+	// runDone is closed when the goroutine running the *current* executor
+	// returns. RestartWithGrant waits on the previous runDone before starting
+	// a new executor so that the old Start goroutine cannot deliver events
+	// (via handleEvent) concurrently with the new one.
+	runDone      chan struct{}
+	allowedTools []string // accumulates per session as user grants permissions
+
+	seq           atomic.Int64
+	taskInFlight  atomic.Value // *taskContext
 	pendingDenial atomic.Value // *pendingDenial
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
 
 	claudeSessionID atomic.Value // string
-	allowedTools    []string     // accumulates per session as user grants permissions
 }
 
 type taskContext struct {
@@ -91,15 +105,39 @@ func NewActor(opts Options) (*Actor, error) {
 		opts:     opts,
 		log:      log,
 		executor: executor,
-		stopCh:   make(chan struct{}),
+		// runDone starts nil; Run() installs a fresh channel when it begins
+		// running the executor and closes it on return. This way actors that
+		// were constructed but never Run() (e.g. in tests that drive the actor
+		// directly) don't trip restart logic that waits for a goroutine that
+		// will never exist.
+		runDone: nil,
+		stopCh:  make(chan struct{}),
 	}
 	a.seq.Store(opts.StartSeq)
 	return a, nil
 }
 
+// snapshotExecutor returns the current executor pointer under lock. The caller
+// must not hold the executor across the kind of long blocking operations
+// (Start) that need to coordinate with restart — but it is safe for Send/Close.
+func (a *Actor) snapshotExecutor() *claude.Executor {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.executor
+}
+
 // LastSequence returns the highest sequence number emitted so far.
 func (a *Actor) LastSequence() int64 {
 	return a.seq.Load()
+}
+
+// AllowedTools returns a snapshot of the per-session granted tools list.
+func (a *Actor) AllowedTools() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]string, len(a.allowedTools))
+	copy(out, a.allowedTools)
+	return out
 }
 
 // SendTask writes a user message into Claude. The actor must already be running.
@@ -127,11 +165,16 @@ func (a *Actor) SendTask(task protocol.Task) error {
 		return fmt.Errorf("send taskStarted: %w", err)
 	}
 
-	return a.executor.Send(task.Prompt)
+	return a.snapshotExecutor().Send(task.Prompt)
 }
 
 // Run starts the Claude process and forwards events to the relay.
 // Blocks until ctx is canceled or Stop is called.
+//
+// Run owns the *initial* executor goroutine. RestartWithGrant takes over
+// ownership of subsequent executors via its own goroutines. In both cases the
+// goroutine signals completion by closing a.runDone (which RestartWithGrant
+// swaps for a fresh channel before starting the next executor).
 func (a *Actor) Run(ctx context.Context) error {
 	stopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -143,7 +186,16 @@ func (a *Actor) Run(ctx context.Context) error {
 		}
 	}()
 
-	return a.executor.Start(stopCtx, func(e claude.Event) error {
+	a.mu.Lock()
+	exec := a.executor
+	if a.runDone == nil {
+		a.runDone = make(chan struct{})
+	}
+	done := a.runDone
+	a.mu.Unlock()
+	defer close(done)
+
+	return exec.Start(stopCtx, func(e claude.Event) error {
 		return a.handleEvent(e)
 	})
 }
@@ -313,8 +365,22 @@ func (a *Actor) GetClaudeSessionID() string {
 // RestartWithGrant kills the current executor and spawns a fresh one with the
 // new tool added to the allow list and --resume to the existing claude session.
 // Then re-sends the original prompt that triggered the denial.
+//
+// Concurrency: this method is the only path that mutates a.executor and
+// a.allowedTools after construction. It serializes by holding a.mu around the
+// swap, then releases the lock and waits for the previous executor goroutine
+// to fully exit before launching the new one. This guarantees handleEvent is
+// never called concurrently from two different executors.
 func (a *Actor) RestartWithGrant(ctx context.Context, toolName, originalPrompt string) error {
-	// Add the tool (dedup)
+	// Snapshot the claude session id (no lock needed — atomic.Value).
+	claudeSess := a.GetClaudeSessionID()
+	if claudeSess == "" {
+		return fmt.Errorf("no claude session id to resume")
+	}
+
+	// Phase 1: under the lock, mutate allowedTools, capture the old executor
+	// and its done channel, and install a fresh runDone for the new goroutine.
+	a.mu.Lock()
 	already := false
 	for _, t := range a.allowedTools {
 		if t == toolName {
@@ -326,19 +392,25 @@ func (a *Actor) RestartWithGrant(ctx context.Context, toolName, originalPrompt s
 		a.allowedTools = append(a.allowedTools, toolName)
 	}
 
-	// Snapshot the claude session id
-	claudeSess := a.GetClaudeSessionID()
-	if claudeSess == "" {
-		return fmt.Errorf("no claude session id to resume")
+	oldExec := a.executor
+	oldDone := a.runDone
+	a.runDone = make(chan struct{})
+	newDone := a.runDone
+	allowedSnapshot := append([]string{}, a.allowedTools...)
+	a.mu.Unlock()
+
+	// Phase 2: outside the lock, close the old executor's stdin (causing
+	// claude to exit and the old Start goroutine to return) and wait for
+	// that goroutine to actually finish.
+	if oldExec != nil {
+		_ = oldExec.Close()
+	}
+	if oldDone != nil {
+		<-oldDone
 	}
 
-	// Close the old executor
-	if a.executor != nil {
-		_ = a.executor.Close()
-	}
-
-	// Build a new executor with --resume + --allowedTools
-	a.executor = claude.NewExecutor(claude.Options{
+	// Phase 3: build the new executor and install it under the lock.
+	newExec := claude.NewExecutor(claude.Options{
 		BinaryPath:     a.opts.BinaryPath,
 		CWD:            a.opts.CWD,
 		Model:          a.opts.Model,
@@ -346,21 +418,26 @@ func (a *Actor) RestartWithGrant(ctx context.Context, toolName, originalPrompt s
 		PermissionMode: a.opts.PermissionMode,
 		SystemPrompt:   a.opts.SystemPrompt,
 		ResumeSession:  claudeSess,
-		AllowedTools:   append([]string{}, a.allowedTools...),
+		AllowedTools:   allowedSnapshot,
 	})
 
-	// Start the new process in a goroutine
+	a.mu.Lock()
+	a.executor = newExec
+	a.mu.Unlock()
+
+	// Phase 4: launch the new executor's Start in a goroutine and arrange
+	// for newDone to close when it returns.
 	go func() {
-		_ = a.executor.Start(ctx, func(e claude.Event) error {
+		defer close(newDone)
+		_ = newExec.Start(ctx, func(e claude.Event) error {
 			return a.handleEvent(e)
 		})
 	}()
 
-	// Give the process a moment to spin up
-	time.Sleep(500 * time.Millisecond)
-
-	// Re-send the original prompt
-	return a.executor.Send(originalPrompt)
+	// Phase 5: re-send the original prompt. Send blocks on the executor's
+	// internal `ready` channel, which is closed once cmd.Start has opened
+	// stdin — no arbitrary sleep needed.
+	return newExec.Send(originalPrompt)
 }
 
 // HandlePermissionResponse processes a permission response from the relay.
@@ -395,7 +472,7 @@ func (a *Actor) HandleQuestionResponse(resp *protocol.QuestionResponse) error {
 
 	a.pendingDenial.Store((*pendingDenial)(nil))
 	answerMsg := fmt.Sprintf("My answer: %s", resp.Answer)
-	if err := a.executor.Send(answerMsg); err != nil {
+	if err := a.snapshotExecutor().Send(answerMsg); err != nil {
 		return fmt.Errorf("send answer to claude: %w", err)
 	}
 
@@ -417,7 +494,7 @@ func (a *Actor) HandleQuestionResponse(resp *protocol.QuestionResponse) error {
 func (a *Actor) handleDeny(pd *pendingDenial, reason string) error {
 	a.pendingDenial.Store((*pendingDenial)(nil))
 	denyMsg := fmt.Sprintf("The previous tool request was denied: %s. Please continue without using that tool.", reason)
-	if err := a.executor.Send(denyMsg); err != nil {
+	if err := a.snapshotExecutor().Send(denyMsg); err != nil {
 		return err
 	}
 
@@ -440,8 +517,8 @@ func (a *Actor) Stop() error {
 	a.stopOnce.Do(func() {
 		close(a.stopCh)
 	})
-	if a.executor != nil {
-		_ = a.executor.Close()
+	if exec := a.snapshotExecutor(); exec != nil {
+		_ = exec.Close()
 	}
 	return a.log.Close()
 }
