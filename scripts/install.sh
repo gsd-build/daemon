@@ -3,9 +3,11 @@
 # Usage: curl -fsSL https://install.gsd.build | sh
 #
 # Environment variables (advanced):
-#   GSD_INSTALL_DIR  - override install directory (default: $HOME/.gsd-cloud/bin)
-#   GSD_REPO         - override the GitHub repo (default: gsd-build/cloud.gsd.build)
-#   GSD_VERSION      - install a specific version tag (default: latest daemon/v*)
+#   GSD_INSTALL_DIR    - override install directory (default: $HOME/.gsd-cloud/bin)
+#   GSD_REPO           - override the GitHub repo (default: gsd-build/cloud.gsd.build)
+#   GSD_VERSION        - install a specific version tag (default: latest daemon/v*)
+#   GSD_API_BASE       - override GitHub API base (testing only)
+#   GSD_DOWNLOAD_BASE  - override release asset base URL (testing only)
 
 set -eu
 
@@ -68,7 +70,8 @@ fetch_latest_tag() {
         return
     fi
     # Use the GitHub Releases API. Filter to tags starting with "daemon/v".
-    api_url="https://api.github.com/repos/${REPO}/releases"
+    api_base="${GSD_API_BASE:-https://api.github.com}"
+    api_url="${api_base}/repos/${REPO}/releases"
     json=$(curl -fsSL "$api_url") || err "failed to fetch release list from $api_url"
     # Pick the first tag_name that starts with daemon/v
     tag=$(printf '%s' "$json" | grep -o '"tag_name": *"daemon/v[^"]*"' | head -n1 | sed 's/.*"daemon\/v\([^"]*\)".*/daemon\/v\1/')
@@ -157,7 +160,7 @@ main() {
     say "  version:  ${VERSION_TAG}"
 
     ASSET_NAME="gsd-cloud-${VERSION_TAG}-${OS}-${ARCH}"
-    DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/${TAG}"
+    DOWNLOAD_BASE="${GSD_DOWNLOAD_BASE:-https://github.com/${REPO}/releases/download/${TAG}}"
     BIN_URL="${DOWNLOAD_BASE}/${ASSET_NAME}"
     SUM_URL="${BIN_URL}.sha256"
 
