@@ -31,11 +31,20 @@ type Daemon struct {
 
 // buildRelayURL constructs the WebSocket URL with machineId + token query params.
 // Both must be URL-escaped because tokens may contain "/" or "+" characters.
+// Preserves any existing query params already present on cfg.RelayURL.
 func buildRelayURL(cfg *config.Config) string {
-	q := url.Values{}
+	u, err := url.Parse(cfg.RelayURL)
+	if err != nil {
+		// cfg.RelayURL is validated at load time; if parsing fails here,
+		// fall back to raw concat so callers get a visible failure rather
+		// than a silent wrong URL.
+		return cfg.RelayURL + "?machineId=" + url.QueryEscape(cfg.MachineID) + "&token=" + url.QueryEscape(cfg.AuthToken)
+	}
+	q := u.Query()
 	q.Set("machineId", cfg.MachineID)
 	q.Set("token", cfg.AuthToken)
-	return cfg.RelayURL + "?" + q.Encode()
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // New constructs a Daemon.
