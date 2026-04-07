@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,22 +23,19 @@ type StubRelay struct {
 
 	server *httptest.Server
 
-	mu         sync.Mutex
-	received   []*protocol.Envelope
-	sendQueue  [][]byte
-	connCh     chan struct{}
-	connected  bool
-	conn       *websocket.Conn
-	clientDone chan struct{}
+	mu        sync.Mutex
+	received  []*protocol.Envelope
+	sendQueue [][]byte
+	connCh    chan struct{}
+	conn      *websocket.Conn
 }
 
 // NewStubRelay starts a stub relay on a random local port.
 func NewStubRelay(t *testing.T) *StubRelay {
 	t.Helper()
 	s := &StubRelay{
-		t:          t,
-		connCh:     make(chan struct{}, 1),
-		clientDone: make(chan struct{}),
+		t:      t,
+		connCh: make(chan struct{}, 1),
 	}
 
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +54,6 @@ func NewStubRelay(t *testing.T) *StubRelay {
 
 		s.mu.Lock()
 		s.conn = c
-		s.connected = true
 		s.mu.Unlock()
 
 		select {
@@ -93,11 +90,8 @@ func NewStubRelay(t *testing.T) *StubRelay {
 		}()
 
 		for {
-			rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
-			_, data, err := c.Read(rctx)
-			rcancel()
+			_, data, err := c.Read(ctx)
 			if err != nil {
-				close(s.clientDone)
 				return
 			}
 			env, err := protocol.ParseEnvelope(data)
@@ -111,16 +105,14 @@ func NewStubRelay(t *testing.T) *StubRelay {
 		}
 	}))
 
+	t.Cleanup(func() { s.Close() })
+
 	return s
 }
 
 // URL returns the ws:// form of the stub relay's HTTP URL.
 func (s *StubRelay) URL() string {
-	u := s.server.URL
-	if len(u) > 4 && u[:4] == "http" {
-		return "ws" + u[4:]
-	}
-	return u
+	return strings.Replace(s.server.URL, "http", "ws", 1)
 }
 
 // WaitForConnection blocks until a daemon connects, or returns an error on timeout.
@@ -133,16 +125,16 @@ func (s *StubRelay) WaitForConnection(timeout time.Duration) error {
 	}
 }
 
-// Send enqueues an envelope to be written to the connected daemon. The
-// envelope's Payload is marshaled directly because protocol-go's Envelope
-// is the parsed-form wrapper, not the wire format itself.
-func (s *StubRelay) Send(env *protocol.Envelope) error {
-	if env == nil {
-		return fmt.Errorf("stub relay: nil envelope")
+// Send enqueues a payload to be written to the connected daemon. The payload
+// is marshaled with encoding/json and sent as a single text frame; callers
+// pass concrete protocol message structs (e.g. *protocol.Welcome) directly.
+func (s *StubRelay) Send(payload any) error {
+	if payload == nil {
+		return fmt.Errorf("stub relay: nil payload")
 	}
-	data, err := json.Marshal(env.Payload)
+	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("stub relay: marshal envelope payload: %w", err)
+		return fmt.Errorf("stub relay: marshal payload: %w", err)
 	}
 	s.mu.Lock()
 	s.sendQueue = append(s.sendQueue, data)
