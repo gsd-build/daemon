@@ -22,10 +22,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-          cache-dependency-path: apps/daemon/go.sum
 
       - name: Run daemon tests
-        working-directory: apps/daemon
         run: go test ./...
 
   build:
@@ -57,7 +55,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-          cache-dependency-path: apps/daemon/go.sum
 
       - name: Extract version
         id: version
@@ -72,7 +69,6 @@ jobs:
           echo "version_no_v=${VERSION#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build binary
-        working-directory: apps/daemon
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
@@ -82,13 +78,13 @@ jobs:
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           COMMIT="${GITHUB_SHA::7}"
           BIN_NAME="gsd-cloud-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
-          mkdir -p ../../dist
+          mkdir -p dist
           go build \
             -trimpath \
-            -ldflags "-s -w -X github.com/gsd-cloud/daemon/cmd.Version=${VERSION} -X github.com/gsd-cloud/daemon/cmd.Commit=${COMMIT} -X github.com/gsd-cloud/daemon/cmd.BuildDate=${BUILD_DATE}" \
-            -o "../../dist/${BIN_NAME}" \
+            -ldflags "-s -w -X github.com/gsd-build/daemon/cmd.Version=${VERSION} -X github.com/gsd-build/daemon/cmd.Commit=${COMMIT} -X github.com/gsd-build/daemon/cmd.BuildDate=${BUILD_DATE}" \
+            -o "dist/${BIN_NAME}" \
             ./
-          ls -la "../../dist/${BIN_NAME}"
+          ls -la "dist/${BIN_NAME}"
 
       - name: Compute SHA256
         run: |

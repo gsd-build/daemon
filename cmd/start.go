@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/gsd-cloud/daemon/internal/config"
-	"github.com/gsd-cloud/daemon/internal/loop"
+	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/loop"
 	"github.com/spf13/cobra"
 )
 

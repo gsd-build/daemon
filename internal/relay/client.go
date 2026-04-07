@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	protocol "github.com/gsd-cloud/protocol-go"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 // Config is immutable per-connection settings.

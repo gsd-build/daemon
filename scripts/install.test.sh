@@ -41,9 +41,9 @@ VERSION="v0.0.1-test"
 ASSET_NAME="gsd-cloud-${VERSION}-${OS}-${ARCH}"
 
 echo "Building daemon binary for ${OS}/${ARCH}..."
-if ! (cd "$REPO_ROOT/apps/daemon" && \
+if ! (cd "$REPO_ROOT" && \
     GOOS="$OS" GOARCH="$ARCH" CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X github.com/gsd-cloud/daemon/cmd.Version=0.0.1-test -X github.com/gsd-cloud/daemon/cmd.Commit=test -X github.com/gsd-cloud/daemon/cmd.BuildDate=$(date -u +%Y-%m-%d)" \
+    -ldflags "-s -w -X github.com/gsd-build/daemon/cmd.Version=0.0.1-test -X github.com/gsd-build/daemon/cmd.Commit=test -X github.com/gsd-build/daemon/cmd.BuildDate=$(date -u +%Y-%m-%d)" \
     -o "$DIST_DIR/$ASSET_NAME" ./); then
     echo "FAIL: go build failed for ${OS}/${ARCH}"
     exit 1

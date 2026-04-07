@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	protocol "github.com/gsd-cloud/protocol-go"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 // BrowseDir lists entries in the given absolute path.

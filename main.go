@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/gsd-cloud/daemon/cmd"
+	"github.com/gsd-build/daemon/cmd"
 )
 
 func main() {

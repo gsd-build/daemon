@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/gsd-cloud/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/config"
 )
 
 func TestHandleAckPlaceholder(t *testing.T) {

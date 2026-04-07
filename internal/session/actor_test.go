@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	protocol "github.com/gsd-cloud/protocol-go"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 func buildFakeClaude(t *testing.T) string {

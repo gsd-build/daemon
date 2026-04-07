@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/gsd-cloud/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/config"
 	"github.com/spf13/cobra"
 )
 

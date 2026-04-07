@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gsd-cloud/daemon/internal/claude"
-	"github.com/gsd-cloud/daemon/internal/wal"
-	protocol "github.com/gsd-cloud/protocol-go"
+	"github.com/gsd-build/daemon/internal/claude"
+	"github.com/gsd-build/daemon/internal/wal"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 // RelaySender is the minimal interface the actor needs to push events to the relay.

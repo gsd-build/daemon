@@ -12,12 +12,12 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/gsd-cloud/daemon/internal/config"
-	"github.com/gsd-cloud/daemon/internal/fs"
-	"github.com/gsd-cloud/daemon/internal/relay"
-	"github.com/gsd-cloud/daemon/internal/session"
-	"github.com/gsd-cloud/daemon/internal/wal"
-	protocol "github.com/gsd-cloud/protocol-go"
+	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/fs"
+	"github.com/gsd-build/daemon/internal/relay"
+	"github.com/gsd-build/daemon/internal/session"
+	"github.com/gsd-build/daemon/internal/wal"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 // Daemon is the running daemon state.

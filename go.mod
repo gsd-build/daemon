@@ -1,14 +1,14 @@
-module github.com/gsd-cloud/daemon
+module github.com/gsd-build/daemon
 
 go 1.25.0
 
-require github.com/gsd-cloud/protocol-go v0.0.0
-
 require (
-	github.com/coder/websocket v1.8.14 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/coder/websocket v1.8.14
+	github.com/gsd-build/protocol-go v0.1.0
+	github.com/spf13/cobra v1.10.2
 )
 
-replace github.com/gsd-cloud/protocol-go => ../../packages/protocol-go
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.9 // indirect
+)

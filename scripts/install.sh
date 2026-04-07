@@ -4,14 +4,14 @@
 #
 # Environment variables (advanced):
 #   GSD_INSTALL_DIR    - override install directory (default: $HOME/.gsd-cloud/bin)
-#   GSD_REPO           - override the GitHub repo (default: gsd-build/cloud.gsd.build)
+#   GSD_REPO           - override the GitHub repo (default: gsd-build/daemon)
 #   GSD_VERSION        - install a specific version tag (default: latest daemon/v*)
 #   GSD_API_BASE       - override GitHub API base (testing only; trusts env)
 #   GSD_DOWNLOAD_BASE  - override release asset base URL (testing only; trusts env)
 
 set -eu
 
-REPO="${GSD_REPO:-gsd-build/cloud.gsd.build}"
+REPO="${GSD_REPO:-gsd-build/daemon}"
 INSTALL_DIR="${GSD_INSTALL_DIR:-$HOME/.gsd-cloud/bin}"
 BIN_NAME="gsd-cloud"
 
