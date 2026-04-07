@@ -47,8 +47,14 @@ func buildRelayURL(cfg *config.Config) string {
 	return u.String()
 }
 
-// New constructs a Daemon.
+// New constructs a Daemon that spawns the real `claude` CLI on PATH.
 func New(cfg *config.Config, version string) (*Daemon, error) {
+	return NewWithBinaryPath(cfg, version, "claude")
+}
+
+// NewWithBinaryPath constructs a Daemon that spawns the given binary instead
+// of the default `claude`. Used by integration tests to inject fake-claude.
+func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon, error) {
 	home, err := configHomeDir()
 	if err != nil {
 		return nil, err
@@ -64,7 +70,7 @@ func New(cfg *config.Config, version string) (*Daemon, error) {
 		Arch:          runtime.GOARCH,
 	})
 
-	manager := session.NewManager(walDir, "claude", client)
+	manager := session.NewManager(walDir, binaryPath, client)
 
 	return &Daemon{
 		cfg:     cfg,
