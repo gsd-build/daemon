@@ -79,8 +79,13 @@ func New(cfg *config.Config, version string) (*Daemon, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	d.client.SetHandler(d.handleMessage)
 
-	// Collect last sequences from local WAL (for now: nothing since no sessions yet)
-	lastSeqs := d.manager.LastSequences()
+	// Scan WAL directory to recover high-water marks per session from disk.
+	// On cold start the actor pool is empty, so we read sequence numbers
+	// directly from persisted WAL files rather than in-memory actor state.
+	lastSeqs, err := wal.ScanDirectory(d.walDir)
+	if err != nil {
+		return fmt.Errorf("scan wal directory: %w", err)
+	}
 
 	welcome, err := d.client.Connect(ctx, lastSeqs)
 	if err != nil {
