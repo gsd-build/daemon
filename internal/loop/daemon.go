@@ -4,6 +4,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/gsd-cloud/daemon/internal/fs"
 	"github.com/gsd-cloud/daemon/internal/relay"
 	"github.com/gsd-cloud/daemon/internal/session"
+	"github.com/gsd-cloud/daemon/internal/wal"
 	protocol "github.com/gsd-cloud/protocol-go"
 )
 
@@ -187,8 +189,25 @@ func (d *Daemon) handleAck(msg *protocol.Ack) error {
 }
 
 func (d *Daemon) handleReplay(msg *protocol.ReplayRequest) error {
-	// TODO: read WAL file for session and replay entries > msg.FromSequence
-	// Placeholder until task 12 wires this in fully
+	// Read the WAL for this session and resend all entries with seq > fromSequence
+	walPath := filepath.Join(d.walDir, msg.SessionID+".jsonl")
+	log, err := wal.Open(walPath)
+	if err != nil {
+		return fmt.Errorf("open wal: %w", err)
+	}
+	defer log.Close()
+
+	entries, err := log.ReadFrom(msg.FromSequence)
+	if err != nil {
+		return fmt.Errorf("read wal: %w", err)
+	}
+
+	for _, e := range entries {
+		// Each entry is a serialized Stream frame; send it back as-is
+		if err := d.client.Send(json.RawMessage(e.Data)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
