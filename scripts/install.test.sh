@@ -34,14 +34,20 @@ case "$OS" in
     *) echo "test only runs on darwin/linux"; exit 0 ;;
 esac
 
+command -v go >/dev/null 2>&1 || { echo "SKIP: go not installed"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
+
 VERSION="v0.0.1-test"
 ASSET_NAME="gsd-cloud-${VERSION}-${OS}-${ARCH}"
 
 echo "Building daemon binary for ${OS}/${ARCH}..."
-(cd "$REPO_ROOT/apps/daemon" && \
+if ! (cd "$REPO_ROOT/apps/daemon" && \
     GOOS="$OS" GOARCH="$ARCH" CGO_ENABLED=0 go build \
-    -ldflags "-X github.com/gsd-cloud/daemon/cmd.Version=0.0.1-test -X github.com/gsd-cloud/daemon/cmd.Commit=test -X github.com/gsd-cloud/daemon/cmd.BuildDate=2026-04-06" \
-    -o "$DIST_DIR/$ASSET_NAME" ./)
+    -ldflags "-s -w -X github.com/gsd-cloud/daemon/cmd.Version=0.0.1-test -X github.com/gsd-cloud/daemon/cmd.Commit=test -X github.com/gsd-cloud/daemon/cmd.BuildDate=$(date -u +%Y-%m-%d)" \
+    -o "$DIST_DIR/$ASSET_NAME" ./); then
+    echo "FAIL: go build failed for ${OS}/${ARCH}"
+    exit 1
+fi
 
 echo "Computing checksum..."
 if command -v sha256sum >/dev/null 2>&1; then

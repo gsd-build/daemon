@@ -6,8 +6,8 @@
 #   GSD_INSTALL_DIR    - override install directory (default: $HOME/.gsd-cloud/bin)
 #   GSD_REPO           - override the GitHub repo (default: gsd-build/cloud.gsd.build)
 #   GSD_VERSION        - install a specific version tag (default: latest daemon/v*)
-#   GSD_API_BASE       - override GitHub API base (testing only)
-#   GSD_DOWNLOAD_BASE  - override release asset base URL (testing only)
+#   GSD_API_BASE       - override GitHub API base (testing only; trusts env)
+#   GSD_DOWNLOAD_BASE  - override release asset base URL (testing only; trusts env)
 
 set -eu
 
