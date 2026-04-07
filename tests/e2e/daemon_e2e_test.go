@@ -5,6 +5,10 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +139,139 @@ func TestE2EHappyPath(t *testing.T) {
 	select {
 	case <-runErrCh:
 		// Daemon returned (expected: ctx canceled / read error).
+	case <-time.After(5 * time.Second):
+		t.Fatalf("daemon did not shut down within 5s after cancel")
+	}
+}
+
+func TestE2EPermissionFlow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e integration test in short mode")
+	}
+
+	const (
+		machineID = "test-machine-perm"
+		authToken = "test-token-perm"
+		sessionID = "test-session-perm"
+		taskID    = "task-perm-1"
+		channelID = "ch-perm"
+	)
+
+	relay := NewStubRelay(t)
+
+	home := makeTestHome(t)
+	t.Setenv("HOME", home)
+
+	fakeClaude := buildFakeClaude(t, home)
+
+	// fake-claude reads these env vars; the daemon's executor inherits the
+	// parent process environment when Options.Env is nil, so t.Setenv reaches
+	// the spawned subprocess.
+	argsFile := filepath.Join(home, "fake-claude-args.json")
+	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
+	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
+
+	cfg := makeTestConfig(relay.URL(), machineID, authToken)
+	cwd := t.TempDir()
+
+	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude)
+	if err != nil {
+		t.Fatalf("loop.NewWithBinaryPath: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- daemon.Run(ctx)
+	}()
+
+	if err := relay.WaitForConnection(5 * time.Second); err != nil {
+		t.Fatalf("waiting for daemon connection: %v", err)
+	}
+
+	if _, err := relay.WaitForFrame(protocol.MsgTypeHello, 3*time.Second); err != nil {
+		t.Fatalf("waiting for Hello: %v", err)
+	}
+
+	if err := relay.Send(&protocol.Welcome{
+		Type:                    protocol.MsgTypeWelcome,
+		AckedSequencesBySession: map[string]int64{},
+	}); err != nil {
+		t.Fatalf("send Welcome: %v", err)
+	}
+
+	if err := relay.Send(&protocol.Task{
+		Type:      protocol.MsgTypeTask,
+		TaskID:    taskID,
+		SessionID: sessionID,
+		ChannelID: channelID,
+		Prompt:    "Write a file please",
+		CWD:       cwd,
+	}); err != nil {
+		t.Fatalf("send Task: %v", err)
+	}
+
+	// Daemon should forward the permission_denial as a PermissionRequest.
+	permEnv, err := relay.WaitForFrame(protocol.MsgTypePermissionRequest, 10*time.Second)
+	if err != nil {
+		t.Fatalf("waiting for PermissionRequest: %v", err)
+	}
+	permReq, ok := permEnv.Payload.(*protocol.PermissionRequest)
+	if !ok {
+		t.Fatalf("PermissionRequest payload type: got %T", permEnv.Payload)
+	}
+	if permReq.ToolName != "Write" {
+		t.Fatalf("PermissionRequest.ToolName: got %q want %q", permReq.ToolName, "Write")
+	}
+
+	// Approve the permission.
+	if err := relay.Send(&protocol.PermissionResponse{
+		Type:      protocol.MsgTypePermissionResponse,
+		ChannelID: channelID,
+		SessionID: sessionID,
+		RequestID: permReq.RequestID,
+		Approved:  true,
+	}); err != nil {
+		t.Fatalf("send PermissionResponse: %v", err)
+	}
+
+	// After approval, the daemon should re-spawn fake-claude with --allowedTools
+	// and ultimately emit TaskComplete.
+	completeEnv, err := relay.WaitForFrame(protocol.MsgTypeTaskComplete, 15*time.Second)
+	if err != nil {
+		t.Fatalf("waiting for TaskComplete after approval: %v", err)
+	}
+	if _, ok := completeEnv.Payload.(*protocol.TaskComplete); !ok {
+		t.Fatalf("TaskComplete payload type: got %T", completeEnv.Payload)
+	}
+
+	// Verify the second fake-claude invocation included --allowedTools Write.
+	// FAKE_CLAUDE_ARGS_FILE is overwritten on each invocation, so the file
+	// reflects the most recent (post-approval) call.
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read fake-claude args file: %v", err)
+	}
+	var args []string
+	if err := json.Unmarshal(argsData, &args); err != nil {
+		t.Fatalf("unmarshal fake-claude args: %v", err)
+	}
+	foundAllowed := false
+	for i, a := range args {
+		if a == "--allowedTools" && i+1 < len(args) && strings.Contains(args[i+1], "Write") {
+			foundAllowed = true
+			break
+		}
+	}
+	if !foundAllowed {
+		t.Fatalf("expected post-approval fake-claude invocation to include --allowedTools Write, got args: %v", args)
+	}
+
+	cancel()
+	select {
+	case <-runErrCh:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("daemon did not shut down within 5s after cancel")
 	}
