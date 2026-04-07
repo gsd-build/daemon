@@ -60,7 +60,7 @@ func makeTestConfig(relayURL, machineID, authToken string) *config.Config {
 	return &config.Config{
 		MachineID: machineID,
 		AuthToken: authToken,
-		ServerURL: "http://127.0.0.1:0",
+		ServerURL: "",
 		RelayURL:  relayURL,
 	}
 }
