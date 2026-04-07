@@ -50,6 +50,7 @@ type Actor struct {
 	stopCh   chan struct{}
 
 	claudeSessionID atomic.Value // string
+	allowedTools    []string     // accumulates per session as user grants permissions
 }
 
 type taskContext struct {
@@ -309,8 +310,61 @@ func (a *Actor) GetClaudeSessionID() string {
 	return ""
 }
 
+// RestartWithGrant kills the current executor and spawns a fresh one with the
+// new tool added to the allow list and --resume to the existing claude session.
+// Then re-sends the original prompt that triggered the denial.
+func (a *Actor) RestartWithGrant(ctx context.Context, toolName, originalPrompt string) error {
+	// Add the tool (dedup)
+	already := false
+	for _, t := range a.allowedTools {
+		if t == toolName {
+			already = true
+			break
+		}
+	}
+	if !already {
+		a.allowedTools = append(a.allowedTools, toolName)
+	}
+
+	// Snapshot the claude session id
+	claudeSess := a.GetClaudeSessionID()
+	if claudeSess == "" {
+		return fmt.Errorf("no claude session id to resume")
+	}
+
+	// Close the old executor
+	if a.executor != nil {
+		_ = a.executor.Close()
+	}
+
+	// Build a new executor with --resume + --allowedTools
+	a.executor = claude.NewExecutor(claude.Options{
+		BinaryPath:     a.opts.BinaryPath,
+		CWD:            a.opts.CWD,
+		Model:          a.opts.Model,
+		Effort:         a.opts.Effort,
+		PermissionMode: a.opts.PermissionMode,
+		SystemPrompt:   a.opts.SystemPrompt,
+		ResumeSession:  claudeSess,
+		AllowedTools:   append([]string{}, a.allowedTools...),
+	})
+
+	// Start the new process in a goroutine
+	go func() {
+		_ = a.executor.Start(ctx, func(e claude.Event) error {
+			return a.handleEvent(e)
+		})
+	}()
+
+	// Give the process a moment to spin up
+	time.Sleep(500 * time.Millisecond)
+
+	// Re-send the original prompt
+	return a.executor.Send(originalPrompt)
+}
+
 // HandlePermissionResponse processes a permission response from the relay.
-// On Approve: schedules an executor restart with --allowedTools (Task 16).
+// On Approve: restarts the executor with --allowedTools + --resume and re-sends the original prompt.
 // On Deny: sends a follow-up user message saying the request was denied.
 func (a *Actor) HandlePermissionResponse(resp *protocol.PermissionResponse) error {
 	pdAny := a.pendingDenial.Load()
@@ -320,9 +374,11 @@ func (a *Actor) HandlePermissionResponse(resp *protocol.PermissionResponse) erro
 	}
 
 	if resp.Approved {
-		// Approve path: restart the executor with --allowedTools.
-		// Implementation lives in Task 16. For now, treat as deny.
-		return a.handleDeny(pd, "user approved but restart-on-approve not yet implemented")
+		a.pendingDenial.Store((*pendingDenial)(nil))
+		if len(pd.Denials) == 0 {
+			return fmt.Errorf("pending denial has no tool names")
+		}
+		return a.RestartWithGrant(context.Background(), pd.Denials[0], pd.Prompt)
 	}
 
 	return a.handleDeny(pd, "user denied the permission request")

@@ -18,6 +18,7 @@ type Options struct {
 	PermissionMode string
 	SystemPrompt   string
 	ResumeSession  string   // claude session id to resume; empty = new session
+	AllowedTools   []string // tools to pass via --allowedTools; accumulates as user grants
 	Env            []string // extra environment variables (e.g. for tests); nil = inherit
 }
 
@@ -77,6 +78,9 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 	}
 	if e.opts.ResumeSession != "" {
 		args = append(args, "--resume", e.opts.ResumeSession)
+	}
+	for _, tool := range e.opts.AllowedTools {
+		args = append(args, "--allowedTools", tool)
 	}
 
 	cmd := exec.CommandContext(ctx, e.opts.BinaryPath, args...)

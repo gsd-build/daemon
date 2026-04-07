@@ -303,6 +303,74 @@ func TestActorSynthesizesQuestionFromAskUserQuestionDenial(t *testing.T) {
 	}
 }
 
+func TestActorRestartsWithAllowedToolsOnApproval(t *testing.T) {
+	relay := &fakeRelay{}
+	tmpDir := t.TempDir()
+
+	actor, err := NewActor(Options{
+		SessionID: "s-restart",
+		ChannelID: "c",
+		WALPath:   filepath.Join(tmpDir, "s-restart.jsonl"),
+		Relay:     relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	// Seed state: an in-flight task, a known claude session id, and a pending denial.
+	actor.taskInFlight.Store(&taskContext{
+		TaskID:         "task-1",
+		OriginalPrompt: "Write hello.txt",
+	})
+	actor.claudeSessionID.Store("fake-session-123")
+	actor.pendingDenial.Store(&pendingDenial{
+		Denials: []string{"Write"},
+		TaskID:  "task-1",
+		Prompt:  "Write hello.txt",
+	})
+
+	// HandlePermissionResponse clears pendingDenial synchronously before calling
+	// RestartWithGrant, and RestartWithGrant appends to allowedTools synchronously
+	// before the executor.Send blocks waiting for the process to start.
+	// Run in a goroutine so the test isn't blocked by the Send waiting on a
+	// process that never starts (no BinaryPath set).
+	done := make(chan error, 1)
+	go func() {
+		done <- actor.HandlePermissionResponse(&protocol.PermissionResponse{
+			Type:      protocol.MsgTypePermissionResponse,
+			SessionID: "s-restart",
+			ChannelID: "c",
+			RequestID: "toolu_001",
+			Approved:  true,
+		})
+	}()
+
+	// Give RestartWithGrant time to update allowedTools (synchronous) before
+	// it reaches the 500ms sleep + Send (which will block on no process).
+	// 200ms is well within the window before the sleep fires.
+	time.Sleep(200 * time.Millisecond)
+
+	// allowedTools must be updated by now (happens before time.Sleep in RestartWithGrant)
+	if len(actor.allowedTools) != 1 || actor.allowedTools[0] != "Write" {
+		t.Errorf("allowedTools: %+v", actor.allowedTools)
+	}
+
+	// pendingDenial is cleared before RestartWithGrant is even called
+	if pd, ok := actor.pendingDenial.Load().(*pendingDenial); ok && pd != nil {
+		t.Error("pending denial should be cleared after approval")
+	}
+
+	// Cancel by closing the actor — this causes the executor's context to die
+	// and unblocks the goroutine.
+	actor.Stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("HandlePermissionResponse goroutine did not return after Stop")
+	}
+}
+
 func TestActorRejectsSendTaskWhenPendingDenial(t *testing.T) {
 	relay := &fakeRelay{}
 	tmpDir := t.TempDir()
