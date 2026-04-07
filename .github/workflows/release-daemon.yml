@@ -1,0 +1,130 @@
+name: Release daemon
+
+on:
+  push:
+    tags:
+      - "daemon/v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test daemon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: apps/daemon/go.sum
+
+      - name: Run daemon tests
+        working-directory: apps/daemon
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: darwin
+            arch: amd64
+            ext: ""
+          - os: darwin
+            arch: arm64
+            ext: ""
+          - os: linux
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
+          - os: windows
+            arch: amd64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: apps/daemon/go.sum
+
+      - name: Extract version
+        id: version
+        run: |
+          # tag is like "daemon/v0.1.0", strip "daemon/" prefix
+          VERSION="${GITHUB_REF#refs/tags/daemon/}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_no_v=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        working-directory: apps/daemon
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.version_no_v }}
+        run: |
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          COMMIT="${GITHUB_SHA::7}"
+          BIN_NAME="gsd-cloud-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          mkdir -p ../../dist
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/gsd-cloud/daemon/cmd.Version=${VERSION} -X github.com/gsd-cloud/daemon/cmd.Commit=${COMMIT} -X github.com/gsd-cloud/daemon/cmd.BuildDate=${BUILD_DATE}" \
+            -o "../../dist/${BIN_NAME}" \
+            ./
+          ls -la "../../dist/${BIN_NAME}"
+
+      - name: Compute SHA256
+        run: |
+          BIN_NAME="gsd-cloud-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          cd dist
+          sha256sum "${BIN_NAME}" > "${BIN_NAME}.sha256"
+          cat "${BIN_NAME}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/gsd-cloud-*-${{ matrix.os }}-${{ matrix.arch }}*
+            dist/gsd-cloud-*-${{ matrix.os }}-${{ matrix.arch }}*.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/daemon/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Daemon ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/gsd-cloud-*
