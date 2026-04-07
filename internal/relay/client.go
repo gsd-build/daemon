@@ -132,10 +132,22 @@ func (c *Client) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
 	go func() {
+		ticker := time.NewTicker(25 * time.Second)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-ticker.C:
+				c.mu.Lock()
+				conn := c.conn
+				c.mu.Unlock()
+				if conn == nil {
+					continue
+				}
+				pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				_ = conn.Ping(pingCtx)
+				cancel()
 			case buf := <-c.sendCh:
 				c.mu.Lock()
 				conn := c.conn
