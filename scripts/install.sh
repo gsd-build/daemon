@@ -58,6 +58,12 @@ detect_arch() {
 fetch_latest_tag() {
     # Returns the latest tag like "daemon/v0.1.0" — strips quotes and other JSON noise.
     if [ -n "${GSD_VERSION:-}" ]; then
+        version_check="${GSD_VERSION#v}"
+        case "$version_check" in
+            ""|*[!0-9A-Za-z.+-]*)
+                err "invalid GSD_VERSION: $GSD_VERSION"
+                ;;
+        esac
         printf 'daemon/%s' "$GSD_VERSION"
         return
     fi
@@ -69,6 +75,13 @@ fetch_latest_tag() {
     if [ -z "$tag" ]; then
         err "no daemon/v* release found in $REPO"
     fi
+    # Validate the version portion before we interpolate it into a URL.
+    version_check="${tag#daemon/v}"
+    case "$version_check" in
+        ""|*[!0-9A-Za-z.+-]*)
+            err "invalid release tag from $REPO: $tag"
+            ;;
+    esac
     printf '%s' "$tag"
 }
 
@@ -159,8 +172,12 @@ main() {
     verify_checksum "$TMPDIR_PATH/$ASSET_NAME" "$TMPDIR_PATH/$ASSET_NAME.sha256"
 
     mkdir -p "$INSTALL_DIR"
-    mv "$TMPDIR_PATH/$ASSET_NAME" "$INSTALL_DIR/$BIN_NAME"
-    chmod +x "$INSTALL_DIR/$BIN_NAME"
+    # Two-step install so an upgrade works even if the old binary is running.
+    # Stage in the install dir (same filesystem -> rename is atomic), then rename over.
+    NEW_BIN="$INSTALL_DIR/$BIN_NAME.new"
+    mv "$TMPDIR_PATH/$ASSET_NAME" "$NEW_BIN"
+    chmod +x "$NEW_BIN"
+    mv "$NEW_BIN" "$INSTALL_DIR/$BIN_NAME"
 
     say ""
     say "${bold}Installed!${reset}"
