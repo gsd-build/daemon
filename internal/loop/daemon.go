@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,6 +29,15 @@ type Daemon struct {
 	walDir  string
 }
 
+// buildRelayURL constructs the WebSocket URL with machineId + token query params.
+// Both must be URL-escaped because tokens may contain "/" or "+" characters.
+func buildRelayURL(cfg *config.Config) string {
+	q := url.Values{}
+	q.Set("machineId", cfg.MachineID)
+	q.Set("token", cfg.AuthToken)
+	return cfg.RelayURL + "?" + q.Encode()
+}
+
 // New constructs a Daemon.
 func New(cfg *config.Config, version string) (*Daemon, error) {
 	home, err := configHomeDir()
@@ -37,7 +47,7 @@ func New(cfg *config.Config, version string) (*Daemon, error) {
 	walDir := filepath.Join(home, "wal")
 
 	client := relay.NewClient(relay.Config{
-		URL:           cfg.RelayURL + "?token=" + cfg.AuthToken,
+		URL:           buildRelayURL(cfg),
 		AuthToken:     cfg.AuthToken,
 		MachineID:     cfg.MachineID,
 		DaemonVersion: version,
