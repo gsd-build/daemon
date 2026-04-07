@@ -25,7 +25,7 @@ gsd-cloud start
 ## Build from source
 
 ```bash
-go build ./...
+go build -o gsd-cloud .
 ./gsd-cloud version
 ```
 
