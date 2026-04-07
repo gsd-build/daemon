@@ -28,16 +28,28 @@ func buildFakeClaude(t *testing.T) string {
 	return binPath
 }
 
-// fakeRelay captures outgoing frames
+// fakeRelay captures outgoing frames. It supports condition-based waiting so
+// tests can block until a predicate over the captured frames is satisfied,
+// instead of guessing at timing with time.Sleep.
 type fakeRelay struct {
 	mu     sync.Mutex
+	cond   *sync.Cond
 	frames []any
+}
+
+func newFakeRelay() *fakeRelay {
+	r := &fakeRelay{}
+	r.cond = sync.NewCond(&r.mu)
+	return r
 }
 
 func (r *fakeRelay) Send(msg any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.frames = append(r.frames, msg)
+	if r.cond != nil {
+		r.cond.Broadcast()
+	}
 	return nil
 }
 
@@ -49,10 +61,62 @@ func (r *fakeRelay) GetFrames() []any {
 	return out
 }
 
+// waitFor blocks until predicate(frames) returns true or timeout elapses.
+// The predicate is called under the relay lock with the live frames slice;
+// it must not mutate. Returns true if the condition was satisfied.
+func (r *fakeRelay) waitFor(t *testing.T, timeout time.Duration, predicate func([]any) bool) bool {
+	t.Helper()
+	if r.cond == nil {
+		r.cond = sync.NewCond(&r.mu)
+	}
+	deadline := time.Now().Add(timeout)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if predicate(r.frames) {
+		return true
+	}
+
+	// Spawn a watchdog goroutine that broadcasts when the deadline passes,
+	// so cond.Wait unblocks even if no further Sends happen.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-time.After(timeout):
+			r.mu.Lock()
+			r.cond.Broadcast()
+			r.mu.Unlock()
+		case <-stop:
+		}
+	}()
+
+	for !predicate(r.frames) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		r.cond.Wait()
+	}
+	return true
+}
+
+// waitForTaskComplete blocks until at least one TaskComplete frame is observed.
+func (r *fakeRelay) waitForTaskComplete(t *testing.T, timeout time.Duration) bool {
+	return r.waitFor(t, timeout, func(frames []any) bool {
+		for _, f := range frames {
+			if _, ok := f.(*protocol.TaskComplete); ok {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestActorAssignsMonotonicSequenceAndWritesWAL(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	walDir := t.TempDir()
-	relay := &fakeRelay{}
+	relay := newFakeRelay()
 
 	actor, err := NewActor(Options{
 		SessionID:  "sess-1",
@@ -81,7 +145,12 @@ func TestActorAssignsMonotonicSequenceAndWritesWAL(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the full pipeline (subprocess spawn → fake-claude emits 3 events
+	// → parser → handleEvent → relay) to land a TaskComplete frame, instead of
+	// guessing with time.Sleep. Under -race the spawn alone can exceed 500ms.
+	if !relay.waitForTaskComplete(t, 5*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete frame")
+	}
 	_ = actor.Stop()
 
 	// Verify relay received stream events with monotonic seqs
@@ -125,7 +194,7 @@ func TestActorRecoversStartSeqFromWAL(t *testing.T) {
 	walPath := filepath.Join(walDir, "sess-1.jsonl")
 
 	// First actor: writes a few entries
-	relay1 := &fakeRelay{}
+	relay1 := newFakeRelay()
 	a1, _ := NewActor(Options{
 		SessionID:  "sess-1",
 		ChannelID:  "c",
@@ -135,11 +204,13 @@ func TestActorRecoversStartSeqFromWAL(t *testing.T) {
 		Relay:      relay1,
 		StartSeq:   0,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = a1.Run(ctx) }()
 	_ = a1.SendTask(protocol.Task{TaskID: "t1", SessionID: "sess-1", ChannelID: "c", Prompt: "x"})
-	time.Sleep(300 * time.Millisecond)
+	if !relay1.waitForTaskComplete(t, 5*time.Second) {
+		t.Fatal("timed out waiting for first actor TaskComplete")
+	}
 	_ = a1.Stop()
 
 	lastSeq := a1.LastSequence()
@@ -148,7 +219,7 @@ func TestActorRecoversStartSeqFromWAL(t *testing.T) {
 	}
 
 	// Second actor: start with StartSeq = lastSeq, new events should be lastSeq+1, +2, ...
-	relay2 := &fakeRelay{}
+	relay2 := newFakeRelay()
 	a2, _ := NewActor(Options{
 		SessionID:  "sess-1",
 		ChannelID:  "c",
@@ -160,7 +231,9 @@ func TestActorRecoversStartSeqFromWAL(t *testing.T) {
 	})
 	go func() { _ = a2.Run(ctx) }()
 	_ = a2.SendTask(protocol.Task{TaskID: "t2", SessionID: "sess-1", ChannelID: "c", Prompt: "y"})
-	time.Sleep(300 * time.Millisecond)
+	if !relay2.waitForTaskComplete(t, 5*time.Second) {
+		t.Fatal("timed out waiting for second actor TaskComplete")
+	}
 	_ = a2.Stop()
 
 	// Check that sequence numbers in relay2 start > lastSeq
