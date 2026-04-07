@@ -44,6 +44,7 @@ type Actor struct {
 
 	seq          atomic.Int64
 	taskInFlight atomic.Value // *taskContext
+	pendingDenial atomic.Value // *pendingDenial
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -52,11 +53,19 @@ type Actor struct {
 }
 
 type taskContext struct {
-	TaskID    string
-	StartedAt time.Time
-	Input     int64
-	Output    int64
-	CostUSD   string
+	TaskID         string
+	StartedAt      time.Time
+	OriginalPrompt string
+	Input          int64
+	Output         int64
+	CostUSD        string
+}
+
+// pendingDenial tracks a task that's waiting on permission/question responses.
+type pendingDenial struct {
+	Denials []string // tool names being awaited
+	TaskID  string
+	Prompt  string
 }
 
 // NewActor creates a new Actor with a WAL rooted at opts.WALPath and
@@ -94,9 +103,16 @@ func (a *Actor) LastSequence() int64 {
 
 // SendTask writes a user message into Claude. The actor must already be running.
 func (a *Actor) SendTask(task protocol.Task) error {
+	if pd := a.pendingDenial.Load(); pd != nil {
+		if v, ok := pd.(*pendingDenial); ok && v != nil {
+			return fmt.Errorf("session is awaiting a permission/question response; cannot accept new task")
+		}
+	}
+
 	tc := &taskContext{
-		TaskID:    task.TaskID,
-		StartedAt: time.Now(),
+		TaskID:         task.TaskID,
+		StartedAt:      time.Now(),
+		OriginalPrompt: task.Prompt,
 	}
 	a.taskInFlight.Store(tc)
 
@@ -179,6 +195,11 @@ func (a *Actor) handleResult(raw json.RawMessage) error {
 			CacheReadInput     int `json:"cache_read_input_tokens"`
 			CacheCreationInput int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
+		PermissionDenials []struct {
+			ToolName  string          `json:"tool_name"`
+			ToolUseID string          `json:"tool_use_id"`
+			ToolInput json.RawMessage `json:"tool_input"`
+		} `json:"permission_denials"`
 	}
 	_ = json.Unmarshal(raw, &payload)
 
@@ -186,6 +207,66 @@ func (a *Actor) handleResult(raw json.RawMessage) error {
 		a.claudeSessionID.Store(payload.SessionID)
 	}
 
+	// If there are permission denials, synthesize PermissionRequest / Question
+	// envelopes and DO NOT complete the task. The actor enters a waiting state.
+	if len(payload.PermissionDenials) > 0 {
+		for _, denial := range payload.PermissionDenials {
+			if denial.ToolName == "AskUserQuestion" {
+				var qPayload struct {
+					Questions []struct {
+						Question string `json:"question"`
+						Header   string `json:"header"`
+						Options  []struct {
+							Label       string `json:"label"`
+							Description string `json:"description"`
+						} `json:"options"`
+					} `json:"questions"`
+				}
+				_ = json.Unmarshal(denial.ToolInput, &qPayload)
+				var questionText string
+				var optionLabels []string
+				if len(qPayload.Questions) > 0 {
+					questionText = qPayload.Questions[0].Question
+					for _, opt := range qPayload.Questions[0].Options {
+						optionLabels = append(optionLabels, opt.Label)
+					}
+				}
+
+				if err := a.opts.Relay.Send(&protocol.Question{
+					Type:      protocol.MsgTypeQuestion,
+					SessionID: a.opts.SessionID,
+					ChannelID: a.opts.ChannelID,
+					RequestID: denial.ToolUseID,
+					Question:  questionText,
+					Options:   optionLabels,
+				}); err != nil {
+					return err
+				}
+			} else {
+				if err := a.opts.Relay.Send(&protocol.PermissionRequest{
+					Type:      protocol.MsgTypePermissionRequest,
+					SessionID: a.opts.SessionID,
+					ChannelID: a.opts.ChannelID,
+					RequestID: denial.ToolUseID,
+					ToolName:  denial.ToolName,
+					ToolInput: denial.ToolInput,
+				}); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Mark waiting on a permission response.
+		a.pendingDenial.Store(&pendingDenial{
+			Denials: denialNames(payload.PermissionDenials),
+			TaskID:  tc.TaskID,
+			Prompt:  tc.OriginalPrompt,
+		})
+		// IMPORTANT: do NOT emit TaskComplete yet.
+		return nil
+	}
+
+	// No denials — emit TaskComplete normally.
 	cost := fmt.Sprintf("%.6f", payload.TotalCostUSD)
 	complete := &protocol.TaskComplete{
 		Type:            protocol.MsgTypeTaskComplete,
@@ -205,6 +286,18 @@ func (a *Actor) handleResult(raw json.RawMessage) error {
 
 	a.taskInFlight.Store((*taskContext)(nil))
 	return a.opts.Relay.Send(complete)
+}
+
+func denialNames(denials []struct {
+	ToolName  string          `json:"tool_name"`
+	ToolUseID string          `json:"tool_use_id"`
+	ToolInput json.RawMessage `json:"tool_input"`
+}) []string {
+	out := make([]string, 0, len(denials))
+	for _, d := range denials {
+		out = append(out, d.ToolName)
+	}
+	return out
 }
 
 // Stop closes the Claude process and the WAL.
