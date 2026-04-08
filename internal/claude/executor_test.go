@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -151,6 +152,85 @@ func TestExecutorResumeFlag(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected --resume %s in argv, got: %v", resumeID, argv)
+	}
+}
+
+// TestExecutorStderrCapturedOnCrash verifies that when the subprocess exits
+// non-zero, the error returned by Start includes the tail of the subprocess's
+// stderr output. Regression test for the old `cmd.Stderr = nil` behavior that
+// silently discarded all diagnostic output from claude.
+func TestExecutorStderrCapturedOnCrash(t *testing.T) {
+	binPath := buildFakeClaude(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const stderrMsg = "simulated claude failure: invalid API key"
+	e := NewExecutor(Options{
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Env: []string{
+			"FAKE_CLAUDE_STDERR=" + stderrMsg,
+			"FAKE_CLAUDE_EXIT_CODE=2",
+		},
+	})
+
+	goroutinesBefore := runtime.NumGoroutine()
+
+	err := e.Start(ctx, func(_ Event) error { return nil })
+	if err == nil {
+		t.Fatal("expected error from Start when subprocess exits non-zero, got nil")
+	}
+	if !strings.Contains(err.Error(), stderrMsg) {
+		t.Errorf("expected error to contain stderr message %q, got: %v", stderrMsg, err)
+	}
+	if !strings.Contains(err.Error(), "code 2") {
+		t.Errorf("expected error to mention exit code 2, got: %v", err)
+	}
+
+	// Allow Go runtime a moment to tear down transient goroutines.
+	time.Sleep(50 * time.Millisecond)
+	goroutinesAfter := runtime.NumGoroutine()
+	if delta := goroutinesAfter - goroutinesBefore; delta > 2 {
+		t.Errorf("goroutine leak: before=%d after=%d delta=%d", goroutinesBefore, goroutinesAfter, delta)
+	}
+}
+
+// TestExecutorNormalShutdownNoError verifies that closing stdin cleanly
+// (the normal shutdown path) does NOT surface a spurious error from Start
+// even though the subprocess exits when its stdin is closed.
+func TestExecutorNormalShutdownNoError(t *testing.T) {
+	binPath := buildFakeClaude(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := NewExecutor(Options{
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- e.Start(ctx, func(_ Event) error { return nil })
+	}()
+
+	if err := e.Send("hello"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	// Cancel ctx first so the executor's ctx.Err() check swallows the
+	// wait error from the killed process.
+	cancel()
+	_ = e.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("expected nil error from clean shutdown, got: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Start did not return after Close")
 	}
 }
 

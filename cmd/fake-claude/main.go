@@ -8,6 +8,9 @@
 //	                                (or any turn where the tool is not in --allowedTools)
 //	FAKE_CLAUDE_SESSION_ID=<id>   — override the synthetic session id
 //	FAKE_CLAUDE_ARGS_FILE=<path>  — write os.Args[1:] as JSON to this file (preserved from Task 9)
+//	FAKE_CLAUDE_STDERR=<text>     — write this string (plus newline) to stderr at startup
+//	FAKE_CLAUDE_EXIT_CODE=<n>     — exit with this code immediately after writing stderr,
+//	                                before reading stdin (used to test stderr capture)
 //
 // Usage: invoked by the daemon as `claude -p ...` during tests.
 package main
@@ -17,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +31,19 @@ func main() {
 	if argsFile := os.Getenv("FAKE_CLAUDE_ARGS_FILE"); argsFile != "" {
 		data, _ := json.Marshal(os.Args[1:])
 		_ = os.WriteFile(argsFile, data, 0o600)
+	}
+
+	// Test hooks for stderr capture: emit an optional line to stderr,
+	// and optionally force an immediate non-zero exit. When FAKE_CLAUDE_EXIT_CODE
+	// is set, we bail before touching stdin so the test deterministically
+	// sees a crashed subprocess.
+	if msg := os.Getenv("FAKE_CLAUDE_STDERR"); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+	}
+	if codeStr := os.Getenv("FAKE_CLAUDE_EXIT_CODE"); codeStr != "" {
+		if code, err := strconv.Atoi(codeStr); err == nil {
+			os.Exit(code)
+		}
 	}
 
 	denyTool := os.Getenv("FAKE_CLAUDE_DENY_TOOL")

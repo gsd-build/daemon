@@ -98,7 +98,17 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 		e.mu.Unlock()
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = nil // ignore stderr to avoid pipe deadlocks
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+	// Capture the tail of claude's stderr into a bounded ring buffer.
+	// This both prevents the stderr pipe from blocking claude's writes
+	// (the original reason the field was set to nil) AND makes crashes,
+	// auth errors, and rate-limit errors diagnosable from the error
+	// returned by Start.
+	stderrBuf := newStderrBuffer(50, 16*1024)
 
 	if err := cmd.Start(); err != nil {
 		e.mu.Unlock()
@@ -110,15 +120,50 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 	close(e.ready)
 	e.mu.Unlock()
 
+	// Drain stderr in a goroutine. It exits on its own when claude
+	// closes stderr (naturally on process exit). We join it below after
+	// cmd.Wait so the ring buffer is fully populated before we format
+	// any error message from it.
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		stderrBuf.drain(stderr)
+	}()
+
 	parseErr := Parse(stdout, onEvent)
 	waitErr := cmd.Wait()
+	<-stderrDone
 
-	if parseErr != nil && parseErr != io.EOF {
-		return parseErr
-	}
 	if waitErr != nil {
-		// Non-zero exit is expected when we close stdin
-		return nil
+		// If the caller canceled ctx (normal shutdown path, including
+		// RestartWithGrant closing stdin via Close()), swallow silently.
+		if ctx.Err() != nil {
+			return nil
+		}
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			code := exitErr.ExitCode()
+			if code > 0 {
+				if tail := stderrBuf.String(); tail != "" {
+					return fmt.Errorf("claude exited with code %d: %s", code, tail)
+				}
+				return fmt.Errorf("claude exited with code %d (no stderr)", code)
+			}
+			// ExitCode() == -1 indicates signaled exit. Our shutdown
+			// path closes stdin, so claude normally exits 0; a signaled
+			// exit here without ctx.Err() set is unexpected but not
+			// actionable from stderr alone — propagate the raw error
+			// below via the parseErr branch if one exists, otherwise
+			// fall through and return nil.
+		} else {
+			// Non-ExitError (pipe i/o error, etc.) — propagate.
+			return fmt.Errorf("claude wait: %w", waitErr)
+		}
+	}
+	if parseErr != nil && parseErr != io.EOF {
+		if tail := stderrBuf.String(); tail != "" {
+			return fmt.Errorf("%w (claude stderr: %s)", parseErr, tail)
+		}
+		return parseErr
 	}
 	return nil
 }
