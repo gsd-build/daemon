@@ -46,9 +46,6 @@ jobs:
           - os: linux
             arch: arm64
             ext: ""
-          - os: windows
-            arch: amd64
-            ext: ".exe"
     steps:
       - uses: actions/checkout@v4
 
