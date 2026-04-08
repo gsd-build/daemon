@@ -13,7 +13,7 @@ func TestSaveAndLoad(t *testing.T) {
 	cfg := &Config{
 		MachineID:    "m-123",
 		AuthToken:    "tok-abc",
-		ServerURL:    "https://cloud.gsd.build",
+		ServerURL:    "https://app.gsd.build",
 		RelayURL:     "wss://relay.gsd.build/ws/daemon",
 	}
 	if err := Save(cfg); err != nil {

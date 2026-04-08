@@ -192,7 +192,7 @@ main() {
 
     say ""
     say "${bold}Next steps:${reset}"
-    say "  1. Open https://cloud.gsd.build to get your pairing code"
+    say "  1. Open https://app.gsd.build to get your pairing code"
     say "  2. Run: ${bold}gsd-cloud login${reset}"
     say "  3. Run: ${bold}gsd-cloud start${reset}"
     say ""

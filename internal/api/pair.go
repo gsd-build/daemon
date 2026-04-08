@@ -16,7 +16,7 @@ type Client struct {
 	http    *http.Client
 }
 
-// NewClient creates a Client pointed at a base URL (e.g. https://cloud.gsd.build).
+// NewClient creates a Client pointed at a base URL (e.g. https://app.gsd.build).
 func NewClient(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,

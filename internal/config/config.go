@@ -18,7 +18,7 @@ type Config struct {
 }
 
 // DefaultServerURL is the production web app host.
-const DefaultServerURL = "https://cloud.gsd.build"
+const DefaultServerURL = "https://app.gsd.build"
 
 // DefaultRelayURL is the production relay WebSocket endpoint.
 const DefaultRelayURL = "wss://relay.gsd.build/ws/daemon"
