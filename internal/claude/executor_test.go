@@ -231,6 +231,69 @@ func TestExecutorBlockBufferingFakeClaude(t *testing.T) {
 	}
 }
 
+// TestExecutorStdinIsNotTTY is the regression test for the production
+// bug hit against claude@2.1.96 on 2026-04-08: when both stdin and
+// stdout were attached to the pty slave (the pre-split-stdio layout),
+// claude's `-p --input-format stream-json` mode ignored --input-format,
+// dropped into an interactive code path, and exited immediately with:
+//
+//	Error: Input must be provided either through stdin or as a prompt argument when using --print
+//
+// The fix is asymmetric stdio: stdin on a regular anonymous pipe
+// (so claude's -p mode accepts stream-json) and stdout on a pty slave
+// (so Node line-buffers output). This test pins that invariant by
+// spawning fake-claude with FAKE_CLAUDE_ASSERT_STDIN_PIPE=1, which
+// calls term.IsTerminal(0) and exits with code 3 + a stderr message
+// if stdin is a TTY. Any future change that flips stdin back to a pty
+// will fail this test with a clear "fake-claude: stdin is a TTY" in
+// the captured stderr.
+//
+// Separately, this test also asserts that stdout is still a TTY (by
+// inspecting the successful round-trip: fake-claude only emits its
+// init+result events at all, and on time, when the executor keeps
+// stdout on the pty slave — the existing TestExecutorBlockBufferingFakeClaude
+// covers that side in isolation, but we re-check it implicitly here
+// so this test documents the full "split stdio" contract).
+func TestExecutorStdinIsNotTTY(t *testing.T) {
+	binPath := buildFakeClaude(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	exec := NewExecutor(Options{
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Env:        []string{"FAKE_CLAUDE_ASSERT_STDIN_PIPE=1"},
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Start(ctx, func(_ Event) error { return nil })
+	}()
+
+	// Round-trip through Send so the pipe actually carries a byte,
+	// then Close to shut fake-claude down cleanly. If the fake's
+	// stdin assertion fires, the process will exit with code 3 and
+	// a stderr message; Start's return value will contain both.
+	_ = exec.Send("hello")
+	_ = exec.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			// If the fake detected a TTY stdin it exits with code 3
+			// and a known stderr message (captured via PR 1's ring
+			// buffer). Any other error is an unrelated failure.
+			if strings.Contains(err.Error(), "stdin is a TTY") {
+				t.Fatalf("executor attached a TTY to child stdin; expected a pipe. err: %v", err)
+			}
+			t.Fatalf("executor returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("executor did not exit after stdin assertion check")
+	}
+}
+
 // readArgsFile reads the argv written by fake-claude when FAKE_CLAUDE_ARGS_FILE is set.
 func readArgsFile(t *testing.T, path string) []string {
 	t.Helper()

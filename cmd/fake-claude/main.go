@@ -27,6 +27,16 @@
 //	FAKE_CLAUDE_STDERR=<text>     — write this string (plus newline) to stderr at startup
 //	FAKE_CLAUDE_EXIT_CODE=<n>     — exit with this code immediately after writing stderr,
 //	                                before reading stdin (used to test stderr capture)
+//	FAKE_CLAUDE_ASSERT_STDIN_PIPE=1 — if set, exit with code 3 and a stderr
+//	                                  message if fd 0 is a TTY. Used by the
+//	                                  TestExecutorStdinIsNotTTY regression
+//	                                  test to pin the split-stdio invariant:
+//	                                  the real claude CLI's `-p --input-format
+//	                                  stream-json` mode drops into an
+//	                                  interactive code path when stdin is a
+//	                                  TTY and refuses to run without a prompt
+//	                                  argument, so the executor MUST keep
+//	                                  stdin on a regular anonymous pipe.
 //
 // Usage: invoked by the daemon as `claude -p ...` during tests.
 package main
@@ -38,6 +48,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 func main() {
@@ -59,6 +71,25 @@ func main() {
 	if codeStr := os.Getenv("FAKE_CLAUDE_EXIT_CODE"); codeStr != "" {
 		if code, err := strconv.Atoi(codeStr); err == nil {
 			os.Exit(code)
+		}
+	}
+
+	// Regression guard for the split-stdio layout. The real claude CLI's
+	// `-p --input-format stream-json` mode requires stdin to NOT be a
+	// TTY; attaching a pty slave to stdin makes claude drop into an
+	// interactive code path that refuses to run without a positional
+	// prompt argument and exits with:
+	//   Error: Input must be provided either through stdin or as a prompt argument when using --print
+	// Reproduced in production on 2026-04-08 with claude@2.1.96. The
+	// executor must therefore keep stdin on a regular anonymous pipe
+	// and only bind the pty slave to stdout. TestExecutorStdinIsNotTTY
+	// sets this env var so any future change that flips stdin back to
+	// a pty trips this check at runtime instead of silently shipping
+	// a regression to production.
+	if os.Getenv("FAKE_CLAUDE_ASSERT_STDIN_PIPE") == "1" {
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintln(os.Stderr, "fake-claude: stdin is a TTY, expected a pipe")
+			os.Exit(3)
 		}
 	}
 

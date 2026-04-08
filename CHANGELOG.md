@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude CLI's `-p --input-format stream-json` mode no longer exits immediately
+  with `Error: Input must be provided either through stdin or as a prompt
+  argument when using --print`. The v0.1.3/v0.1.4 executor attached a pty slave
+  to BOTH stdin and stdout, which made `claude@2.1.96` detect an interactive
+  session via `process.stdin.isTTY` and drop into a code path that ignores
+  `--input-format` and insists on a positional prompt argument. The fix splits
+  stdio asymmetrically: stdin is now a regular anonymous pipe
+  (`cmd.StdinPipe`), so claude's `-p` mode accepts the stream-json payload
+  normally, while stdout remains on the pty slave so Node still line-buffers
+  output for real-time event delivery. `ptySysProcAttr` was updated to set
+  `Ctty: 1` (previously 0) because the controlling tty fd index shifts when
+  stdin moves off the pty. `Executor.Close` reverts to closing stdin for
+  graceful shutdown now that stdin and stdout are distinct fds. A new
+  regression test `TestExecutorStdinIsNotTTY` in `internal/claude/executor_test.go`,
+  backed by a new `FAKE_CLAUDE_ASSERT_STDIN_PIPE=1` hook in `cmd/fake-claude`,
+  pins the split-stdio invariant so any future change that re-attaches stdin
+  to a pty trips at test time instead of silently shipping to production.
+  Reproduced and verified against the production synthetic daemon on
+  2026-04-08.
 - Sessions no longer hang indefinitely when `Executor.Start` encounters an error
   during setup. Previously, `Start` could exit via three error paths
   (`openClaudePTY`, `cmd.StderrPipe`, `cmd.Start`) without closing the internal
