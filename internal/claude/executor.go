@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
-	"syscall"
 )
 
 // Options configures a Claude process.
@@ -62,13 +61,34 @@ func NewExecutor(opts Options) *Executor {
 // Start spawns the process and begins parsing events. It blocks until
 // the process exits or ctx is canceled. Events are delivered via onEvent.
 //
-// Stdin and stdout are routed through a POSIX pseudo-terminal. See
-// pty_unix.go's openClaudePTY for the full rationale; the short version
-// is that Node.js block-buffers pipe stdout but line-buffers TTY stdout,
-// and the claude CLI is a Node program, so a pty is required for the
-// daemon to see stream-json events in real time. Stderr remains a
-// regular pipe so the bounded ring buffer in stderr_buffer.go can
-// capture diagnostics without intermixing them with stream events.
+// Stdio is split into three different transports:
+//
+//   - stdin: a regular anonymous pipe (cmd.StdinPipe). The claude CLI's
+//     `-p --input-format stream-json` mode requires stdin to NOT be a
+//     TTY; with a TTY stdin it silently ignores --input-format, enters
+//     interactive mode, and exits with "Input must be provided either
+//     through stdin or as a prompt argument when using --print" because
+//     interactive -p insists on a prompt arg. A pipe sidesteps this and
+//     lets the daemon inject stream-json user messages normally.
+//
+//   - stdout: the slave end of a POSIX pseudo-terminal (ptmx). Node.js
+//     block-buffers pipe stdout but line-buffers TTY stdout; the claude
+//     CLI is a Node program, so without a pty slave on stdout, short
+//     stream-json events (~200 bytes) sit in Node's userspace buffer
+//     and never reach the daemon until the process exits. Attaching a
+//     pty slave makes Node detect a TTY and flush per line. See
+//     pty_unix.go's openClaudePTY for the kernel-level details.
+//
+//   - stderr: a regular anonymous pipe (cmd.StderrPipe), drained into
+//     a bounded ring buffer so crashes, auth errors, and rate-limit
+//     errors surface in the error returned by Start instead of being
+//     silently discarded.
+//
+// Getting stdin-is-pipe + stdout-is-tty right requires asymmetric wiring:
+// we allocate a pty pair but only bind the slave to cmd.Stdout, leaving
+// cmd.Stdin on StdinPipe. Node's libuv checks isTTY per fd, so it will
+// correctly see stdin as a pipe and stdout as a TTY and choose the
+// right buffering strategy for each.
 func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 	// One diagnostic line at the very top of Start so it is visible in
 	// fly logs / stdout whether Start was ever called for a given
@@ -137,30 +157,39 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 		cmd.Env = append(os.Environ(), e.opts.Env...)
 	}
 
-	// Allocate a pseudo-terminal for the subprocess's stdin and stdout.
-	// The master (ptmx) stays with the parent; the slave (tty) gets
-	// wired into the child process and must be closed by the parent
-	// immediately after Start so that only the child holds it open.
-	// When the child exits, the last ref on the slave drops and reads
-	// on the master return EOF naturally.
+	// stdin: anonymous pipe. Must be a pipe (not a TTY) so claude's
+	// `-p --input-format stream-json` mode accepts the stream-json
+	// payload instead of dropping into interactive mode and exiting.
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+
+	// stdout: slave end of a pseudo-terminal. The master (ptmx) stays
+	// with the parent; the slave (tty) is bound to cmd.Stdout and must
+	// be closed by the parent immediately after Start so only the
+	// child holds it open. When the child exits, the last ref on the
+	// slave drops and reads on the master return EOF naturally.
 	ptmx, tty, err := openClaudePTY()
 	if err != nil {
+		_ = stdinPipe.Close()
 		e.mu.Unlock()
 		return err
 	}
-	cmd.Stdin = tty
 	cmd.Stdout = tty
-	// Attach the child to a dedicated session/process group so it
-	// becomes the controlling process for this pty. Without this,
-	// Node's isatty checks on stdout still return true on most
-	// systems, but setsid makes the behavior explicit and matches
-	// what pty.Start would have done.
+	// Attach the child to a dedicated session/process group so its
+	// controlling terminal is the pty slave on fd 1. Without setsid
+	// + setctty, Node's isTTY on stdout still reports true on most
+	// kernels, but being explicit here matches what pty.Start does
+	// internally and avoids any controlling-tty ambiguity.
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = ptySysProcAttr()
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		_ = stdinPipe.Close()
 		_ = ptmx.Close()
 		_ = tty.Close()
 		e.mu.Unlock()
@@ -173,6 +202,7 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 	stderrBuf := newStderrBuffer(50, 16*1024)
 
 	if err := cmd.Start(); err != nil {
+		_ = stdinPipe.Close()
 		_ = ptmx.Close()
 		_ = tty.Close()
 		e.mu.Unlock()
@@ -184,8 +214,8 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 	_ = tty.Close()
 
 	e.cmd = cmd
-	e.stdin = ptmx  // writes here become child stdin
-	e.stdout = ptmx // reads here are child stdout
+	e.stdin = stdinPipe // Send() writes to the child's stdin pipe
+	e.stdout = ptmx     // Parse() reads from the pty master
 	e.ptmx = ptmx
 	close(e.ready)
 	readyClosed = true
@@ -258,27 +288,24 @@ func (e *Executor) Send(text string) error {
 	return err
 }
 
-// Close signals Claude to exit. On the pipe-based implementation this
-// used to close stdin; on the pty-based implementation stdin and stdout
-// are the same file descriptor (the ptmx master), so closing it would
-// race with the parser's read loop and drop buffered output. Instead
-// we SIGTERM the child: the kernel drains any already-written bytes
-// through the pty buffer to the parent's read side, then delivers EOF
-// to the parser. cmd.Wait returns with a signaled exit, which Start's
-// error handling recognises as an expected shutdown via shuttingDown.
+// Close signals claude to exit by closing its stdin. Under the split
+// stdio layout stdin is a dedicated pipe that is NOT the same fd as
+// stdout (stdout is a pty master), so closing stdin here is safe: it
+// only EOFs the child's input, it does not disturb the parser's
+// in-flight read of the pty master. Claude sees EOF on stdin and exits
+// cleanly a few milliseconds later, cmd.Wait returns with exit code 0,
+// and Start's normal return path tears down the pty.
+//
+// shuttingDown is still set so that if claude races and exits signaled
+// instead of clean (unlikely but possible), Start treats it as an
+// expected shutdown rather than a subprocess crash.
 func (e *Executor) Close() error {
 	e.mu.Lock()
-	cmd := e.cmd
+	stdin := e.stdin
 	e.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	if stdin == nil {
 		return nil
 	}
 	e.shuttingDown.Store(true)
-	// SIGTERM is graceful; the child gets a chance to finalize any
-	// in-flight writes before the kernel tears down the pty. On Node
-	// this is sufficient — the claude CLI exits within a few ms.
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		return err
-	}
-	return nil
+	return stdin.Close()
 }
