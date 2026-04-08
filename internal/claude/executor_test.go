@@ -8,9 +8,26 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// waitForFile polls for the existence of path with a 3s timeout. Used by
+// argv-inspection tests instead of a bare time.Sleep, so the test does
+// not race against fake-claude's startup overhead on slow machines or
+// against the additional per-spawn cost of pty allocation.
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("file never appeared: %s", path)
+}
 
 func buildFakeClaude(t *testing.T) string {
 	t.Helper()
@@ -22,6 +39,23 @@ func buildFakeClaude(t *testing.T) string {
 	// Build the helper
 	if err := runCmd(t, daemonDir, "go", "build", "-o", binPath, "./cmd/fake-claude"); err != nil {
 		t.Fatalf("build fake-claude: %v", err)
+	}
+	return binPath
+}
+
+// buildFakeClaudeBlockbuf compiles the second fake-claude variant that
+// replicates Node.js's libuv block-buffering decision for non-TTY
+// stdout. Tests that point at this binary will only receive stream
+// events if the executor attaches a pseudo-terminal to the child's
+// stdout; a pipe-based executor will see zero events during the task.
+func buildFakeClaudeBlockbuf(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	daemonDir := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "fake-claude-blockbuf")
+	if err := runCmd(t, daemonDir, "go", "build", "-o", binPath, "./cmd/fake-claude-blockbuf"); err != nil {
+		t.Fatalf("build fake-claude-blockbuf: %v", err)
 	}
 	return binPath
 }
@@ -51,12 +85,25 @@ func TestExecutorRoundTrip(t *testing.T) {
 		PermissionMode: "acceptEdits",
 	})
 
-	var events []Event
+	var (
+		mu        sync.Mutex
+		events    []Event
+		gotResult = make(chan struct{})
+	)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		_ = exec.Start(ctx, func(e Event) error {
+			mu.Lock()
 			events = append(events, e)
+			mu.Unlock()
+			if e.Type == "result" {
+				select {
+				case <-gotResult:
+				default:
+					close(gotResult)
+				}
+			}
 			return nil
 		})
 	}()
@@ -65,7 +112,14 @@ func TestExecutorRoundTrip(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the result event rather than sleeping a fixed duration.
+	// fake-claude startup + pty allocation can consume 150+ ms on slow
+	// machines, and a bare sleep races against that.
+	select {
+	case <-gotResult:
+	case <-time.After(3 * time.Second):
+		t.Fatal("never received result event")
+	}
 	_ = exec.Close()
 
 	select {
@@ -74,6 +128,8 @@ func TestExecutorRoundTrip(t *testing.T) {
 		t.Fatal("executor did not exit")
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	if len(events) < 2 {
 		t.Fatalf("expected at least 2 events, got %d", len(events))
 	}
@@ -89,6 +145,89 @@ func TestExecutorRoundTrip(t *testing.T) {
 	_ = json.Unmarshal(last.Raw, &payload)
 	if payload["session_id"] != "fake-session-123" {
 		t.Errorf("expected session_id=fake-session-123, got %v", payload["session_id"])
+	}
+}
+
+// TestExecutorBlockBufferingFakeClaude is the regression test for the
+// daemon-stdout-silent bug. It spawns fake-claude-blockbuf, which
+// faithfully replicates real claude's Node/libuv stdout buffering:
+// line-buffered on a TTY, block-buffered on a pipe. If the Executor's
+// stdout path is a plain pipe (the pre-PR-2 behavior), the fake buffers
+// everything in userspace and the test times out with zero events. If
+// the Executor attaches a pseudo-terminal (the PR-2 behavior), the fake
+// detects a TTY and flushes per line, and the test sees all events.
+//
+// The test is BOTH a regression proof (it fails cleanly if someone
+// reverts the pty path) and a production-bug reproduction (it replicates
+// the exact mechanism that caused the v0.1.2 daemon to drop every event
+// from short assistant responses).
+func TestExecutorBlockBufferingFakeClaude(t *testing.T) {
+	binPath := buildFakeClaudeBlockbuf(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	exec := NewExecutor(Options{
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+	})
+
+	var (
+		mu        sync.Mutex
+		events    []Event
+		gotResult = make(chan struct{})
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = exec.Start(ctx, func(e Event) error {
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+			if e.Type == "result" {
+				select {
+				case <-gotResult:
+				default:
+					close(gotResult)
+				}
+			}
+			return nil
+		})
+	}()
+
+	if err := exec.Send("hello"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Wait for the result event. On a pipe-based executor this would
+	// hang forever (no events flushed). The timeout keeps the failure
+	// bounded so CI reports "did not see result event" rather than
+	// hanging the whole run.
+	select {
+	case <-gotResult:
+	case <-time.After(5 * time.Second):
+		mu.Lock()
+		n := len(events)
+		mu.Unlock()
+		t.Fatalf("block-buffering fake never flushed to the executor; got %d events in 5s. Did the executor revert to a pipe-based stdout?", n)
+	}
+	_ = exec.Close()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("executor did not exit")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Expect exactly the three events the fake emits per turn:
+	// stream_event, assistant, result.
+	if len(events) < 3 {
+		t.Fatalf("expected >=3 events from blockbuf fake, got %d", len(events))
+	}
+	if events[len(events)-1].Type != "result" {
+		t.Errorf("expected last event to be result, got %s", events[len(events)-1].Type)
 	}
 }
 
@@ -131,8 +270,10 @@ func TestExecutorResumeFlag(t *testing.T) {
 		_ = e.Start(ctx, func(_ Event) error { return nil })
 	}()
 
-	// Give fake-claude time to write the args file, then close it.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for fake-claude to write the args file, then shut it down.
+	// The old form used a fixed 50 ms sleep, but pty allocation plus Go
+	// runtime startup on a fresh subprocess can easily exceed that.
+	waitForFile(t, argsFile)
 	_ = e.Close()
 
 	select {
@@ -257,7 +398,7 @@ func TestExecutorNoResumeFlag(t *testing.T) {
 		_ = e.Start(ctx, func(_ Event) error { return nil })
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	waitForFile(t, argsFile)
 	_ = e.Close()
 
 	select {
