@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sessions no longer hang indefinitely when `Executor.Start` encounters an error
+  during setup. Previously, `Start` could exit via three error paths
+  (`openClaudePTY`, `cmd.StderrPipe`, `cmd.Start`) without closing the internal
+  `ready` channel, causing any concurrent `Send` call to block forever. The
+  symptom from the browser's perspective was: `taskStarted` frame received,
+  followed by nothing — no stream events, no task completion, no error. The
+  channel is now closed via a deferred guard on every exit path so `Send`
+  always either succeeds or returns an error. The `session.Manager` goroutine
+  that runs each actor now logs any non-nil `actor.Run` exit and synthesizes a
+  `TaskError` frame to the relay for whatever task was in flight at the time,
+  so failures are actionable from the browser instead of being invisible.
+  `Executor.Start` now logs a single diagnostic line at entry, making it
+  possible to distinguish "`Start` was never called" from "`Start` was called
+  but failed deep inside" when triaging hung sessions from fly logs alone.
 - Claude subprocess output is now flushed per event by allocating a
   pseudo-terminal for the CLI's stdout. Previously, Node.js's block-buffered
   pipe stdout meant that short responses (anything under ~8 KiB) never reached

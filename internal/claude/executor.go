@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
@@ -69,12 +70,40 @@ func NewExecutor(opts Options) *Executor {
 // regular pipe so the bounded ring buffer in stderr_buffer.go can
 // capture diagnostics without intermixing them with stream events.
 func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
+	// One diagnostic line at the very top of Start so it is visible in
+	// fly logs / stdout whether Start was ever called for a given
+	// session, independent of whether any subsequent step succeeds.
+	// Without this it is impossible to distinguish "Run goroutine died
+	// before Start" from "Start was entered and failed deep inside"
+	// when triaging a hung session.
+	log.Printf("[executor] starting claude: binary=%s dir=%s model=%q", e.opts.BinaryPath, e.opts.CWD, e.opts.Model)
+
 	e.mu.Lock()
 	if e.started {
 		e.mu.Unlock()
 		return fmt.Errorf("executor already started")
 	}
 	e.started = true
+
+	// Guarantee that e.ready is closed before Start returns, regardless
+	// of which error path setup takes. Send() blocks on <-e.ready; if
+	// setup fails before the success-path close below and ready is
+	// never closed, any concurrent Send call hangs forever. The
+	// downstream v0.1.3 smoke test exhibited exactly this: SendTask's
+	// call to Send blocked indefinitely because openClaudePTY (or some
+	// call under it) returned an error and the goroutine running
+	// Executor.Start discarded it without ever closing ready.
+	//
+	// The deferred close is guarded by readyClosed so the success path,
+	// which closes ready explicitly inside Start (so Send unblocks
+	// while we are still inside Start, before the long parseLoop
+	// below), does not double-close.
+	readyClosed := false
+	defer func() {
+		if !readyClosed {
+			close(e.ready)
+		}
+	}()
 
 	args := []string{
 		"-p",
@@ -155,10 +184,11 @@ func (e *Executor) Start(ctx context.Context, onEvent func(Event) error) error {
 	_ = tty.Close()
 
 	e.cmd = cmd
-	e.stdin = ptmx    // writes here become child stdin
-	e.stdout = ptmx   // reads here are child stdout
+	e.stdin = ptmx  // writes here become child stdin
+	e.stdout = ptmx // reads here are child stdout
 	e.ptmx = ptmx
 	close(e.ready)
+	readyClosed = true
 	e.mu.Unlock()
 
 	// Drain stderr in a goroutine. It exits on its own when claude
