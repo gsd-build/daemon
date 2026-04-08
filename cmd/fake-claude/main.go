@@ -2,6 +2,22 @@
 // --output-format stream-json`. It reads NDJSON from stdin and emits scripted
 // responses based on the content and on environment variables.
 //
+// IMPORTANT: this fake calls os.Stdout.Sync() after every event to force an
+// immediate flush. This is NOT how real claude (a Node.js program) behaves on
+// a pipe — Node block-buffers pipe stdout and only flushes when the buffer
+// fills or the process exits. For short stream-json events (~200 bytes), the
+// buffer never fills, and the daemon used to see zero events until the bug
+// was fixed in fix/executor-pty-buffering. The sync calls below were hiding
+// that bug for months by making every test run behave like a TTY.
+//
+// Do NOT remove the Sync() calls. They exist for a specific reason: this
+// fake is the "happy path" reference, used by tests that want a well-behaved
+// subprocess. The complementary cmd/fake-claude-blockbuf fake deliberately
+// does NOT flush and is used by the regression test that proves the executor
+// correctly handles Node-style block-buffering via a pty. Removing these
+// Sync calls will make existing tests look like they still pass, while
+// silently re-introducing the opportunity to land a regression.
+//
 // Env vars:
 //
 //	FAKE_CLAUDE_DENY_TOOL=<name>  — emit a permission_denials for the first turn
