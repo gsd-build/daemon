@@ -131,6 +131,18 @@ func (a *Actor) LastSequence() int64 {
 	return a.seq.Load()
 }
 
+// InFlightTaskID returns the ID of the task the actor is currently
+// processing, or "" if no task is in flight. Used by the session
+// manager's Run goroutine so that an unexpected actor.Run exit can
+// synthesize a TaskError frame for the affected task.
+func (a *Actor) InFlightTaskID() string {
+	tc, _ := a.taskInFlight.Load().(*taskContext)
+	if tc == nil {
+		return ""
+	}
+	return tc.TaskID
+}
+
 // AllowedTools returns a snapshot of the per-session granted tools list.
 func (a *Actor) AllowedTools() []string {
 	a.mu.Lock()
