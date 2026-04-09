@@ -19,7 +19,13 @@ func ReadFile(path string, maxBytes int) (string, bool, error) {
 		maxBytes = DefaultMaxBytes
 	}
 
-	f, err := os.Open(filepath.Clean(path))
+	cleaned := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve symlinks: %w", err)
+	}
+
+	f, err := os.Open(resolved)
 	if err != nil {
 		return "", false, fmt.Errorf("open: %w", err)
 	}

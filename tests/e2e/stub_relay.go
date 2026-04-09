@@ -39,9 +39,9 @@ func NewStubRelay(t *testing.T) *StubRelay {
 	}
 
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
-		if token == "" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, "missing Authorization header", http.StatusUnauthorized)
 			return
 		}
 

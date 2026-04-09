@@ -80,3 +80,26 @@ func TestReadFileRejectsRelativePath(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestReadFile_ResolvesSymlinks(t *testing.T) {
+	targetDir := t.TempDir()
+	targetFile := filepath.Join(targetDir, "real.txt")
+	os.WriteFile(targetFile, []byte("real-content"), 0600)
+
+	linkDir := t.TempDir()
+	link := filepath.Join(linkDir, "link.txt")
+	if err := os.Symlink(targetFile, link); err != nil {
+		t.Skip("cannot create symlinks on this OS")
+	}
+
+	content, truncated, err := ReadFile(link, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if truncated {
+		t.Fatal("unexpected truncation")
+	}
+	if content != "real-content" {
+		t.Fatalf("expected real-content, got %q", content)
+	}
+}

@@ -20,7 +20,13 @@ func BrowseDir(path string) ([]protocol.BrowseEntry, error) {
 	}
 	cleaned := filepath.Clean(path)
 
-	entries, err := os.ReadDir(cleaned)
+	// Resolve symlinks so the caller sees the real path.
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("resolve symlinks: %w", err)
+	}
+
+	entries, err := os.ReadDir(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("read dir: %w", err)
 	}
@@ -33,7 +39,7 @@ func BrowseDir(path string) ([]protocol.BrowseEntry, error) {
 		}
 		result = append(result, protocol.BrowseEntry{
 			Name:        e.Name(),
-			Path:        filepath.Join(cleaned, e.Name()),
+			Path:        filepath.Join(resolved, e.Name()),
 			IsDirectory: e.IsDir(),
 			Size:        info.Size(),
 			ModifiedAt:  info.ModTime().UTC().Format(time.RFC3339Nano),

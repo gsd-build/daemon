@@ -32,20 +32,17 @@ type Daemon struct {
 	walDir  string
 }
 
-// buildRelayURL constructs the WebSocket URL with machineId + token query params.
-// Both must be URL-escaped because tokens may contain "/" or "+" characters.
-// Preserves any existing query params already present on cfg.RelayURL.
+// buildRelayURL constructs the WebSocket URL with machineId query param only.
+// The auth token is sent exclusively in the Authorization header (relay/client.go)
+// and must NOT appear in the URL where it would leak into server logs, proxy logs,
+// and HTTP Referer headers.
 func buildRelayURL(cfg *config.Config) string {
 	u, err := url.Parse(cfg.RelayURL)
 	if err != nil {
-		// cfg.RelayURL is validated at load time; if parsing fails here,
-		// fall back to raw concat so callers get a visible failure rather
-		// than a silent wrong URL.
-		return cfg.RelayURL + "?machineId=" + url.QueryEscape(cfg.MachineID) + "&token=" + url.QueryEscape(cfg.AuthToken)
+		return cfg.RelayURL + "?machineId=" + url.QueryEscape(cfg.MachineID)
 	}
 	q := u.Query()
 	q.Set("machineId", cfg.MachineID)
-	q.Set("token", cfg.AuthToken)
 	u.RawQuery = q.Encode()
 	return u.String()
 }

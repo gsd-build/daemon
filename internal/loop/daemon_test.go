@@ -19,7 +19,7 @@ func TestHandleAckPlaceholder(t *testing.T) {
 	t.Skip("covered by actor and WAL tests; integration test lives in plan 10")
 }
 
-func TestRelayURLIncludesMachineIDAndToken(t *testing.T) {
+func TestRelayURLIncludesMachineIDOnly(t *testing.T) {
 	cfg := &config.Config{
 		MachineID: "machine-uuid-123",
 		AuthToken: "token-with-special/chars+",
@@ -36,8 +36,8 @@ func TestRelayURLIncludesMachineIDAndToken(t *testing.T) {
 	if q.Get("machineId") != "machine-uuid-123" {
 		t.Errorf("missing or wrong machineId: %q", q.Get("machineId"))
 	}
-	if q.Get("token") != "token-with-special/chars+" {
-		t.Errorf("missing or wrong token: %q", q.Get("token"))
+	if q.Get("token") != "" {
+		t.Errorf("token must NOT be in URL (leaked to logs); got: %q", q.Get("token"))
 	}
 	if parsed.Host != "relay.example.com" {
 		t.Errorf("unexpected host: %q", parsed.Host)
@@ -64,8 +64,8 @@ func TestRelayURLPreservesExistingQuery(t *testing.T) {
 	if q.Get("machineId") != "machine-uuid-123" {
 		t.Errorf("missing or wrong machineId: %q", q.Get("machineId"))
 	}
-	if q.Get("token") != "token-with-special/chars+" {
-		t.Errorf("missing or wrong token: %q", q.Get("token"))
+	if q.Get("token") != "" {
+		t.Errorf("token must NOT be in URL; got: %q", q.Get("token"))
 	}
 	if q.Get("version") != "2" {
 		t.Errorf("existing query param lost; version: %q", q.Get("version"))
