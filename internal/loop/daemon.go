@@ -82,12 +82,43 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 }
 
 // Run connects to the relay and blocks until ctx is canceled.
+// Automatically reconnects with exponential backoff on connection failures.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.client.SetHandler(d.handleMessage)
 
-	// Scan WAL directory to recover high-water marks per session from disk.
-	// On cold start the actor pool is empty, so we read sequence numbers
-	// directly from persisted WAL files rather than in-memory actor state.
+	backoff := 1 * time.Second
+	const maxBackoff = 60 * time.Second
+
+	for {
+		connStart := time.Now()
+		err := d.runOnce(ctx)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+
+		// Reset backoff if the connection was alive for a while (healthy session).
+		if time.Since(connStart) > 2*time.Minute {
+			backoff = 1 * time.Second
+		}
+
+		fmt.Printf("relay connection lost: %v\n", err)
+		fmt.Printf("reconnecting in %s...\n", backoff)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		backoff = backoff * 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// runOnce performs a single connect → run cycle.
+func (d *Daemon) runOnce(ctx context.Context) error {
 	lastSeqs, err := wal.ScanDirectory(d.walDir)
 	if err != nil {
 		return fmt.Errorf("scan wal directory: %w", err)
@@ -99,10 +130,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	_ = welcome // TODO: use acked sequences to drive WAL replay
 
-	// Start heartbeat
-	go d.runHeartbeat(ctx)
+	// Scope heartbeat to this connection; cancel when Run returns.
+	connCtx, connCancel := context.WithCancel(ctx)
+	go d.runHeartbeat(connCtx)
 
-	return d.client.Run(ctx)
+	err = d.client.Run(ctx)
+	connCancel()
+	return err
 }
 
 func (d *Daemon) runHeartbeat(ctx context.Context) {
