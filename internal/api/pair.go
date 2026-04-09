@@ -37,9 +37,22 @@ type PairRequest struct {
 
 // PairResponse is the successful response from the pairing endpoint.
 type PairResponse struct {
+	MachineID      string `json:"machineId"`
+	AuthToken      string `json:"authToken"`
+	TokenExpiresAt string `json:"tokenExpiresAt"`
+	RelayURL       string `json:"relayUrl"`
+}
+
+// RefreshTokenRequest is the body of POST /api/daemon/refresh-token.
+type RefreshTokenRequest struct {
 	MachineID string `json:"machineId"`
-	AuthToken string `json:"authToken"`
-	RelayURL  string `json:"relayUrl"`
+	Token     string `json:"token"`
+}
+
+// RefreshTokenResponse is the successful response from the refresh-token endpoint.
+type RefreshTokenResponse struct {
+	AuthToken      string `json:"authToken"`
+	TokenExpiresAt string `json:"tokenExpiresAt"`
 }
 
 // Pair calls POST /api/daemon/pair.
@@ -71,6 +84,33 @@ func (c *Client) Pair(req PairRequest) (*PairResponse, error) {
 	}
 
 	var out PairResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return &out, nil
+}
+
+// RefreshToken calls POST /api/daemon/refresh-token.
+func (c *Client) RefreshToken(req RefreshTokenRequest) (*RefreshTokenResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, c.baseURL+"/api/daemon/refresh-token", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+	httpReq.Header.Set("content-type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("refresh failed: %s: %s", resp.Status, string(data))
+	}
+	var out RefreshTokenResponse
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}

@@ -56,10 +56,11 @@ Generate a code in the web app under Machines → Add Machine.`,
 		}
 
 		cfg := &config.Config{
-			MachineID: resp.MachineID,
-			AuthToken: resp.AuthToken,
-			ServerURL: loginServerURL,
-			RelayURL:  resp.RelayURL,
+			MachineID:      resp.MachineID,
+			AuthToken:      resp.AuthToken,
+			TokenExpiresAt: resp.TokenExpiresAt,
+			ServerURL:      loginServerURL,
+			RelayURL:       resp.RelayURL,
 		}
 		if err := config.Save(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)

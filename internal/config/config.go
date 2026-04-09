@@ -11,10 +11,11 @@ import (
 
 // Config is the on-disk daemon state.
 type Config struct {
-	MachineID string `json:"machineId"`
-	AuthToken string `json:"authToken"`
-	ServerURL string `json:"serverUrl"`
-	RelayURL  string `json:"relayUrl"`
+	MachineID      string `json:"machineId"`
+	AuthToken      string `json:"authToken"`
+	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
+	ServerURL      string `json:"serverUrl"`
+	RelayURL       string `json:"relayUrl"`
 }
 
 // DefaultServerURL is the production web app host.

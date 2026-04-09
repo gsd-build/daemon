@@ -12,6 +12,9 @@ import (
 	"runtime"
 	"time"
 
+	"strings"
+
+	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/relay"
@@ -81,10 +84,62 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	}, nil
 }
 
+// checkAndRefreshToken checks whether the stored token is within 7 days of
+// expiry and, if so, calls the cloud refresh-token endpoint to rotate it.
+func (d *Daemon) checkAndRefreshToken() {
+	if d.cfg.TokenExpiresAt == "" {
+		return
+	}
+	expiresAt, err := time.Parse(time.RFC3339, d.cfg.TokenExpiresAt)
+	if err != nil {
+		fmt.Printf("warning: cannot parse tokenExpiresAt: %v\n", err)
+		return
+	}
+	if time.Until(expiresAt) > 7*24*time.Hour {
+		return
+	}
+
+	fmt.Println("token expires soon, refreshing...")
+	client := api.NewClient(d.cfg.ServerURL)
+	resp, err := client.RefreshToken(api.RefreshTokenRequest{
+		MachineID: d.cfg.MachineID,
+		Token:     d.cfg.AuthToken,
+	})
+	if err != nil {
+		fmt.Printf("warning: token refresh failed: %v\n", err)
+		return
+	}
+
+	d.cfg.AuthToken = resp.AuthToken
+	d.cfg.TokenExpiresAt = resp.TokenExpiresAt
+	if err := config.Save(d.cfg); err != nil {
+		fmt.Printf("warning: failed to save refreshed config: %v\n", err)
+		return
+	}
+	fmt.Println("token refreshed successfully")
+}
+
+// runTokenRefreshCheck periodically checks token expiry and refreshes if needed.
+func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.checkAndRefreshToken()
+		}
+	}
+}
+
 // Run connects to the relay and blocks until ctx is canceled.
 // Automatically reconnects with exponential backoff on connection failures.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.client.SetHandler(d.handleMessage)
+
+	// Check token expiry at startup.
+	d.checkAndRefreshToken()
 
 	backoff := 1 * time.Second
 	const maxBackoff = 60 * time.Second
@@ -94,6 +149,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		err := d.runOnce(ctx)
 		if err == nil || ctx.Err() != nil {
 			return err
+		}
+
+		// If the relay rejected us with token_expired, exit immediately.
+		if strings.Contains(err.Error(), "token_expired") {
+			return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 		}
 
 		// Reset backoff if the connection was alive for a while (healthy session).
@@ -130,9 +190,10 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	}
 	_ = welcome // TODO: use acked sequences to drive WAL replay
 
-	// Scope heartbeat to this connection; cancel when Run returns.
+	// Scope heartbeat and token refresh to this connection; cancel when Run returns.
 	connCtx, connCancel := context.WithCancel(ctx)
 	go d.runHeartbeat(connCtx)
+	go d.runTokenRefreshCheck(connCtx)
 
 	err = d.client.Run(ctx)
 	connCancel()
