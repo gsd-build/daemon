@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
+	"github.com/gsd-build/daemon/internal/display"
 	"github.com/gsd-build/daemon/internal/wal"
 	protocol "github.com/gsd-build/protocol-go"
 )
@@ -34,6 +36,7 @@ type Options struct {
 	SystemPrompt   string
 	ResumeSession  string
 	StartSeq       int64
+	Verbosity      display.VerbosityLevel
 }
 
 // Actor drives a single Claude session.
@@ -63,6 +66,9 @@ type Actor struct {
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
+
+	verbosity display.VerbosityLevel
+	stream    *display.StreamHandler
 
 	claudeSessionID atomic.Value // string
 }
@@ -114,6 +120,8 @@ func NewActor(opts Options) (*Actor, error) {
 		stopCh:  make(chan struct{}),
 	}
 	a.seq.Store(opts.StartSeq)
+	a.verbosity = opts.Verbosity
+	a.stream = display.NewStreamHandler(os.Stdout, opts.Verbosity)
 	return a, nil
 }
 
@@ -167,6 +175,10 @@ func (a *Actor) SendTask(task protocol.Task) error {
 	}
 	a.taskInFlight.Store(tc)
 
+	if a.verbosity != display.Quiet {
+		fmt.Print(display.FormatRequestBanner(task.Prompt, a.opts.CWD, a.opts.Model))
+	}
+
 	if err := a.opts.Relay.Send(&protocol.TaskStarted{
 		Type:      protocol.MsgTypeTaskStarted,
 		TaskID:    task.TaskID,
@@ -216,6 +228,24 @@ func (a *Actor) Run(ctx context.Context) error {
 func (a *Actor) handleEvent(e claude.Event) error {
 	next := a.seq.Add(1)
 
+	// Display to terminal before WAL/relay so user sees events ASAP.
+	// Display errors are swallowed — they must never interrupt the relay pipeline.
+	if a.stream.Handle(e.Raw) {
+		// stream_event was handled (progressive text delta)
+	} else if a.stream.ShouldSkipText() {
+		// Text was already streamed; show non-text parts only
+		if s := display.FormatEventSkipText(e.Raw, a.verbosity); s != "" {
+			fmt.Println(s)
+		}
+		if e.Type != "assistant" {
+			a.stream.ConsumeSkip()
+		}
+	} else {
+		if s := display.FormatEvent(e.Raw, a.verbosity); s != "" {
+			fmt.Println(s)
+		}
+	}
+
 	// Every event becomes a stream frame
 	frame := &protocol.Stream{
 		Type:           protocol.MsgTypeStream,
@@ -233,11 +263,9 @@ func (a *Actor) handleEvent(e claude.Event) error {
 		return fmt.Errorf("wal append: %w", err)
 	}
 	if err := a.opts.Relay.Send(frame); err != nil {
-		// Best-effort — WAL has the entry, relay reconnect will replay it
 		return nil
 	}
 
-	// On result events, also emit taskComplete
 	if e.Type == "result" {
 		return a.handleResult(e.Raw)
 	}
@@ -307,6 +335,13 @@ func (a *Actor) handleResult(raw json.RawMessage) error {
 				}); err != nil {
 					return err
 				}
+				if a.verbosity != display.Quiet {
+					fmt.Printf("%s? %s%s\n", display.Cyan, questionText, display.Reset)
+					for i, opt := range optionLabels {
+						fmt.Printf("%s  %d) %s%s\n", display.Dim, i+1, opt, display.Reset)
+					}
+					fmt.Printf("%swaiting for answer...%s\n", display.Dim, display.Reset)
+				}
 			} else {
 				if err := a.opts.Relay.Send(&protocol.PermissionRequest{
 					Type:      protocol.MsgTypePermissionRequest,
@@ -317,6 +352,13 @@ func (a *Actor) handleResult(raw json.RawMessage) error {
 					ToolInput: denial.ToolInput,
 				}); err != nil {
 					return err
+				}
+				if a.verbosity != display.Quiet {
+					fmt.Printf("%s⚠ PERMISSION REQUEST: %s%s\n", display.Yellow, denial.ToolName, display.Reset)
+					if summary, ok := toolInputSummary(denial.ToolInput); ok {
+						fmt.Printf("%s%s%s\n", display.Dim, summary, display.Reset)
+					}
+					fmt.Printf("%swaiting for approval...%s\n", display.Dim, display.Reset)
 				}
 			}
 		}
@@ -467,6 +509,9 @@ func (a *Actor) HandlePermissionResponse(resp *protocol.PermissionResponse) erro
 		if len(pd.Denials) == 0 {
 			return fmt.Errorf("pending denial has no tool names")
 		}
+		if a.verbosity != display.Quiet {
+			fmt.Printf("\n%sApproved — resuming.%s\n\n", display.Green, display.Reset)
+		}
 		return a.RestartWithGrant(context.Background(), pd.Denials[0], pd.Prompt)
 	}
 
@@ -483,6 +528,9 @@ func (a *Actor) HandleQuestionResponse(resp *protocol.QuestionResponse) error {
 	_ = pd // we don't need pd state for the answer flow
 
 	a.pendingDenial.Store((*pendingDenial)(nil))
+	if a.verbosity != display.Quiet {
+		fmt.Printf("\n%sAnswer: %s%s\n\n", display.Green, resp.Answer, display.Reset)
+	}
 	answerMsg := fmt.Sprintf("My answer: %s", resp.Answer)
 	if err := a.snapshotExecutor().Send(answerMsg); err != nil {
 		return fmt.Errorf("send answer to claude: %w", err)
@@ -538,4 +586,18 @@ func (a *Actor) Stop() error {
 // PruneWAL removes WAL entries up to (and including) upTo.
 func (a *Actor) PruneWAL(upTo int64) error {
 	return a.log.PruneUpTo(upTo)
+}
+
+func toolInputSummary(raw json.RawMessage) (string, bool) {
+	var input map[string]interface{}
+	if json.Unmarshal(raw, &input) != nil {
+		return "", false
+	}
+	if cmd, ok := input["command"].(string); ok {
+		return "command: " + cmd, true
+	}
+	if fp, ok := input["file_path"].(string); ok {
+		return "file_path: " + fp, true
+	}
+	return "", false
 }
