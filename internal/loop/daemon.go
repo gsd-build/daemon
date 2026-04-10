@@ -16,6 +16,7 @@ import (
 
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/display"
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
@@ -70,7 +71,7 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		Arch:          runtime.GOARCH,
 	})
 
-	manager := session.NewManager(walDir, binaryPath, client)
+	manager := session.NewManager(walDir, binaryPath, client, display.Default)
 
 	return &Daemon{
 		cfg:     cfg,

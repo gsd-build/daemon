@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/gsd-build/daemon/internal/display"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -18,15 +19,17 @@ type Manager struct {
 	baseWALDir string
 	relay      RelaySender
 	binaryPath string
+	verbosity  display.VerbosityLevel
 }
 
 // NewManager constructs a Manager rooted at baseWALDir.
-func NewManager(baseWALDir, binaryPath string, relay RelaySender) *Manager {
+func NewManager(baseWALDir, binaryPath string, relay RelaySender, verbosity display.VerbosityLevel) *Manager {
 	return &Manager{
 		actors:     make(map[string]*Actor),
 		baseWALDir: baseWALDir,
 		relay:      relay,
 		binaryPath: binaryPath,
+		verbosity:  verbosity,
 	}
 }
 
@@ -58,6 +61,7 @@ func (m *Manager) Spawn(
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = m.binaryPath
 	}
+	opts.Verbosity = m.verbosity
 
 	actor, err := NewActor(opts)
 	if err != nil {
@@ -91,6 +95,9 @@ func (m *Manager) Spawn(
 			return
 		}
 		log.Printf("[session] actor.Run exited with error: session=%s err=%v", sessionID, err)
+		if m.verbosity != display.Quiet {
+			fmt.Print(display.FormatErrorBanner(err.Error()))
+		}
 		if relay == nil {
 			return
 		}
