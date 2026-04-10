@@ -265,13 +265,28 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			})
 		}
 	}
-	return actor.SendTask(*msg)
+
+	// Task execution errors (e.g. claude binary not found, executor not ready)
+	// must NOT propagate up — that would kill the relay connection and take the
+	// entire daemon offline. Report the failure to the browser and keep running.
+	if err := actor.SendTask(*msg); err != nil {
+		return d.client.Send(&protocol.TaskError{
+			Type:      protocol.MsgTypeTaskError,
+			TaskID:    msg.TaskID,
+			SessionID: msg.SessionID,
+			ChannelID: msg.ChannelID,
+			Error:     err.Error(),
+		})
+	}
+	return nil
 }
 
 func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
-		return actor.Stop()
+		if err := actor.Stop(); err != nil {
+			fmt.Printf("warning: stop session %s: %v\n", msg.SessionID, err)
+		}
 	}
 	return nil
 }
@@ -310,7 +325,9 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 func (d *Daemon) handleAck(msg *protocol.Ack) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
-		return actor.PruneWAL(msg.SequenceNumber)
+		if err := actor.PruneWAL(msg.SequenceNumber); err != nil {
+			fmt.Printf("warning: prune WAL session %s seq %d: %v\n", msg.SessionID, msg.SequenceNumber, err)
+		}
 	}
 	return nil
 }
@@ -318,21 +335,23 @@ func (d *Daemon) handleAck(msg *protocol.Ack) error {
 func (d *Daemon) handleReplay(msg *protocol.ReplayRequest) error {
 	// Read the WAL for this session and resend all entries with seq > fromSequence
 	walPath := filepath.Join(d.walDir, msg.SessionID+".jsonl")
-	log, err := wal.Open(walPath)
+	walLog, err := wal.Open(walPath)
 	if err != nil {
-		return fmt.Errorf("open wal: %w", err)
+		fmt.Printf("warning: replay open wal session %s: %v\n", msg.SessionID, err)
+		return nil
 	}
-	defer log.Close()
+	defer walLog.Close()
 
-	entries, err := log.ReadFrom(msg.FromSequence)
+	entries, err := walLog.ReadFrom(msg.FromSequence)
 	if err != nil {
-		return fmt.Errorf("read wal: %w", err)
+		fmt.Printf("warning: replay read wal session %s: %v\n", msg.SessionID, err)
+		return nil
 	}
 
 	for _, e := range entries {
-		// Each entry is a serialized Stream frame; send it back as-is
 		if err := d.client.Send(json.RawMessage(e.Data)); err != nil {
-			return err
+			fmt.Printf("warning: replay send session %s: %v\n", msg.SessionID, err)
+			return nil
 		}
 	}
 	return nil
@@ -341,17 +360,25 @@ func (d *Daemon) handleReplay(msg *protocol.ReplayRequest) error {
 func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor == nil {
-		return fmt.Errorf("no actor for session %s", msg.SessionID)
+		fmt.Printf("warning: no actor for permission response session %s\n", msg.SessionID)
+		return nil
 	}
-	return actor.HandlePermissionResponse(msg)
+	if err := actor.HandlePermissionResponse(msg); err != nil {
+		fmt.Printf("warning: permission response session %s: %v\n", msg.SessionID, err)
+	}
+	return nil
 }
 
 func (d *Daemon) handleQuestionResponse(msg *protocol.QuestionResponse) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor == nil {
-		return fmt.Errorf("no actor for session %s", msg.SessionID)
+		fmt.Printf("warning: no actor for question response session %s\n", msg.SessionID)
+		return nil
 	}
-	return actor.HandleQuestionResponse(msg)
+	if err := actor.HandleQuestionResponse(msg); err != nil {
+		fmt.Printf("warning: question response session %s: %v\n", msg.SessionID, err)
+	}
+	return nil
 }
 
 func configHomeDir() (string, error) {
