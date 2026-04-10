@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	protocol "github.com/gsd-build/protocol-go"
@@ -15,6 +16,19 @@ import (
 
 // BrowseDir lists entries in the given absolute path.
 func BrowseDir(path string) ([]protocol.BrowseEntry, error) {
+	// Resolve ~ to user home directory
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home dir: %w", err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("path must be absolute: %q", path)
 	}

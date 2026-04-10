@@ -224,6 +224,8 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleStop(msg)
 	case *protocol.BrowseDir:
 		return d.handleBrowse(msg)
+	case *protocol.MkDir:
+		return d.handleMkDir(msg)
 	case *protocol.ReadFile:
 		return d.handleRead(msg)
 	case *protocol.PermissionResponse:
@@ -299,6 +301,20 @@ func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
 		ChannelID: msg.ChannelID,
 		OK:        err == nil,
 		Entries:   entries,
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	return d.client.Send(result)
+}
+
+func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
+	err := fs.MkDir(msg.Path)
+	result := &protocol.MkDirResult{
+		Type:      protocol.MsgTypeMkDirResult,
+		RequestID: msg.RequestID,
+		ChannelID: msg.ChannelID,
+		OK:        err == nil,
 	}
 	if err != nil {
 		result.Error = err.Error()
