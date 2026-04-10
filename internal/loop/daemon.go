@@ -26,11 +26,12 @@ import (
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg     *config.Config
-	version string
-	manager *session.Manager
-	client  *relay.Client
-	walDir  string
+	cfg       *config.Config
+	version   string
+	manager   *session.Manager
+	client    *relay.Client
+	walDir    string
+	verbosity display.VerbosityLevel
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -49,13 +50,13 @@ func buildRelayURL(cfg *config.Config) string {
 }
 
 // New constructs a Daemon that spawns the real `claude` CLI on PATH.
-func New(cfg *config.Config, version string) (*Daemon, error) {
-	return NewWithBinaryPath(cfg, version, "claude")
+func New(cfg *config.Config, version string, verbosity display.VerbosityLevel) (*Daemon, error) {
+	return NewWithBinaryPath(cfg, version, "claude", verbosity)
 }
 
 // NewWithBinaryPath constructs a Daemon that spawns the given binary instead
 // of the default `claude`. Used by integration tests to inject fake-claude.
-func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon, error) {
+func NewWithBinaryPath(cfg *config.Config, version, binaryPath string, verbosity display.VerbosityLevel) (*Daemon, error) {
 	home, err := configHomeDir()
 	if err != nil {
 		return nil, err
@@ -71,14 +72,15 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		Arch:          runtime.GOARCH,
 	})
 
-	manager := session.NewManager(walDir, binaryPath, client, display.Default)
+	manager := session.NewManager(walDir, binaryPath, client, verbosity)
 
 	return &Daemon{
-		cfg:     cfg,
-		version: version,
-		manager: manager,
-		client:  client,
-		walDir:  walDir,
+		cfg:       cfg,
+		version:   version,
+		manager:   manager,
+		client:    client,
+		walDir:    walDir,
+		verbosity: verbosity,
 	}, nil
 }
 
@@ -159,8 +161,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			backoff = 1 * time.Second
 		}
 
-		fmt.Printf("relay connection lost: %v\n", err)
-		fmt.Printf("reconnecting in %s...\n", backoff)
+		fmt.Printf("%srelay disconnected (%s) — %v%s\n", display.Dim, time.Since(connStart).Truncate(time.Second), err, display.Reset)
+		fmt.Printf("%sreconnecting in %s...%s\n", display.Dim, backoff, display.Reset)
 
 		select {
 		case <-ctx.Done():
@@ -188,9 +190,12 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	}
 	_ = welcome // TODO: use acked sequences to drive WAL replay
 
+	fmt.Printf("%srelay connected%s\n", display.Dim, display.Reset)
+
 	// Scope heartbeat and token refresh to this connection; cancel when Run returns.
 	connCtx, connCancel := context.WithCancel(ctx)
 	go d.runHeartbeat(connCtx)
+	go d.runIdleHeartbeat(connCtx)
 	go d.runTokenRefreshCheck(connCtx)
 
 	err = d.client.Run(ctx)
@@ -213,6 +218,20 @@ func (d *Daemon) runHeartbeat(ctx context.Context) {
 				Status:        "online",
 				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 			})
+		}
+	}
+}
+
+func (d *Daemon) runIdleHeartbeat(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now().Format("15:04")
+			fmt.Printf("%s%s ♥ connected · idle%s\n", display.Dim, now, display.Reset)
 		}
 	}
 }

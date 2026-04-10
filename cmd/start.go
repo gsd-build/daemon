@@ -8,8 +8,14 @@ import (
 	"syscall"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/display"
 	"github.com/gsd-build/daemon/internal/loop"
 	"github.com/spf13/cobra"
+)
+
+var (
+	flagQuiet bool
+	flagDebug bool
 )
 
 var startCmd = &cobra.Command{
@@ -21,7 +27,14 @@ var startCmd = &cobra.Command{
 			return fmt.Errorf("not paired — run `gsd-cloud login` first: %w", err)
 		}
 
-		d, err := loop.New(cfg, Version)
+		verbosity := display.Default
+		if flagDebug {
+			verbosity = display.Debug
+		} else if flagQuiet {
+			verbosity = display.Quiet
+		}
+
+		d, err := loop.New(cfg, Version, verbosity)
 		if err != nil {
 			return fmt.Errorf("init daemon: %w", err)
 		}
@@ -46,5 +59,7 @@ var startCmd = &cobra.Command{
 }
 
 func init() {
+	startCmd.Flags().BoolVar(&flagQuiet, "quiet", false, "Connection status and heartbeat only")
+	startCmd.Flags().BoolVar(&flagDebug, "debug", false, "Full event details (thinking, tool results, inputs)")
 	rootCmd.AddCommand(startCmd)
 }
