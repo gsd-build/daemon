@@ -8,11 +8,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/logging"
 	"github.com/gsd-build/daemon/internal/loop"
 	"github.com/gsd-build/daemon/internal/service"
+	"github.com/gsd-build/daemon/internal/update"
 	"github.com/spf13/cobra"
 )
 
@@ -111,6 +113,14 @@ func startDaemon() error {
 		"relay", cfg.RelayURL,
 		"machine", cfg.MachineID,
 	)
+
+	if flagService {
+		go func() {
+			time.Sleep(30 * time.Second)
+			update.ClearRollbackFlag()
+			slog.Info("boot marker: survived 30s, rollback flag cleared")
+		}()
+	}
 
 	if err := d.Run(ctx); err != nil && err != context.Canceled {
 		return err
