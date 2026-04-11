@@ -51,8 +51,7 @@ func TestClientConnectsAndSendsHello(t *testing.T) {
 			// Send back a welcome after hello
 			if env.Type == protocol.MsgTypeHello {
 				welcome := protocol.Welcome{
-					Type:                    protocol.MsgTypeWelcome,
-					AckedSequencesBySession: map[string]int64{},
+					Type: protocol.MsgTypeWelcome,
 				}
 				buf, _ := json.Marshal(welcome)
 				_ = c.Write(ctx, websocket.MessageText, buf)

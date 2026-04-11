@@ -81,8 +81,7 @@ func TestE2EHappyPath(t *testing.T) {
 
 	// 10. Send Welcome back so daemon's Connect() returns.
 	if err := relay.Send(&protocol.Welcome{
-		Type:                    protocol.MsgTypeWelcome,
-		AckedSequencesBySession: map[string]int64{},
+		Type: protocol.MsgTypeWelcome,
 	}); err != nil {
 		t.Fatalf("send Welcome: %v", err)
 	}
@@ -197,8 +196,7 @@ func TestE2EPermissionFlow(t *testing.T) {
 	}
 
 	if err := relay.Send(&protocol.Welcome{
-		Type:                    protocol.MsgTypeWelcome,
-		AckedSequencesBySession: map[string]int64{},
+		Type: protocol.MsgTypeWelcome,
 	}); err != nil {
 		t.Fatalf("send Welcome: %v", err)
 	}
