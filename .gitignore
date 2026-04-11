@@ -1,1 +1,4 @@
 .worktrees/
+.DS_Store
+gsd-cloud
+fake-claude
