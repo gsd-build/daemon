@@ -1,10 +1,12 @@
 package loop
 
 import (
+	"context"
 	"net/url"
 	"testing"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/session"
 )
 
 func TestRelayURLIncludesMachineIDOnly(t *testing.T) {
@@ -63,5 +65,41 @@ func TestRelayURLPreservesExistingQuery(t *testing.T) {
 	}
 	if parsed.Path != "/ws/daemon" {
 		t.Errorf("unexpected path: %q", parsed.Path)
+	}
+}
+
+func TestGracefulShutdownCallsStopAll(t *testing.T) {
+	stopped := false
+	mgr := &mockManager{stopAllFn: func() { stopped = true }}
+
+	d := &Daemon{
+		cfg:     &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version: "test",
+		manager: mgr,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediate shutdown
+
+	d.gracefulShutdown(ctx)
+
+	if !stopped {
+		t.Error("expected StopAll to be called during graceful shutdown")
+	}
+}
+
+// mockManager implements SessionManager for testing.
+type mockManager struct {
+	stopAllFn func()
+}
+
+func (m *mockManager) Get(sessionID string) *session.Actor { return nil }
+func (m *mockManager) Spawn(ctx context.Context, opts session.Options) (*session.Actor, error) {
+	return nil, nil
+}
+func (m *mockManager) ActiveTaskIDs() []string { return nil }
+func (m *mockManager) StopAll() {
+	if m.stopAllFn != nil {
+		m.stopAllFn()
 	}
 }

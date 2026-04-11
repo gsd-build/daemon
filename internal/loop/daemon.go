@@ -19,11 +19,19 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
+// SessionManager is the interface the Daemon uses to interact with session actors.
+type SessionManager interface {
+	Get(sessionID string) *session.Actor
+	Spawn(ctx context.Context, opts session.Options) (*session.Actor, error)
+	ActiveTaskIDs() []string
+	StopAll()
+}
+
 // Daemon is the running daemon state.
 type Daemon struct {
 	cfg     *config.Config
 	version string
-	manager *session.Manager
+	manager SessionManager
 	client  *relay.Client
 }
 
@@ -127,6 +135,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.checkAndRefreshToken()
 	go d.runTokenRefreshCheck(ctx)
 	go d.runIdleHeartbeat(ctx)
+	defer d.gracefulShutdown(ctx)
 
 	slog.Info("connecting to relay", "url", d.cfg.RelayURL, "machine", d.cfg.MachineID)
 
@@ -304,5 +313,48 @@ func (d *Daemon) handleQuestionResponse(msg *protocol.QuestionResponse) error {
 		slog.Warn("question response failed", "session", msg.SessionID, "error", err)
 	}
 	return nil
+}
+
+// gracefulShutdown performs a two-stage shutdown:
+// 1. Stop accepting new tasks (context is already cancelled).
+// 2. Wait up to 30 seconds for in-flight tasks to complete.
+// 3. Force-stop any remaining actors.
+func (d *Daemon) gracefulShutdown(ctx context.Context) {
+	slog.Info("graceful shutdown: draining in-flight tasks", "timeout", "30s")
+
+	// Send "going offline" heartbeat to relay.
+	if d.client != nil {
+		sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer sendCancel()
+		_ = d.client.Send(sendCtx, &protocol.Heartbeat{
+			Type:      protocol.MsgTypeHeartbeat,
+			MachineID: d.cfg.MachineID,
+			Status:    "offline",
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	}
+
+	// Give actors up to 30 seconds to finish.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer drainCancel()
+
+	done := make(chan struct{})
+	go func() {
+		d.manager.StopAll()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		slog.Info("graceful shutdown: all actors stopped")
+	case <-drainCtx.Done():
+		slog.Warn("graceful shutdown: drain timeout exceeded, force-stopping")
+		d.manager.StopAll()
+	}
+
+	// Close WebSocket cleanly.
+	if d.client != nil {
+		d.client.Close()
+	}
 }
 
