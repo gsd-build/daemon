@@ -69,11 +69,11 @@ fetch_latest_tag() {
         printf 'daemon/%s' "$GSD_VERSION"
         return
     fi
-    # Use the GitHub Releases API. Filter to tags starting with "daemon/v".
+    # Use the GitHub Releases API "latest" endpoint which returns the most
+    # recent non-prerelease, non-draft release regardless of creation order.
     api_base="${GSD_API_BASE:-https://api.github.com}"
-    api_url="${api_base}/repos/${REPO}/releases"
-    json=$(curl -fsSL "$api_url") || err "failed to fetch release list from $api_url"
-    # Pick the first tag_name that starts with daemon/v
+    api_url="${api_base}/repos/${REPO}/releases/latest"
+    json=$(curl -fsSL "$api_url") || err "failed to fetch latest release from $api_url"
     tag=$(printf '%s' "$json" | grep -o '"tag_name": *"daemon/v[^"]*"' | head -n1 | sed 's/.*"daemon\/v\([^"]*\)".*/daemon\/v\1/')
     if [ -z "$tag" ]; then
         err "no daemon/v* release found in $REPO"
