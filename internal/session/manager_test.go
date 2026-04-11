@@ -163,3 +163,100 @@ func TestManagerInFlightCount(t *testing.T) {
 		t.Errorf("expected 2, got %d", mgr.InFlightCount())
 	}
 }
+
+func TestReaperRemovesIdleActors(t *testing.T) {
+	relay := newFakeRelay()
+	cfg := &config.Config{MaxConcurrentTasks: 10}
+
+	mgr := NewManager(ManagerOptions{
+		BinaryPath: "fake",
+		Relay:      relay,
+		Config:     cfg,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a1, _ := mgr.Spawn(ctx, Options{SessionID: "s1", CWD: t.TempDir()})
+	_, _ = mgr.Spawn(ctx, Options{SessionID: "s2", CWD: t.TempDir()})
+
+	// Make s1 idle for "long ago"
+	a1.taskMu.Lock()
+	a1.lastActiveAt = time.Now().Add(-1 * time.Hour)
+	a1.taskMu.Unlock()
+
+	// Run one reap cycle with a 30-minute idle threshold
+	reaped := mgr.ReapIdleActors(30 * time.Minute)
+
+	if reaped != 1 {
+		t.Errorf("expected 1 reaped, got %d", reaped)
+	}
+
+	if mgr.Get("s1") != nil {
+		t.Error("expected s1 to be removed")
+	}
+	if mgr.Get("s2") == nil {
+		t.Error("expected s2 to remain")
+	}
+}
+
+func TestReaperSkipsActorsWithInFlightTasks(t *testing.T) {
+	relay := newFakeRelay()
+	cfg := &config.Config{MaxConcurrentTasks: 10}
+
+	mgr := NewManager(ManagerOptions{
+		BinaryPath: "fake",
+		Relay:      relay,
+		Config:     cfg,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a1, _ := mgr.Spawn(ctx, Options{SessionID: "s1", CWD: t.TempDir()})
+
+	// Make s1 idle for "long ago" but with an in-flight task
+	a1.taskMu.Lock()
+	a1.lastActiveAt = time.Now().Add(-1 * time.Hour)
+	a1.taskID = "t1" // in-flight
+	a1.taskMu.Unlock()
+
+	reaped := mgr.ReapIdleActors(30 * time.Minute)
+
+	if reaped != 0 {
+		t.Errorf("expected 0 reaped (in-flight task), got %d", reaped)
+	}
+
+	if mgr.Get("s1") == nil {
+		t.Error("expected s1 to remain (has in-flight task)")
+	}
+}
+
+func TestStartReaper(t *testing.T) {
+	relay := newFakeRelay()
+	cfg := &config.Config{MaxConcurrentTasks: 10}
+
+	mgr := NewManager(ManagerOptions{
+		BinaryPath: "fake",
+		Relay:      relay,
+		Config:     cfg,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	a1, _ := mgr.Spawn(ctx, Options{SessionID: "s1", CWD: t.TempDir()})
+	a1.taskMu.Lock()
+	a1.lastActiveAt = time.Now().Add(-1 * time.Hour)
+	a1.taskMu.Unlock()
+
+	// Start reaper with short tick for testing
+	mgr.StartReaper(ctx, 50*time.Millisecond, 30*time.Minute)
+
+	// Wait for one tick
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if mgr.Get("s1") != nil {
+		t.Error("expected reaper to remove idle actor s1")
+	}
+}

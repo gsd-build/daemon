@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
 )
@@ -169,4 +170,46 @@ func memoryTooLow() bool {
 		return false // can't determine — don't block tasks
 	}
 	return float64(avail) < float64(total)*0.10
+}
+
+// ReapIdleActors stops and removes actors idle longer than maxIdle.
+// Actors with in-flight tasks are never reaped. Returns the count of reaped actors.
+func (m *Manager) ReapIdleActors(maxIdle time.Duration) int {
+	m.mu.Lock()
+	var toReap []string
+	cutoff := time.Now().Add(-maxIdle)
+	for id, a := range m.actors {
+		if a.HasInFlightTask() {
+			continue
+		}
+		if a.LastActiveAt().Before(cutoff) {
+			toReap = append(toReap, id)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, id := range toReap {
+		m.Remove(id)
+		log.Printf("[reaper] reaped idle actor: session=%s", id)
+	}
+	return len(toReap)
+}
+
+// StartReaper launches a goroutine that reaps idle actors on a tick interval.
+// Runs until ctx is cancelled.
+func (m *Manager) StartReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration) {
+	go func() {
+		ticker := time.NewTicker(tick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n := m.ReapIdleActors(maxIdle); n > 0 {
+					log.Printf("[reaper] reaped %d idle actor(s)", n)
+				}
+			}
+		}
+	}()
 }
