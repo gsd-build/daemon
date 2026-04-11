@@ -99,6 +99,99 @@ func (r *fakeRelay) waitForTaskComplete(t *testing.T, timeout time.Duration) boo
 	})
 }
 
+func (r *fakeRelay) waitForType(t *testing.T, msgType string, timeout time.Duration) bool {
+	return r.waitFor(t, timeout, func(frames []any) bool {
+		for _, f := range frames {
+			switch v := f.(type) {
+			case *protocol.TaskStarted:
+				if v.Type == msgType {
+					return true
+				}
+			case *protocol.TaskCancelled:
+				if v.Type == msgType {
+					return true
+				}
+			case *protocol.TaskComplete:
+				if v.Type == msgType {
+					return true
+				}
+			case *protocol.TaskError:
+				if v.Type == msgType {
+					return true
+				}
+			}
+		}
+		return false
+	})
+}
+
+func TestCancelTask_ActorStaysAlive(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-cancel",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- actor.Run(ctx) }()
+
+	// Send first task
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "t1",
+		SessionID: "sess-cancel",
+		ChannelID: "ch1",
+		Prompt:    "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for task to start (taskStarted frame)
+	if !relay.waitForType(t, "taskStarted", 5*time.Second) {
+		t.Fatal("timed out waiting for taskStarted")
+	}
+
+	// Cancel the task
+	actor.CancelTask()
+
+	// Wait for taskCancelled frame
+	if !relay.waitForType(t, "taskCancelled", 5*time.Second) {
+		t.Fatal("timed out waiting for taskCancelled")
+	}
+
+	// Verify the actor is still alive by sending a second task
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "t2",
+		SessionID: "sess-cancel",
+		ChannelID: "ch2",
+		Prompt:    "world",
+	}); err != nil {
+		t.Fatalf("second task should succeed: %v", err)
+	}
+
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for second task to complete")
+	}
+
+	// Verify actor.Run() hasn't returned (actor is still alive)
+	select {
+	case err := <-done:
+		t.Fatalf("actor.Run() should not have returned, got: %v", err)
+	default:
+		// good — still running
+	}
+}
+
 func TestActorHappyPath(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()

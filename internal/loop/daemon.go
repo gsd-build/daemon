@@ -284,9 +284,7 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
-		if err := actor.Stop(); err != nil {
-			fmt.Printf("warning: stop session %s: %v\n", msg.SessionID, err)
-		}
+		actor.CancelTask()
 	}
 	return nil
 }

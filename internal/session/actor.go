@@ -58,6 +58,10 @@ type Actor struct {
 	questionCh map[string]chan string // requestId → answer channel
 
 	stopCh chan struct{}
+
+	taskMu     sync.Mutex
+	taskCancel context.CancelFunc // cancels the in-flight task context; nil when idle
+	taskID     string             // ID of the in-flight task; empty when idle
 }
 
 type taskContext struct {
@@ -142,6 +146,21 @@ func (a *Actor) Run(ctx context.Context) error {
 }
 
 func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
+	taskCtx, cancel := context.WithCancel(ctx)
+
+	a.taskMu.Lock()
+	a.taskCancel = cancel
+	a.taskID = task.TaskID
+	a.taskMu.Unlock()
+
+	defer func() {
+		cancel()
+		a.taskMu.Lock()
+		a.taskCancel = nil
+		a.taskID = ""
+		a.taskMu.Unlock()
+	}()
+
 	tc := &taskContext{
 		TaskID:         task.TaskID,
 		ChannelID:      task.ChannelID,
@@ -163,7 +182,21 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		return fmt.Errorf("send taskStarted: %w", err)
 	}
 
-	return a.runExecutor(ctx, tc, task.Prompt)
+	err := a.runExecutor(taskCtx, tc, task.Prompt)
+
+	// If the task context was cancelled (user hit ESC), send taskCancelled
+	// instead of returning an error — so Run() loops back for the next task.
+	if taskCtx.Err() == context.Canceled && ctx.Err() == nil {
+		_ = a.opts.Relay.Send(&protocol.TaskCancelled{
+			Type:      protocol.MsgTypeTaskCancelled,
+			TaskID:    task.TaskID,
+			SessionID: a.opts.SessionID,
+			ChannelID: tc.ChannelID,
+		})
+		return nil // not an error — actor stays alive
+	}
+
+	return err
 }
 
 func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string) error {
@@ -543,6 +576,18 @@ func (a *Actor) Stop() error {
 		close(a.stopCh)
 	}
 	return nil
+}
+
+// CancelTask cancels the in-flight task (if any) without shutting down the actor.
+// The executor's context.Done fires, SIGKILLing the Claude subprocess.
+// Run() loops back and waits for the next task.
+func (a *Actor) CancelTask() {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	if a.taskCancel != nil {
+		a.taskCancel()
+		a.taskCancel = nil
+	}
 }
 
 func toolInputSummary(raw json.RawMessage) (string, bool) {
