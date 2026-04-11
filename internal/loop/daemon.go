@@ -24,6 +24,8 @@ type SessionManager interface {
 	Get(sessionID string) *session.Actor
 	Spawn(ctx context.Context, opts session.Options) (*session.Actor, error)
 	ActiveTaskIDs() []string
+	ActiveCount() (total int, executing int)
+	InFlightCount() int
 	StopAll()
 }
 
@@ -67,7 +69,11 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		Arch:          runtime.GOARCH,
 	})
 
-	manager := session.NewManager(binaryPath, client)
+	manager := session.NewManager(session.ManagerOptions{
+		BinaryPath: binaryPath,
+		Relay:      client,
+		Config:     cfg,
+	})
 
 	return &Daemon{
 		cfg:     cfg,

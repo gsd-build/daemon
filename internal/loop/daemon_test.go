@@ -97,7 +97,9 @@ func (m *mockManager) Get(sessionID string) *session.Actor { return nil }
 func (m *mockManager) Spawn(ctx context.Context, opts session.Options) (*session.Actor, error) {
 	return nil, nil
 }
-func (m *mockManager) ActiveTaskIDs() []string { return nil }
+func (m *mockManager) ActiveTaskIDs() []string              { return nil }
+func (m *mockManager) ActiveCount() (total int, executing int) { return 0, 0 }
+func (m *mockManager) InFlightCount() int                    { return 0 }
 func (m *mockManager) StopAll() {
 	if m.stopAllFn != nil {
 		m.stopAllFn()
