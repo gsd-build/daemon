@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // Options configures a Claude process.
@@ -73,11 +74,11 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 	if e.opts.ResumeSession != "" {
 		args = append(args, "--resume", e.opts.ResumeSession)
 	}
-	for _, tool := range e.opts.AllowedTools {
-		args = append(args, "--allowedTools", tool)
+	if len(e.opts.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(e.opts.AllowedTools, ","))
 	}
-	// Prompt as positional argument — must be last
-	args = append(args, e.opts.Prompt)
+	// "--" stops flag parsing so the prompt is never consumed by variadic flags
+	args = append(args, "--", e.opts.Prompt)
 
 	cmd := exec.CommandContext(ctx, e.opts.BinaryPath, args...)
 	cmd.Dir = e.opts.CWD

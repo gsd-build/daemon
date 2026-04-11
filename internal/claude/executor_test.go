@@ -189,20 +189,17 @@ func TestExecutorAllowedTools(t *testing.T) {
 	_ = e.Run(ctx, func(_ Event) error { return nil })
 
 	argv := readArgsFile(t, argsFile)
-	foundWrite := false
-	foundBash := false
+	found := false
 	for i, arg := range argv {
 		if arg == "--allowedTools" && i+1 < len(argv) {
-			if argv[i+1] == "Write" {
-				foundWrite = true
-			}
-			if argv[i+1] == "Bash" {
-				foundBash = true
+			val := argv[i+1]
+			if (val == "Write,Bash" || val == "Bash,Write") {
+				found = true
 			}
 		}
 	}
-	if !foundWrite || !foundBash {
-		t.Errorf("expected --allowedTools Write and Bash, got: %v", argv)
+	if !found {
+		t.Errorf("expected --allowedTools with comma-joined tools, got: %v", argv)
 	}
 }
 
