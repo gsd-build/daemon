@@ -5,6 +5,7 @@ package loop
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/url"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/fs"
+	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	protocol "github.com/gsd-build/protocol-go"
@@ -26,6 +28,7 @@ type SessionManager interface {
 	ActiveTaskIDs() []string
 	ActiveCount() (total int, executing int)
 	InFlightCount() int
+	StartReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration)
 	StopAll()
 }
 
@@ -69,10 +72,22 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		Arch:          runtime.GOARCH,
 	})
 
+	// Clean up stale PID files from previous crashes
+	pidDir, err := pidfile.Dir()
+	if err != nil {
+		log.Printf("[daemon] pid dir: %v", err)
+		pidDir = "" // disable PID tracking if we can't get the dir
+	} else {
+		if n := pidfile.CleanStale(pidDir); n > 0 {
+			log.Printf("[daemon] cleaned %d stale PID file(s)", n)
+		}
+	}
+
 	manager := session.NewManager(session.ManagerOptions{
 		BinaryPath: binaryPath,
 		Relay:      client,
 		Config:     cfg,
+		PIDDir:     pidDir,
 	})
 
 	return &Daemon{
@@ -141,6 +156,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.checkAndRefreshToken()
 	go d.runTokenRefreshCheck(ctx)
 	go d.runIdleHeartbeat(ctx)
+	d.manager.StartReaper(ctx, 5*time.Minute, 30*time.Minute)
 	defer d.gracefulShutdown(ctx)
 
 	slog.Info("connecting to relay", "url", d.cfg.RelayURL, "machine", d.cfg.MachineID)

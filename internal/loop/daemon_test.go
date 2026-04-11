@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/session"
@@ -100,6 +101,7 @@ func (m *mockManager) Spawn(ctx context.Context, opts session.Options) (*session
 func (m *mockManager) ActiveTaskIDs() []string              { return nil }
 func (m *mockManager) ActiveCount() (total int, executing int) { return 0, 0 }
 func (m *mockManager) InFlightCount() int                    { return 0 }
+func (m *mockManager) StartReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration) {}
 func (m *mockManager) StopAll() {
 	if m.stopAllFn != nil {
 		m.stopAllFn()
