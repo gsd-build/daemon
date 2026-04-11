@@ -21,7 +21,6 @@ func TestManagerSpawnAndGet(t *testing.T) {
 
 	a, err := m.Spawn(ctx, Options{
 		SessionID: "s-1",
-		ChannelID: "c",
 		CWD:       t.TempDir(),
 	})
 	if err != nil {

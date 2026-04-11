@@ -237,6 +237,9 @@ func (d *Daemon) runIdleHeartbeat(ctx context.Context) {
 }
 
 func (d *Daemon) handleMessage(env *protocol.Envelope) error {
+	if d.verbosity == display.Debug {
+		fmt.Printf("%s[debug] received message type=%s%s\n", display.Dim, env.Type, display.Reset)
+	}
 	switch msg := env.Payload.(type) {
 	case *protocol.Task:
 		return d.handleTask(msg)
@@ -269,7 +272,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		var err error
 		actor, err = d.manager.Spawn(ctx, session.Options{
 			SessionID:      msg.SessionID,
-			ChannelID:      msg.ChannelID,
 			CWD:            msg.CWD,
 			Model:          msg.Model,
 			Effort:         msg.Effort,

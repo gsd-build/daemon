@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
@@ -24,7 +26,6 @@ type RelaySender interface {
 // Options configures a new Actor.
 type Options struct {
 	SessionID      string
-	ChannelID      string
 	BinaryPath     string
 	CWD            string
 	WALPath        string
@@ -53,13 +54,19 @@ type Actor struct {
 	allowedTools    []string // accumulates as user grants permissions
 
 	taskCh chan protocol.Task // SendTask writes here, Run reads
-	permCh chan permResponse  // HandlePermissionResponse/HandleQuestionResponse write here
+	permCh chan permResponse  // HandlePermissionResponse writes here
+
+	// Question responses are routed by requestId so batch questions can
+	// be answered in any order without blocking each other.
+	questionMu sync.Mutex
+	questionCh map[string]chan string // requestId → answer channel
 
 	stopCh chan struct{}
 }
 
 type taskContext struct {
 	TaskID         string
+	ChannelID      string
 	StartedAt      time.Time
 	OriginalPrompt string
 }
@@ -93,6 +100,7 @@ func NewActor(opts Options) (*Actor, error) {
 		claudeSessionID: opts.ResumeSession,
 		taskCh:          make(chan protocol.Task, 1),
 		permCh:          make(chan permResponse, 1),
+		questionCh:      make(map[string]chan string),
 		stopCh:          make(chan struct{}),
 	}, nil
 }
@@ -141,7 +149,7 @@ func (a *Actor) Run(ctx context.Context) error {
 					Type:      protocol.MsgTypeTaskError,
 					TaskID:    task.TaskID,
 					SessionID: a.opts.SessionID,
-					ChannelID: a.opts.ChannelID,
+					ChannelID: task.ChannelID,
 					Error:     err.Error(),
 				})
 			}
@@ -152,6 +160,7 @@ func (a *Actor) Run(ctx context.Context) error {
 func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	tc := &taskContext{
 		TaskID:         task.TaskID,
+		ChannelID:      task.ChannelID,
 		StartedAt:      time.Now(),
 		OriginalPrompt: task.Prompt,
 	}
@@ -164,7 +173,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		Type:      protocol.MsgTypeTaskStarted,
 		TaskID:    task.TaskID,
 		SessionID: a.opts.SessionID,
-		ChannelID: a.opts.ChannelID,
+		ChannelID: tc.ChannelID,
 		StartedAt: tc.StartedAt.UTC().Format(time.RFC3339Nano),
 	}); err != nil {
 		return fmt.Errorf("send taskStarted: %w", err)
@@ -212,7 +221,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		frame := &protocol.Stream{
 			Type:           protocol.MsgTypeStream,
 			SessionID:      a.opts.SessionID,
-			ChannelID:      a.opts.ChannelID,
+			ChannelID:      tc.ChannelID,
 			SequenceNumber: next,
 			Event:          e.Raw,
 		}
@@ -280,7 +289,7 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 		Type:            protocol.MsgTypeTaskComplete,
 		TaskID:          tc.TaskID,
 		SessionID:       a.opts.SessionID,
-		ChannelID:       a.opts.ChannelID,
+		ChannelID:       tc.ChannelID,
 		ClaudeSessionID: payload.SessionID,
 		InputTokens: int64(
 			payload.Usage.InputTokens +
@@ -293,21 +302,49 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 	})
 }
 
+// questionDenial tracks a single AskUserQuestion denial awaiting batch dispatch.
+type questionDenial struct {
+	RequestID string
+	ToolInput json.RawMessage
+}
+
 func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []struct {
 	ToolName  string          `json:"tool_name"`
 	ToolUseID string          `json:"tool_use_id"`
 	ToolInput json.RawMessage `json:"tool_input"`
 }) error {
+	// Separate questions from permission requests so questions can be
+	// sent as a batch and answered in any order.
+	var questions []questionDenial
+	var permDenials []struct {
+		ToolName  string          `json:"tool_name"`
+		ToolUseID string          `json:"tool_use_id"`
+		ToolInput json.RawMessage `json:"tool_input"`
+	}
+
 	for _, denial := range denials {
 		if denial.ToolName == "AskUserQuestion" {
-			return a.handleQuestionDenial(ctx, tc, denial.ToolUseID, denial.ToolInput)
+			questions = append(questions, questionDenial{
+				RequestID: denial.ToolUseID,
+				ToolInput: denial.ToolInput,
+			})
+		} else {
+			permDenials = append(permDenials, denial)
 		}
+	}
 
-		// Permission request
+	// Handle batch questions first — send all, collect all, re-spawn once.
+	if len(questions) > 0 {
+		return a.handleBatchQuestions(ctx, tc, questions)
+	}
+
+	// Permission requests are still handled one at a time since each
+	// approval/denial changes the executor's allowed-tools set.
+	for _, denial := range permDenials {
 		if err := a.opts.Relay.Send(&protocol.PermissionRequest{
 			Type:      protocol.MsgTypePermissionRequest,
 			SessionID: a.opts.SessionID,
-			ChannelID: a.opts.ChannelID,
+			ChannelID: tc.ChannelID,
 			RequestID: denial.ToolUseID,
 			ToolName:  denial.ToolName,
 			ToolInput: denial.ToolInput,
@@ -342,7 +379,16 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 	return nil
 }
 
-func (a *Actor) handleQuestionDenial(ctx context.Context, tc *taskContext, requestID string, toolInput json.RawMessage) error {
+// parsedQuestion holds the extracted fields from a single AskUserQuestion denial.
+type parsedQuestion struct {
+	RequestID string
+	Text      string
+	Options   []string
+}
+
+// parseQuestionDenial extracts questions from an AskUserQuestion tool_input.
+// Claude may pack multiple questions into a single tool call's questions array.
+func parseQuestionDenial(requestID string, toolInput json.RawMessage) []parsedQuestion {
 	var qPayload struct {
 		Questions []struct {
 			Question string `json:"question"`
@@ -353,45 +399,118 @@ func (a *Actor) handleQuestionDenial(ctx context.Context, tc *taskContext, reque
 	}
 	_ = json.Unmarshal(toolInput, &qPayload)
 
-	var questionText string
-	var optionLabels []string
-	if len(qPayload.Questions) > 0 {
-		questionText = qPayload.Questions[0].Question
-		for _, opt := range qPayload.Questions[0].Options {
-			optionLabels = append(optionLabels, opt.Label)
-		}
+	if len(qPayload.Questions) == 0 {
+		return nil
 	}
 
-	if err := a.opts.Relay.Send(&protocol.Question{
-		Type:      protocol.MsgTypeQuestion,
-		SessionID: a.opts.SessionID,
-		ChannelID: a.opts.ChannelID,
-		RequestID: requestID,
-		Question:  questionText,
-		Options:   optionLabels,
-	}); err != nil {
-		return err
-	}
-	if a.verbosity != display.Quiet {
-		fmt.Printf("%s? %s%s\n", display.Cyan, questionText, display.Reset)
-		for i, opt := range optionLabels {
-			fmt.Printf("%s  %d) %s%s\n", display.Dim, i+1, opt, display.Reset)
+	// If there's only one question, use the denial's requestID directly.
+	if len(qPayload.Questions) == 1 {
+		q := qPayload.Questions[0]
+		var opts []string
+		for _, o := range q.Options {
+			opts = append(opts, o.Label)
 		}
-		fmt.Printf("%swaiting for answer...%s\n", display.Dim, display.Reset)
+		return []parsedQuestion{{RequestID: requestID, Text: q.Question, Options: opts}}
 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-a.stopCh:
-		return fmt.Errorf("actor stopped while waiting for answer")
-	case resp := <-a.permCh:
+	// Multiple questions in one denial — synthesize sub-requestIDs.
+	var out []parsedQuestion
+	for i, q := range qPayload.Questions {
+		var opts []string
+		for _, o := range q.Options {
+			opts = append(opts, o.Label)
+		}
+		out = append(out, parsedQuestion{
+			RequestID: fmt.Sprintf("%s_%d", requestID, i),
+			Text:      q.Question,
+			Options:   opts,
+		})
+	}
+	return out
+}
+
+// handleBatchQuestions sends all questions to the relay at once, waits for
+// all answers (in any order), then re-spawns the executor with a combined prompt.
+func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denials []questionDenial) error {
+	// Parse all questions from all denials.
+	var allQuestions []parsedQuestion
+	for _, d := range denials {
+		allQuestions = append(allQuestions, parseQuestionDenial(d.RequestID, d.ToolInput)...)
+	}
+
+	if len(allQuestions) == 0 {
+		return fmt.Errorf("AskUserQuestion denial with no parseable questions")
+	}
+
+	// Register answer channels before sending so responses aren't lost.
+	a.questionMu.Lock()
+	for _, q := range allQuestions {
+		a.questionCh[q.RequestID] = make(chan string, 1)
+	}
+	a.questionMu.Unlock()
+
+	// Clean up channels when done, regardless of outcome.
+	defer func() {
+		a.questionMu.Lock()
+		for _, q := range allQuestions {
+			delete(a.questionCh, q.RequestID)
+		}
+		a.questionMu.Unlock()
+	}()
+
+	// Send all questions to relay at once.
+	for _, q := range allQuestions {
+		if err := a.opts.Relay.Send(&protocol.Question{
+			Type:      protocol.MsgTypeQuestion,
+			SessionID: a.opts.SessionID,
+			ChannelID: tc.ChannelID,
+			RequestID: q.RequestID,
+			Question:  q.Text,
+			Options:   q.Options,
+		}); err != nil {
+			return err
+		}
 		if a.verbosity != display.Quiet {
-			fmt.Printf("\n%sAnswer: %s%s\n\n", display.Green, resp.Answer, display.Reset)
+			fmt.Printf("%s? %s%s\n", display.Cyan, q.Text, display.Reset)
+			for i, opt := range q.Options {
+				fmt.Printf("%s  %d) %s%s\n", display.Dim, i+1, opt, display.Reset)
+			}
 		}
-		answerPrompt := fmt.Sprintf("My answer: %s", resp.Answer)
-		return a.runExecutor(ctx, tc, answerPrompt)
 	}
+
+	if a.verbosity != display.Quiet {
+		fmt.Printf("%swaiting for %d answer(s)...%s\n", display.Dim, len(allQuestions), display.Reset)
+	}
+
+	// Collect all answers. Order doesn't matter — each channel is keyed by requestID.
+	answers := make(map[string]string, len(allQuestions))
+	for _, q := range allQuestions {
+		ch := a.questionCh[q.RequestID]
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-a.stopCh:
+			return fmt.Errorf("actor stopped while waiting for answers")
+		case answer := <-ch:
+			answers[q.RequestID] = answer
+			if a.verbosity != display.Quiet {
+				fmt.Printf("%sAnswer [%s]: %s%s\n", display.Green, q.RequestID, answer, display.Reset)
+			}
+		}
+	}
+
+	// Compose a single prompt with all answers.
+	var parts []string
+	for _, q := range allQuestions {
+		parts = append(parts, fmt.Sprintf("Q: %s\nA: %s", q.Text, answers[q.RequestID]))
+	}
+	answerPrompt := "My answers:\n\n" + strings.Join(parts, "\n\n")
+
+	if a.verbosity != display.Quiet {
+		fmt.Println()
+	}
+
+	return a.runExecutor(ctx, tc, answerPrompt)
 }
 
 func (a *Actor) handleDenyResponse(ctx context.Context, tc *taskContext) error {
@@ -409,13 +528,19 @@ func (a *Actor) HandlePermissionResponse(resp *protocol.PermissionResponse) erro
 	}
 }
 
-// HandleQuestionResponse processes an answer to a question.
+// HandleQuestionResponse routes an answer to the waiting question by requestId.
 func (a *Actor) HandleQuestionResponse(resp *protocol.QuestionResponse) error {
+	a.questionMu.Lock()
+	ch, ok := a.questionCh[resp.RequestID]
+	a.questionMu.Unlock()
+	if !ok {
+		return fmt.Errorf("no pending question %s for session %s", resp.RequestID, a.opts.SessionID)
+	}
 	select {
-	case a.permCh <- permResponse{Answer: resp.Answer}:
+	case ch <- resp.Answer:
 		return nil
 	default:
-		return fmt.Errorf("no pending question for session %s", a.opts.SessionID)
+		return fmt.Errorf("question %s already answered for session %s", resp.RequestID, a.opts.SessionID)
 	}
 }
 

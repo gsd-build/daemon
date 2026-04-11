@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -105,7 +106,6 @@ func TestActorHappyPath(t *testing.T) {
 
 	actor, err := NewActor(Options{
 		SessionID:  "sess-1",
-		ChannelID:  "ch-1",
 		BinaryPath: binPath,
 		CWD:        t.TempDir(),
 		WALPath:    filepath.Join(walDir, "sess-1.jsonl"),
@@ -177,7 +177,6 @@ func TestActorPermissionDenialAndApproval(t *testing.T) {
 
 	actor, err := NewActor(Options{
 		SessionID:  "sess-perm",
-		ChannelID:  "ch-1",
 		BinaryPath: binPath,
 		CWD:        t.TempDir(),
 		WALPath:    filepath.Join(walDir, "sess-perm.jsonl"),
@@ -234,12 +233,108 @@ func TestActorPermissionDenialAndApproval(t *testing.T) {
 	}
 }
 
+func TestActorBatchQuestions(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	walDir := t.TempDir()
+	relay := newFakeRelay()
+
+	// Emit 3 AskUserQuestion denials in a single result.
+	t.Setenv("FAKE_CLAUDE_QUESTIONS", "3")
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-batch-q",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		WALPath:    filepath.Join(walDir, "sess-batch-q.jsonl"),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-1",
+		SessionID: "sess-batch-q",
+		ChannelID: "ch-1",
+		Prompt:    "ask me things",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Wait for all 3 questions to arrive at the relay.
+	gotQuestions := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		count := 0
+		for _, f := range frames {
+			if _, ok := f.(*protocol.Question); ok {
+				count++
+			}
+		}
+		return count == 3
+	})
+	if !gotQuestions {
+		frames := relay.GetFrames()
+		count := 0
+		for _, f := range frames {
+			if _, ok := f.(*protocol.Question); ok {
+				count++
+			}
+		}
+		t.Fatalf("expected 3 questions, got %d", count)
+	}
+
+	// Collect the requestIDs.
+	var questionMsgs []*protocol.Question
+	for _, f := range relay.GetFrames() {
+		if q, ok := f.(*protocol.Question); ok {
+			questionMsgs = append(questionMsgs, q)
+		}
+	}
+
+	// Answer in reverse order to prove order independence.
+	for i := len(questionMsgs) - 1; i >= 0; i-- {
+		q := questionMsgs[i]
+		if err := actor.HandleQuestionResponse(&protocol.QuestionResponse{
+			Type:      protocol.MsgTypeQuestionResponse,
+			SessionID: "sess-batch-q",
+			ChannelID: "ch-1",
+			RequestID: q.RequestID,
+			Answer:    "answer-" + q.RequestID,
+		}); err != nil {
+			t.Fatalf("HandleQuestionResponse %s: %v", q.RequestID, err)
+		}
+	}
+
+	// The actor should re-spawn and complete.
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete after batch answers")
+	}
+	_ = actor.Stop()
+
+	// Verify exactly 3 questions were sent as protocol.Question messages.
+	if len(questionMsgs) != 3 {
+		t.Errorf("expected 3 Question messages, got %d", len(questionMsgs))
+	}
+	for i, q := range questionMsgs {
+		expected := fmt.Sprintf("Question %d?", i+1)
+		if q.Question != expected {
+			t.Errorf("question %d: got %q, want %q", i, q.Question, expected)
+		}
+		if len(q.Options) != 2 {
+			t.Errorf("question %d: expected 2 options, got %d", i, len(q.Options))
+		}
+	}
+}
+
 func TestActorSendTaskWhenBusy(t *testing.T) {
 	relay := newFakeRelay()
 	tmpDir := t.TempDir()
 	a, err := NewActor(Options{
 		SessionID: "s-1",
-		ChannelID: "c-1",
 		WALPath:   filepath.Join(tmpDir, "s-1.jsonl"),
 		Relay:     relay,
 	})
