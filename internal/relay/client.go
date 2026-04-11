@@ -56,10 +56,7 @@ func (c *Client) SetHandler(h MessageHandler) {
 // Connect dials the relay, sends a Hello, and waits for Welcome.
 // Returns the Welcome payload on success. After Connect returns successfully,
 // the caller should call Run in a goroutine to process incoming messages.
-func (c *Client) Connect(
-	ctx context.Context,
-	lastSequences map[string]int64,
-) (*protocol.Welcome, error) {
+func (c *Client) Connect(ctx context.Context) (*protocol.Welcome, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -73,18 +70,19 @@ func (c *Client) Connect(
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 
+	conn.SetReadLimit(1 << 20) // 1 MB — matches relay's limit
+
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
 
 	// Send Hello
 	hello := protocol.Hello{
-		Type:                  protocol.MsgTypeHello,
-		MachineID:             c.cfg.MachineID,
-		DaemonVersion:         c.cfg.DaemonVersion,
-		OS:                    c.cfg.OS,
-		Arch:                  c.cfg.Arch,
-		LastSequenceBySession: lastSequences,
+		Type:          protocol.MsgTypeHello,
+		MachineID:     c.cfg.MachineID,
+		DaemonVersion: c.cfg.DaemonVersion,
+		OS:            c.cfg.OS,
+		Arch:          c.cfg.Arch,
 	}
 	buf, _ := json.Marshal(hello)
 	if err := conn.Write(ctx, websocket.MessageText, buf); err != nil {

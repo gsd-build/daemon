@@ -14,7 +14,7 @@ func (nullRelay) Send(msg any) error { return nil }
 
 func TestManagerSpawnAndGet(t *testing.T) {
 	binPath := buildFakeClaude(t)
-	m := NewManager(t.TempDir(), binPath, nullRelay{}, display.Quiet)
+	m := NewManager(binPath, nullRelay{}, display.Quiet)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -47,22 +47,3 @@ func TestManagerSpawnAndGet(t *testing.T) {
 	}
 }
 
-func TestLastSequencesSnapshot(t *testing.T) {
-	binPath := buildFakeClaude(t)
-	m := NewManager(t.TempDir(), binPath, nullRelay{}, display.Quiet)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	_, _ = m.Spawn(ctx, Options{SessionID: "a", CWD: t.TempDir()})
-	_, _ = m.Spawn(ctx, Options{SessionID: "b", CWD: t.TempDir()})
-
-	snap := m.LastSequences()
-	if _, ok := snap["a"]; !ok {
-		t.Errorf("missing a in snapshot")
-	}
-	if _, ok := snap["b"]; !ok {
-		t.Errorf("missing b in snapshot")
-	}
-	m.StopAll()
-}

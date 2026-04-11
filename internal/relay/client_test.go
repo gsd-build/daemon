@@ -78,7 +78,7 @@ func TestClientConnectsAndSendsHello(t *testing.T) {
 
 	welcomeCh := make(chan *protocol.Welcome, 1)
 	go func() {
-		w, err := client.Connect(ctx, map[string]int64{"sess-1": 5})
+		w, err := client.Connect(ctx)
 		if err != nil {
 			t.Logf("connect: %v", err)
 		}
@@ -105,8 +105,5 @@ func TestClientConnectsAndSendsHello(t *testing.T) {
 	}
 	if hello.MachineID != "m-1" {
 		t.Errorf("unexpected machine id: %s", hello.MachineID)
-	}
-	if hello.LastSequenceBySession["sess-1"] != 5 {
-		t.Errorf("expected lastSeq[sess-1]=5, got %d", hello.LastSequenceBySession["sess-1"])
 	}
 }

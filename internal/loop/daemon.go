@@ -4,15 +4,11 @@ package loop
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"runtime"
-	"time"
-
 	"strings"
+	"time"
 
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/config"
@@ -20,7 +16,6 @@ import (
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
-	"github.com/gsd-build/daemon/internal/wal"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -30,7 +25,6 @@ type Daemon struct {
 	version   string
 	manager   *session.Manager
 	client    *relay.Client
-	walDir    string
 	verbosity display.VerbosityLevel
 }
 
@@ -57,12 +51,6 @@ func New(cfg *config.Config, version string, verbosity display.VerbosityLevel) (
 // NewWithBinaryPath constructs a Daemon that spawns the given binary instead
 // of the default `claude`. Used by integration tests to inject fake-claude.
 func NewWithBinaryPath(cfg *config.Config, version, binaryPath string, verbosity display.VerbosityLevel) (*Daemon, error) {
-	home, err := configHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	walDir := filepath.Join(home, "wal")
-
 	client := relay.NewClient(relay.Config{
 		URL:           buildRelayURL(cfg),
 		AuthToken:     cfg.AuthToken,
@@ -72,14 +60,13 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string, verbosity
 		Arch:          runtime.GOARCH,
 	})
 
-	manager := session.NewManager(walDir, binaryPath, client, verbosity)
+	manager := session.NewManager(binaryPath, client, verbosity)
 
 	return &Daemon{
 		cfg:       cfg,
 		version:   version,
 		manager:   manager,
 		client:    client,
-		walDir:    walDir,
 		verbosity: verbosity,
 	}, nil
 }
@@ -179,16 +166,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // runOnce performs a single connect → run cycle.
 func (d *Daemon) runOnce(ctx context.Context) error {
-	lastSeqs, err := wal.ScanDirectory(d.walDir)
-	if err != nil {
-		return fmt.Errorf("scan wal directory: %w", err)
-	}
-
-	welcome, err := d.client.Connect(ctx, lastSeqs)
-	if err != nil {
+	if _, err := d.client.Connect(ctx); err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	_ = welcome // TODO: use acked sequences to drive WAL replay
 
 	fmt.Printf("%srelay connected%s\n", display.Dim, display.Reset)
 
@@ -198,9 +178,9 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	go d.runIdleHeartbeat(connCtx)
 	go d.runTokenRefreshCheck(connCtx)
 
-	err = d.client.Run(ctx)
+	runErr := d.client.Run(ctx)
 	connCancel()
-	return err
+	return runErr
 }
 
 func (d *Daemon) runHeartbeat(ctx context.Context) {
@@ -255,10 +235,6 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handlePermissionResponse(msg)
 	case *protocol.QuestionResponse:
 		return d.handleQuestionResponse(msg)
-	case *protocol.Ack:
-		return d.handleAck(msg)
-	case *protocol.ReplayRequest:
-		return d.handleReplay(msg)
 	default:
 		// Ignore other types
 		return nil
@@ -360,41 +336,6 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 	return d.client.Send(result)
 }
 
-func (d *Daemon) handleAck(msg *protocol.Ack) error {
-	actor := d.manager.Get(msg.SessionID)
-	if actor != nil {
-		if err := actor.PruneWAL(msg.SequenceNumber); err != nil {
-			fmt.Printf("warning: prune WAL session %s seq %d: %v\n", msg.SessionID, msg.SequenceNumber, err)
-		}
-	}
-	return nil
-}
-
-func (d *Daemon) handleReplay(msg *protocol.ReplayRequest) error {
-	// Read the WAL for this session and resend all entries with seq > fromSequence
-	walPath := filepath.Join(d.walDir, msg.SessionID+".jsonl")
-	walLog, err := wal.Open(walPath)
-	if err != nil {
-		fmt.Printf("warning: replay open wal session %s: %v\n", msg.SessionID, err)
-		return nil
-	}
-	defer walLog.Close()
-
-	entries, err := walLog.ReadFrom(msg.FromSequence)
-	if err != nil {
-		fmt.Printf("warning: replay read wal session %s: %v\n", msg.SessionID, err)
-		return nil
-	}
-
-	for _, e := range entries {
-		if err := d.client.Send(json.RawMessage(e.Data)); err != nil {
-			fmt.Printf("warning: replay send session %s: %v\n", msg.SessionID, err)
-			return nil
-		}
-	}
-	return nil
-}
-
 func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor == nil {
@@ -419,10 +360,3 @@ func (d *Daemon) handleQuestionResponse(msg *protocol.QuestionResponse) error {
 	return nil
 }
 
-func configHomeDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("user home: %w", err)
-	}
-	return filepath.Join(home, ".gsd-cloud"), nil
-}
