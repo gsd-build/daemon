@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 func TestWritePumpDrainsChannel(t *testing.T) {
@@ -69,5 +70,71 @@ func TestWritePumpDrainsChannel(t *testing.T) {
 	defer mu.Unlock()
 	if len(received) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(received))
+	}
+}
+
+func TestReadPumpDispatchesToHandler(t *testing.T) {
+	var mu sync.Mutex
+	var dispatched []string
+
+	handler := func(env *protocol.Envelope) error {
+		mu.Lock()
+		dispatched = append(dispatched, env.Type)
+		mu.Unlock()
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+
+		// Send a stream frame
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"stream","sessionId":"s1","channelId":"ch1","sequenceNumber":1,"event":{}}`))
+		// Send a taskComplete frame
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"taskComplete","taskId":"t1","sessionId":"s1","channelId":"ch1","claudeSessionId":"c1","inputTokens":1,"outputTokens":1,"costUsd":"0.01","durationMs":100}`))
+
+		// Keep connection open until client disconnects
+		_, _, _ = c.Read(r.Context())
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	errCh := make(chan error, 1)
+	go readPump(ctx, conn, handler, errCh)
+
+	// Wait for dispatch
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(dispatched)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dispatched) != 2 {
+		t.Fatalf("expected 2 dispatched, got %d", len(dispatched))
+	}
+	if dispatched[0] != "stream" {
+		t.Errorf("first dispatch: expected stream, got %s", dispatched[0])
+	}
+	if dispatched[1] != "taskComplete" {
+		t.Errorf("second dispatch: expected taskComplete, got %s", dispatched[1])
 	}
 }
