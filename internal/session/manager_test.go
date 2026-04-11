@@ -2,12 +2,14 @@ package session
 
 import (
 	"context"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 type nullRelay struct{}
@@ -258,5 +260,72 @@ func TestStartReaper(t *testing.T) {
 
 	if mgr.Get("s1") != nil {
 		t.Error("expected reaper to remove idle actor s1")
+	}
+}
+
+func TestIntegrationConcurrencyAndTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+	pidDir := t.TempDir()
+	cfg := &config.Config{MaxConcurrentTasks: 2}
+
+	mgr := NewManager(ManagerOptions{
+		BinaryPath: binPath,
+		Relay:      relay,
+		Config:     cfg,
+		PIDDir:     pidDir,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Start reaper with short tick
+	mgr.StartReaper(ctx, 100*time.Millisecond, 2*time.Second)
+
+	// Spawn two sessions — both should succeed
+	a1, err := mgr.Spawn(ctx, Options{SessionID: "s1", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("spawn s1: %v", err)
+	}
+
+	a2, err := mgr.Spawn(ctx, Options{SessionID: "s2", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("spawn s2: %v", err)
+	}
+
+	// Send tasks to both
+	_ = a1.SendTask(protocol.Task{TaskID: "t1", SessionID: "s1", ChannelID: "ch1", Prompt: "hello"})
+	_ = a2.SendTask(protocol.Task{TaskID: "t2", SessionID: "s2", ChannelID: "ch2", Prompt: "world"})
+
+	// Wait for both to complete
+	gotBoth := relay.waitFor(t, 15*time.Second, func(frames []any) bool {
+		count := 0
+		for _, f := range frames {
+			if _, ok := f.(*protocol.TaskComplete); ok {
+				count++
+			}
+		}
+		return count >= 2
+	})
+	if !gotBoth {
+		t.Fatal("timed out waiting for both tasks to complete")
+	}
+
+	// Both should now be idle. Wait for reaper to clean them up (2s idle threshold).
+	time.Sleep(3 * time.Second)
+
+	total, _ := mgr.ActiveCount()
+	if total != 0 {
+		t.Errorf("expected reaper to clean up idle actors, got %d active", total)
+	}
+
+	// Verify PID files are cleaned up
+	entries, _ := os.ReadDir(pidDir)
+	if len(entries) != 0 {
+		t.Errorf("expected PID files to be cleaned up, found %d", len(entries))
 	}
 }
