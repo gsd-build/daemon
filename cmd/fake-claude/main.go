@@ -20,6 +20,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -36,6 +37,12 @@ func main() {
 	if codeStr := os.Getenv("FAKE_CLAUDE_EXIT_CODE"); codeStr != "" {
 		if code, err := strconv.Atoi(codeStr); err == nil {
 			os.Exit(code)
+		}
+	}
+
+	if sleepStr := os.Getenv("FAKE_CLAUDE_SLEEP"); sleepStr != "" {
+		if secs, err := strconv.Atoi(sleepStr); err == nil {
+			time.Sleep(time.Duration(secs) * time.Second)
 		}
 	}
 

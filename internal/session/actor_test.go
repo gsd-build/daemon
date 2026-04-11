@@ -434,3 +434,107 @@ func TestActorSendTaskWhenBusy(t *testing.T) {
 		t.Fatal("expected error when task channel full")
 	}
 }
+
+func TestActorTaskTimeout(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	// FAKE_CLAUDE_SLEEP makes fake-claude sleep for N seconds before producing output
+	t.Setenv("FAKE_CLAUDE_SLEEP", "10")
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-timeout",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	// Set a very short timeout for testing
+	actor.taskTimeout = 1 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "t-timeout",
+		SessionID: "sess-timeout",
+		ChannelID: "ch1",
+		Prompt:    "slow task",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should get a TaskError with timeout message
+	gotError := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		for _, f := range frames {
+			if te, ok := f.(*protocol.TaskError); ok {
+				if te.TaskID == "t-timeout" {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if !gotError {
+		t.Fatal("expected TaskError for timeout")
+	}
+
+	// Verify the actor is still alive
+	select {
+	case err := <-done:
+		t.Fatalf("actor.Run() should not have returned, got: %v", err)
+	default:
+		// good
+	}
+}
+
+func TestActorLastActiveAt(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-active",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer actor.Stop()
+
+	// LastActiveAt should be set to creation time
+	initial := actor.LastActiveAt()
+	if initial.IsZero() {
+		t.Error("expected non-zero initial lastActiveAt")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "t1",
+		SessionID: "sess-active",
+		ChannelID: "ch1",
+		Prompt:    "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete")
+	}
+
+	updated := actor.LastActiveAt()
+	if !updated.After(initial) {
+		t.Errorf("expected lastActiveAt to advance: initial=%v updated=%v", initial, updated)
+	}
+}

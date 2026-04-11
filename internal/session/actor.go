@@ -58,6 +58,14 @@ type Actor struct {
 	taskMu     sync.Mutex
 	taskCancel context.CancelFunc // cancels the in-flight task context; nil when idle
 	taskID     string             // ID of the in-flight task; empty when idle
+
+	// taskTimeout is the per-task deadline. Zero means no timeout.
+	// Set by the Manager from config before calling Run.
+	taskTimeout time.Duration
+
+	// lastActiveAt tracks when this actor last completed or received a task.
+	// Protected by taskMu. Used by the reaper to detect idle actors.
+	lastActiveAt time.Time
 }
 
 type taskContext struct {
@@ -89,7 +97,22 @@ func NewActor(opts Options) (*Actor, error) {
 		permCh:          make(chan permResponse, 1),
 		questionCh:      make(map[string]chan string),
 		stopCh:          make(chan struct{}),
+		lastActiveAt:    time.Now(),
 	}, nil
+}
+
+// LastActiveAt returns the time of the actor's last task completion or creation.
+func (a *Actor) LastActiveAt() time.Time {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	return a.lastActiveAt
+}
+
+// HasInFlightTask returns true if the actor is currently executing a task.
+func (a *Actor) HasInFlightTask() bool {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	return a.taskID != ""
 }
 
 // InFlightTaskID returns the ID of the currently executing task, or "" if idle.
@@ -143,7 +166,14 @@ func (a *Actor) Run(ctx context.Context) error {
 }
 
 func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
-	taskCtx, cancel := context.WithCancel(ctx)
+	var taskCtx context.Context
+	var cancel context.CancelFunc
+
+	if a.taskTimeout > 0 {
+		taskCtx, cancel = context.WithTimeout(ctx, a.taskTimeout)
+	} else {
+		taskCtx, cancel = context.WithCancel(ctx)
+	}
 
 	a.taskMu.Lock()
 	a.taskCancel = cancel
@@ -155,6 +185,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		a.taskMu.Lock()
 		a.taskCancel = nil
 		a.taskID = ""
+		a.lastActiveAt = time.Now()
 		a.taskMu.Unlock()
 	}()
 
@@ -182,18 +213,30 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 
 	err := a.runExecutor(taskCtx, tc, task.Prompt)
 
-	// If the task context was cancelled (user hit ESC), send taskCancelled
-	// instead of returning an error — so Run() loops back for the next task.
-	if taskCtx.Err() == context.Canceled && ctx.Err() == nil {
-		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
-		_ = a.opts.Relay.Send(sendCtx, &protocol.TaskCancelled{
+	// If the task context was cancelled (user hit ESC or timeout), send the
+	// appropriate message and loop back for the next task.
+	if taskCtx.Err() != nil && ctx.Err() == nil {
+		if taskCtx.Err() == context.DeadlineExceeded {
+			errCtx, errCancel := context.WithTimeout(ctx, 30*time.Second)
+			_ = a.opts.Relay.Send(errCtx, &protocol.TaskError{
+				Type:      protocol.MsgTypeTaskError,
+				TaskID:    task.TaskID,
+				SessionID: a.opts.SessionID,
+				ChannelID: tc.ChannelID,
+				Error:     fmt.Sprintf("task timed out after %s", a.taskTimeout),
+			})
+			errCancel()
+			return nil
+		}
+		cancelCtx, cancelCancel := context.WithTimeout(ctx, 30*time.Second)
+		_ = a.opts.Relay.Send(cancelCtx, &protocol.TaskCancelled{
 			Type:      protocol.MsgTypeTaskCancelled,
 			TaskID:    task.TaskID,
 			SessionID: a.opts.SessionID,
 			ChannelID: tc.ChannelID,
 		})
-		sendCancel()
-		return nil // not an error — actor stays alive
+		cancelCancel()
+		return nil
 	}
 
 	return err
