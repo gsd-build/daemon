@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,41 @@ func TestHomeDirReturnsNonEmpty(t *testing.T) {
 	h := HomeDir()
 	if h == "" {
 		t.Fatal("HomeDir() returned empty string")
+	}
+}
+
+func TestLaunchdPlistContent(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &launchdPlatform{}
+	plist := p.generatePlist()
+
+	binPath := filepath.Join(home, ".gsd-cloud", "bin", "gsd-cloud")
+	logPath := filepath.Join(home, ".gsd-cloud", "logs", "daemon.log")
+
+	// Must contain expanded home dir
+	if !strings.Contains(plist, binPath) {
+		t.Errorf("plist must contain absolute binary path %s", binPath)
+	}
+	if !strings.Contains(plist, logPath) {
+		t.Errorf("plist must contain absolute log path %s", logPath)
+	}
+	// Must NOT contain literal ~
+	if strings.Contains(plist, "~/.gsd-cloud") {
+		t.Error("plist must not contain unexpanded ~")
+	}
+	if !strings.Contains(plist, "<key>Label</key>") {
+		t.Error("plist missing Label key")
+	}
+	if !strings.Contains(plist, "build.gsd.cloud.daemon") {
+		t.Error("plist missing label value")
+	}
+	if !strings.Contains(plist, "--service") {
+		t.Error("plist must pass --service flag")
+	}
+	if !strings.Contains(plist, "<key>KeepAlive</key>") {
+		t.Error("plist missing KeepAlive")
 	}
 }
