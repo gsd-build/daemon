@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/gsd-build/protocol-go v0.4.0
 	github.com/spf13/cobra v1.10.2
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
