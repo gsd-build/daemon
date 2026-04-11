@@ -23,7 +23,10 @@ const (
 
 // DefaultLogPath returns the standard daemon log file location.
 func DefaultLogPath() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "daemon.log"
+	}
 	return filepath.Join(home, ".gsd-cloud", "logs", "daemon.log")
 }
 
