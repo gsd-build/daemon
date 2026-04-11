@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Server serves the status API over a Unix domain socket.
@@ -52,7 +53,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// Shut down when context is cancelled.
 	go func() {
 		<-ctx.Done()
-		s.httpSrv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.httpSrv.Shutdown(shutdownCtx)
 	}()
 
 	err = s.httpSrv.Serve(ln)

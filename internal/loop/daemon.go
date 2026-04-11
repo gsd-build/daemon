@@ -134,6 +134,7 @@ func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
 }
 
 // Health implements sockapi.StatusProvider.
+// TODO: report "disconnected" when relay.Client exposes connection state.
 func (d *Daemon) Health() sockapi.HealthData {
 	return sockapi.HealthData{Status: "ok"}
 }
@@ -150,7 +151,7 @@ func (d *Daemon) Status() sockapi.StatusData {
 		ActiveSessions:     total,
 		InFlightTasks:      executing,
 		MaxConcurrentTasks: runtime.NumCPU(),
-		LogLevel:           "info",
+		LogLevel:           d.cfg.LogLevel,
 	}
 }
 
@@ -174,7 +175,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	sockPath := filepath.Join(home, ".gsd-cloud", "daemon.sock")
 	sockSrv := sockapi.NewServer(sockPath, d)
-	go sockSrv.ListenAndServe(ctx)
+	go func() {
+		if err := sockSrv.ListenAndServe(ctx); err != nil {
+			slog.Warn("socket API failed", "error", err)
+		}
+	}()
 
 	go d.runTokenRefreshCheck(ctx)
 	go d.runIdleHeartbeat(ctx)
