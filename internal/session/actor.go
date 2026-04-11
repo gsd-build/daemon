@@ -1,4 +1,4 @@
-// Package session ties the Claude executor, WAL, and relay together
+// Package session ties the Claude executor and relay together
 // into one "session actor" per user session.
 package session
 
@@ -14,7 +14,6 @@ import (
 
 	"github.com/gsd-build/daemon/internal/claude"
 	"github.com/gsd-build/daemon/internal/display"
-	"github.com/gsd-build/daemon/internal/wal"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -28,14 +27,12 @@ type Options struct {
 	SessionID      string
 	BinaryPath     string
 	CWD            string
-	WALPath        string
 	Relay          RelaySender
 	Model          string
 	Effort         string
 	PermissionMode string
 	SystemPrompt   string
 	ResumeSession  string
-	StartSeq       int64
 	Verbosity      display.VerbosityLevel
 }
 
@@ -44,7 +41,6 @@ type Options struct {
 // alive between tasks.
 type Actor struct {
 	opts Options
-	log  *wal.Log
 
 	seq       int64 // monotonic sequence counter, only touched by Run goroutine
 	verbosity display.VerbosityLevel
@@ -84,17 +80,10 @@ type permResponse struct {
 	Answer   string // for question answers
 }
 
-// NewActor creates a new Actor with a WAL rooted at opts.WALPath.
+// NewActor creates a new Actor for the given session.
 func NewActor(opts Options) (*Actor, error) {
-	walLog, err := wal.Open(opts.WALPath)
-	if err != nil {
-		return nil, fmt.Errorf("wal open: %w", err)
-	}
-
 	return &Actor{
 		opts:            opts,
-		log:             walLog,
-		seq:             opts.StartSeq,
 		verbosity:       opts.Verbosity,
 		stream:          display.NewStreamHandler(os.Stdout, opts.Verbosity),
 		claudeSessionID: opts.ResumeSession,
@@ -103,11 +92,6 @@ func NewActor(opts Options) (*Actor, error) {
 		questionCh:      make(map[string]chan string),
 		stopCh:          make(chan struct{}),
 	}, nil
-}
-
-// LastSequence returns the highest sequence number emitted so far.
-func (a *Actor) LastSequence() int64 {
-	return a.seq
 }
 
 // InFlightTaskID returns "" — in spawn-per-task, task errors are reported
@@ -217,7 +201,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 			}
 		}
 
-		// WAL + relay
+		// Send to relay
 		frame := &protocol.Stream{
 			Type:           protocol.MsgTypeStream,
 			SessionID:      a.opts.SessionID,
@@ -225,15 +209,8 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 			SequenceNumber: next,
 			Event:          e.Raw,
 		}
-		frameJSON, err := json.Marshal(frame)
-		if err != nil {
-			return fmt.Errorf("marshal frame: %w", err)
-		}
-		if err := a.log.Append(next, frameJSON); err != nil {
-			return fmt.Errorf("wal append: %w", err)
-		}
 		if err := a.opts.Relay.Send(frame); err != nil {
-			log.Printf("[actor] relay send failed (WAL has entry): session=%s seq=%d err=%v",
+			log.Printf("[actor] relay send failed: session=%s seq=%d err=%v",
 				a.opts.SessionID, next, err)
 		}
 
@@ -565,12 +542,7 @@ func (a *Actor) Stop() error {
 	default:
 		close(a.stopCh)
 	}
-	return a.log.Close()
-}
-
-// PruneWAL removes WAL entries up to (and including) upTo.
-func (a *Actor) PruneWAL(upTo int64) error {
-	return a.log.PruneUpTo(upTo)
+	return nil
 }
 
 func toolInputSummary(raw json.RawMessage) (string, bool) {

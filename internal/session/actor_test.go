@@ -101,16 +101,13 @@ func (r *fakeRelay) waitForTaskComplete(t *testing.T, timeout time.Duration) boo
 
 func TestActorHappyPath(t *testing.T) {
 	binPath := buildFakeClaude(t)
-	walDir := t.TempDir()
 	relay := newFakeRelay()
 
 	actor, err := NewActor(Options{
 		SessionID:  "sess-1",
 		BinaryPath: binPath,
 		CWD:        t.TempDir(),
-		WALPath:    filepath.Join(walDir, "sess-1.jsonl"),
 		Relay:      relay,
-		StartSeq:   0,
 	})
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
@@ -170,7 +167,6 @@ func TestActorHappyPath(t *testing.T) {
 
 func TestActorPermissionDenialAndApproval(t *testing.T) {
 	binPath := buildFakeClaude(t)
-	walDir := t.TempDir()
 	relay := newFakeRelay()
 
 	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
@@ -179,7 +175,6 @@ func TestActorPermissionDenialAndApproval(t *testing.T) {
 		SessionID:  "sess-perm",
 		BinaryPath: binPath,
 		CWD:        t.TempDir(),
-		WALPath:    filepath.Join(walDir, "sess-perm.jsonl"),
 		Relay:      relay,
 	})
 	if err != nil {
@@ -235,7 +230,6 @@ func TestActorPermissionDenialAndApproval(t *testing.T) {
 
 func TestActorBatchQuestions(t *testing.T) {
 	binPath := buildFakeClaude(t)
-	walDir := t.TempDir()
 	relay := newFakeRelay()
 
 	// Emit 3 AskUserQuestion denials in a single result.
@@ -245,7 +239,6 @@ func TestActorBatchQuestions(t *testing.T) {
 		SessionID:  "sess-batch-q",
 		BinaryPath: binPath,
 		CWD:        t.TempDir(),
-		WALPath:    filepath.Join(walDir, "sess-batch-q.jsonl"),
 		Relay:      relay,
 	})
 	if err != nil {
@@ -332,10 +325,8 @@ func TestActorBatchQuestions(t *testing.T) {
 
 func TestActorSendTaskWhenBusy(t *testing.T) {
 	relay := newFakeRelay()
-	tmpDir := t.TempDir()
 	a, err := NewActor(Options{
 		SessionID: "s-1",
-		WALPath:   filepath.Join(tmpDir, "s-1.jsonl"),
 		Relay:     relay,
 	})
 	if err != nil {
