@@ -39,6 +39,35 @@ func TestLoadReturnsErrorIfMissing(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"machineId":"m1","authToken":"tok"}`), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+
+	if cfg.MaxConcurrentTasks != 0 {
+		t.Errorf("MaxConcurrentTasks = %d, want 0", cfg.MaxConcurrentTasks)
+	}
+	if cfg.TaskTimeoutMinutes != 30 {
+		t.Errorf("TaskTimeoutMinutes = %d, want 30", cfg.TaskTimeoutMinutes)
+	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
+	}
+	if cfg.ServerURL != DefaultServerURL {
+		t.Errorf("ServerURL = %q, want %q", cfg.ServerURL, DefaultServerURL)
+	}
+	if cfg.RelayURL != DefaultRelayURL {
+		t.Errorf("RelayURL = %q, want %q", cfg.RelayURL, DefaultRelayURL)
+	}
+}
+
 func TestSavePermissionsAreRestrictive(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

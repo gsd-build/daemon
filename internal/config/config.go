@@ -11,11 +11,14 @@ import (
 
 // Config is the on-disk daemon state.
 type Config struct {
-	MachineID      string `json:"machineId"`
-	AuthToken      string `json:"authToken"`
-	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
-	ServerURL      string `json:"serverUrl"`
-	RelayURL       string `json:"relayUrl"`
+	MachineID          string `json:"machineId"`
+	AuthToken          string `json:"authToken"`
+	TokenExpiresAt     string `json:"tokenExpiresAt,omitempty"`
+	ServerURL          string `json:"serverUrl"`
+	RelayURL           string `json:"relayUrl"`
+	MaxConcurrentTasks int    `json:"maxConcurrentTasks,omitempty"` // 0 means unlimited
+	TaskTimeoutMinutes int    `json:"taskTimeoutMinutes,omitempty"`
+	LogLevel           string `json:"logLevel,omitempty"`
 }
 
 // DefaultServerURL is the production web app host.
@@ -23,6 +26,12 @@ const DefaultServerURL = "https://app.gsd.build"
 
 // DefaultRelayURL is the production relay WebSocket endpoint.
 const DefaultRelayURL = "wss://relay.gsd.build/ws/daemon"
+
+// DefaultTaskTimeoutMinutes is the default per-task timeout.
+const DefaultTaskTimeoutMinutes = 30
+
+// DefaultLogLevel is the default slog level string.
+const DefaultLogLevel = "info"
 
 // Path returns the absolute path to the config file.
 func Path() (string, error) {
@@ -52,12 +61,24 @@ func Save(cfg *Config) error {
 	return nil
 }
 
-// Load reads the config from disk.
-func Load() (*Config, error) {
-	path, err := Path()
-	if err != nil {
-		return nil, err
+// applyDefaults fills zero-value fields with production defaults.
+func (cfg *Config) applyDefaults() {
+	if cfg.ServerURL == "" {
+		cfg.ServerURL = DefaultServerURL
 	}
+	if cfg.RelayURL == "" {
+		cfg.RelayURL = DefaultRelayURL
+	}
+	if cfg.TaskTimeoutMinutes == 0 {
+		cfg.TaskTimeoutMinutes = DefaultTaskTimeoutMinutes
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = DefaultLogLevel
+	}
+}
+
+// LoadFrom reads the config from the given file path.
+func LoadFrom(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -66,11 +87,15 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.ServerURL == "" {
-		cfg.ServerURL = DefaultServerURL
-	}
-	if cfg.RelayURL == "" {
-		cfg.RelayURL = DefaultRelayURL
-	}
+	cfg.applyDefaults()
 	return &cfg, nil
+}
+
+// Load reads the config from disk.
+func Load() (*Config, error) {
+	path, err := Path()
+	if err != nil {
+		return nil, err
+	}
+	return LoadFrom(path)
 }
