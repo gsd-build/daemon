@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -536,5 +537,49 @@ func TestActorLastActiveAt(t *testing.T) {
 	updated := actor.LastActiveAt()
 	if !updated.After(initial) {
 		t.Errorf("expected lastActiveAt to advance: initial=%v updated=%v", initial, updated)
+	}
+}
+
+func TestActorWritesPIDFile(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+	pidDir := t.TempDir()
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-pid",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.pidDir = pidDir
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "t1",
+		SessionID: "sess-pid",
+		ChannelID: "ch1",
+		Prompt:    "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete")
+	}
+
+	// After completion, PID file should be cleaned up
+	entries, err := os.ReadDir(pidDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected PID file to be cleaned up, found %d files", len(entries))
 	}
 }

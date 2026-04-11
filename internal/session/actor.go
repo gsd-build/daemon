@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
+	"github.com/gsd-build/daemon/internal/pidfile"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -66,6 +68,9 @@ type Actor struct {
 	// lastActiveAt tracks when this actor last completed or received a task.
 	// Protected by taskMu. Used by the reaper to detect idle actors.
 	lastActiveAt time.Time
+
+	// pidDir is the directory for PID files. Empty disables PID tracking.
+	pidDir string
 }
 
 type taskContext struct {
@@ -254,6 +259,19 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		AllowedTools:   a.allowedTools,
 		Prompt:         prompt,
 	})
+
+	if a.pidDir != "" {
+		exec.OnPIDStart = func(pid int) {
+			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
+			if err := pidfile.Write(path, pid); err != nil {
+				log.Printf("[actor] write pid file: %v", err)
+			}
+		}
+		exec.OnPIDExit = func(pid int) {
+			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
+			pidfile.Remove(path)
+		}
+	}
 
 	var resultRaw json.RawMessage
 
