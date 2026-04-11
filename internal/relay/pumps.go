@@ -9,6 +9,9 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
+// MessageHandler is called for every frame received from the relay.
+type MessageHandler func(env *protocol.Envelope) error
+
 // writePump drains sendCh and writes each message to the WebSocket.
 // Exits on ctx cancellation, write error, or when sendCh is closed.
 // Sends any error to errCh.
