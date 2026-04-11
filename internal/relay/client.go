@@ -93,7 +93,9 @@ func (c *Client) Connect(
 	}
 
 	// Wait for Welcome
-	_, data, err := conn.Read(ctx)
+	welcomeCtx, welcomeCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer welcomeCancel()
+	_, data, err := conn.Read(welcomeCtx)
 	if err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("read welcome: %w", err)

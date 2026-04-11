@@ -110,44 +110,79 @@ func (l *Log) ReadFrom(fromSeq int64) ([]Entry, error) {
 
 // PruneUpTo rewrites the log with only entries where Seq > upTo.
 func (l *Log) PruneUpTo(upTo int64) error {
-	remaining, err := l.ReadFrom(upTo)
-	if err != nil {
-		return err
-	}
-
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Flush pending writes before reading
+	if err := l.w.Flush(); err != nil {
+		return err
+	}
+
+	// Read all entries from the file
+	f, err := os.Open(l.path)
+	if err != nil {
+		return fmt.Errorf("open for read: %w", err)
+	}
+
+	var remaining []Entry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e Entry
+		if err := json.Unmarshal(line, &e); err != nil {
+			f.Close()
+			return fmt.Errorf("parse entry: %w", err)
+		}
+		if e.Seq > upTo {
+			remaining = append(remaining, e)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		f.Close()
+		return fmt.Errorf("scan: %w", err)
+	}
+	f.Close()
+
+	// Write remaining to temp file
 	tmp := l.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	tf, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("open tmp: %w", err)
 	}
-	w := bufio.NewWriter(f)
+	w := bufio.NewWriter(tf)
 	for _, e := range remaining {
 		line, _ := json.Marshal(e)
 		line = append(line, '\n')
 		if _, err := w.Write(line); err != nil {
-			f.Close()
+			tf.Close()
+			os.Remove(tmp)
 			return err
 		}
 	}
 	if err := w.Flush(); err != nil {
-		f.Close()
+		tf.Close()
+		os.Remove(tmp)
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
+	if err := tf.Sync(); err != nil {
+		tf.Close()
+		os.Remove(tmp)
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err := tf.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 
-	// Close current file, swap atomically, reopen
+	// Swap atomically
 	_ = l.w.Flush()
 	_ = l.f.Close()
 	if err := os.Rename(tmp, l.path); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)
 	}
 	nf, err := os.OpenFile(l.path, os.O_RDWR|os.O_APPEND, 0600)

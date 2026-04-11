@@ -2,6 +2,7 @@ package wal
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,13 +32,18 @@ func ScanDirectory(walDir string) (map[string]int64, error) {
 		}
 		sessionID := strings.TrimSuffix(name, ".jsonl")
 
-		log, err := Open(filepath.Join(walDir, name))
+		walLog, err := Open(filepath.Join(walDir, name))
 		if err != nil {
+			log.Printf("[wal] warning: cannot open WAL file %s: %v", name, err)
 			continue
 		}
-		walEntries, err := log.ReadFrom(0)
-		_ = log.Close()
-		if err != nil || len(walEntries) == 0 {
+		walEntries, err := walLog.ReadFrom(0)
+		_ = walLog.Close()
+		if err != nil {
+			log.Printf("[wal] warning: cannot read WAL file %s: %v", name, err)
+			continue
+		}
+		if len(walEntries) == 0 {
 			continue
 		}
 
