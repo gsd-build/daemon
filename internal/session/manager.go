@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/gsd-build/daemon/internal/display"
-	protocol "github.com/gsd-build/protocol-go"
 )
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -69,26 +68,7 @@ func (m *Manager) Spawn(
 	}
 	m.actors[opts.SessionID] = actor
 
-	// Capture Run's exit reason so a failure during executor setup
-	// (e.g. openClaudePTY returning an error) does not disappear
-	// silently. Before this change, the goroutine did
-	// `_ = actor.Run(ctx)` and any Start error caused the browser to
-	// see taskStarted followed by an indefinite hang, because the
-	// concurrent SendTask call blocked on <-e.ready forever. The
-	// Executor now closes e.ready on every error path, so Send will
-	// unblock with a "not started" error, but the Run error itself
-	// still needs to be surfaced — otherwise fly logs are silent and
-	// the root cause is invisible.
-	//
-	// Also synthesize a TaskError frame to the relay for any task
-	// that happened to be in flight when Run exited, so the browser
-	// sees an actionable failure instead of just an empty
-	// taskStarted. The relay sender is available via opts.Relay
-	// (which Spawn populates from m.relay above), so we do not need
-	// to thread new plumbing.
-	relay := opts.Relay
 	sessionID := opts.SessionID
-	channelID := opts.ChannelID
 	go func() {
 		err := actor.Run(ctx)
 		if err == nil || ctx.Err() != nil {
@@ -97,23 +77,6 @@ func (m *Manager) Spawn(
 		log.Printf("[session] actor.Run exited with error: session=%s err=%v", sessionID, err)
 		if m.verbosity != display.Quiet {
 			fmt.Print(display.FormatErrorBanner(err.Error()))
-		}
-		if relay == nil {
-			return
-		}
-		taskID := actor.InFlightTaskID()
-		if taskID == "" {
-			// No task was in flight; nothing actionable to send.
-			return
-		}
-		if sendErr := relay.Send(&protocol.TaskError{
-			Type:      protocol.MsgTypeTaskError,
-			TaskID:    taskID,
-			SessionID: sessionID,
-			ChannelID: channelID,
-			Error:     err.Error(),
-		}); sendErr != nil {
-			log.Printf("[session] failed to send taskError to relay: session=%s err=%v", sessionID, sendErr)
 		}
 	}()
 	return actor, nil
