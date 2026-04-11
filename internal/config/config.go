@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"time"
 )
 
 // Config is the on-disk daemon state.
@@ -98,4 +100,22 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return LoadFrom(path)
+}
+
+// EffectiveMaxConcurrentTasks returns the configured limit or runtime.NumCPU()
+// when the field is 0 (unset).
+func (c *Config) EffectiveMaxConcurrentTasks() int {
+	if c.MaxConcurrentTasks > 0 {
+		return c.MaxConcurrentTasks
+	}
+	return runtime.NumCPU()
+}
+
+// EffectiveTaskTimeout returns the configured timeout duration or the 30-minute
+// default when the field is 0 (unset).
+func (c *Config) EffectiveTaskTimeout() time.Duration {
+	if c.TaskTimeoutMinutes > 0 {
+		return time.Duration(c.TaskTimeoutMinutes) * time.Minute
+	}
+	return 30 * time.Minute
 }

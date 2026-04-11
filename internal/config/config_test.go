@@ -85,3 +85,28 @@ func TestSavePermissionsAreRestrictive(t *testing.T) {
 		t.Errorf("expected 0600 permissions, got %v", info.Mode().Perm())
 	}
 }
+
+func TestEffectiveMaxConcurrentTasks(t *testing.T) {
+	cfg := &Config{}
+	got := cfg.EffectiveMaxConcurrentTasks()
+	if got < 1 {
+		t.Errorf("expected at least 1, got %d", got)
+	}
+
+	cfg.MaxConcurrentTasks = 4
+	if cfg.EffectiveMaxConcurrentTasks() != 4 {
+		t.Errorf("expected 4, got %d", cfg.EffectiveMaxConcurrentTasks())
+	}
+}
+
+func TestEffectiveTaskTimeout(t *testing.T) {
+	cfg := &Config{}
+	if cfg.EffectiveTaskTimeout().Minutes() != 30 {
+		t.Errorf("expected 30m default, got %v", cfg.EffectiveTaskTimeout())
+	}
+
+	cfg.TaskTimeoutMinutes = 60
+	if cfg.EffectiveTaskTimeout().Minutes() != 60 {
+		t.Errorf("expected 60m, got %v", cfg.EffectiveTaskTimeout())
+	}
+}
