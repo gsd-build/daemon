@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"path/filepath"
 	"sync"
 
 	"github.com/gsd-build/daemon/internal/display"
@@ -15,17 +14,15 @@ type Manager struct {
 	mu     sync.Mutex
 	actors map[string]*Actor
 
-	baseWALDir string
 	relay      RelaySender
 	binaryPath string
 	verbosity  display.VerbosityLevel
 }
 
-// NewManager constructs a Manager rooted at baseWALDir.
-func NewManager(baseWALDir, binaryPath string, relay RelaySender, verbosity display.VerbosityLevel) *Manager {
+// NewManager constructs a Manager.
+func NewManager(binaryPath string, relay RelaySender, verbosity display.VerbosityLevel) *Manager {
 	return &Manager{
 		actors:     make(map[string]*Actor),
-		baseWALDir: baseWALDir,
 		relay:      relay,
 		binaryPath: binaryPath,
 		verbosity:  verbosity,
@@ -51,9 +48,6 @@ func (m *Manager) Spawn(
 		return existing, nil
 	}
 
-	if opts.WALPath == "" {
-		opts.WALPath = filepath.Join(m.baseWALDir, opts.SessionID+".jsonl")
-	}
 	if opts.Relay == nil {
 		opts.Relay = m.relay
 	}
@@ -92,13 +86,3 @@ func (m *Manager) StopAll() {
 	m.actors = make(map[string]*Actor)
 }
 
-// LastSequences returns a snapshot map of sessionID → lastSeq.
-func (m *Manager) LastSequences() map[string]int64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make(map[string]int64, len(m.actors))
-	for id, a := range m.actors {
-		out[id] = a.LastSequence()
-	}
-	return out
-}
