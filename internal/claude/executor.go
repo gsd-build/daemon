@@ -97,6 +97,9 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 	stderrBuf := newStderrBuffer(50, 16*1024)
 
 	if err := cmd.Start(); err != nil {
+		if ctx.Err() != nil {
+			return nil // context was cancelled before or during start
+		}
 		return fmt.Errorf("start: %w", err)
 	}
 
