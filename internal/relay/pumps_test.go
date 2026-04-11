@@ -1,0 +1,191 @@
+package relay
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	protocol "github.com/gsd-build/protocol-go"
+)
+
+func TestWritePumpDrainsChannel(t *testing.T) {
+	var mu sync.Mutex
+	var received [][]byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		for {
+			_, data, err := c.Read(r.Context())
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			received = append(received, data)
+			mu.Unlock()
+		}
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	sendCh := make(chan []byte, 512)
+	errCh := make(chan error, 1)
+
+	go writePump(ctx, conn, sendCh, errCh)
+
+	sendCh <- []byte(`{"type":"a"}`)
+	sendCh <- []byte(`{"type":"b"}`)
+	sendCh <- []byte(`{"type":"c"}`)
+
+	// Wait for server to receive
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(received)
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(received))
+	}
+}
+
+func TestReadPumpDispatchesToHandler(t *testing.T) {
+	var mu sync.Mutex
+	var dispatched []string
+
+	handler := func(env *protocol.Envelope) error {
+		mu.Lock()
+		dispatched = append(dispatched, env.Type)
+		mu.Unlock()
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+
+		// Send a stream frame
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"stream","sessionId":"s1","channelId":"ch1","sequenceNumber":1,"event":{}}`))
+		// Send a taskComplete frame
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"taskComplete","taskId":"t1","sessionId":"s1","channelId":"ch1","claudeSessionId":"c1","inputTokens":1,"outputTokens":1,"costUsd":"0.01","durationMs":100}`))
+
+		// Keep connection open until client disconnects
+		_, _, _ = c.Read(r.Context())
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	errCh := make(chan error, 1)
+	go readPump(ctx, conn, handler, errCh)
+
+	// Wait for dispatch
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(dispatched)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dispatched) != 2 {
+		t.Fatalf("expected 2 dispatched, got %d", len(dispatched))
+	}
+	if dispatched[0] != "stream" {
+		t.Errorf("first dispatch: expected stream, got %s", dispatched[0])
+	}
+	if dispatched[1] != "taskComplete" {
+		t.Errorf("second dispatch: expected taskComplete, got %s", dispatched[1])
+	}
+}
+
+func TestPingManagerSignalsAfterConsecutiveFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Hard-close the connection so the client detects it immediately
+		c.CloseNow()
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Drain reads; when the server's hard-close arrives, CloseNow the
+	// client side so Ping returns immediately instead of timing out.
+	go func() {
+		for {
+			_, _, err := conn.Read(ctx)
+			if err != nil {
+				conn.CloseNow()
+				return
+			}
+		}
+	}()
+
+	// Give the reader goroutine time to detect the server close
+	time.Sleep(200 * time.Millisecond)
+
+	errCh := make(chan error, 1)
+
+	// Use a short interval for testing
+	go pingManager(ctx, conn, 100*time.Millisecond, 3, errCh)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected non-nil error from ping manager")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ping manager did not signal failure within 5s")
+	}
+}

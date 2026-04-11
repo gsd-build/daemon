@@ -10,7 +10,7 @@ import (
 
 type nullRelay struct{}
 
-func (nullRelay) Send(msg any) error { return nil }
+func (nullRelay) Send(ctx context.Context, msg any) error { return nil }
 
 func TestManagerSpawnAndGet(t *testing.T) {
 	binPath := buildFakeClaude(t)

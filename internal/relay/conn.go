@@ -1,0 +1,207 @@
+// Package relay implements the WebSocket client the daemon uses to
+// talk to the Fly.io relay.
+package relay
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	protocol "github.com/gsd-build/protocol-go"
+)
+
+// Config is immutable per-client settings.
+type Config struct {
+	URL           string
+	AuthToken     string
+	MachineID     string
+	DaemonVersion string
+	OS            string
+	Arch          string
+}
+
+// ActiveTasksFunc returns the list of currently active task IDs.
+// Called during Hello construction on every connect/reconnect.
+type ActiveTasksFunc func() []string
+
+// Client manages a WebSocket connection to the relay with automatic
+// reconnection, independent read/write pumps, and context-aware send.
+type Client struct {
+	cfg     Config
+	sender  // embedded — provides Send(ctx, msg)
+	handler MessageHandler
+
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
+// NewClient constructs a Client. Call Run to connect and process messages.
+func NewClient(cfg Config) *Client {
+	return &Client{
+		cfg:    cfg,
+		sender: sender{sendCh: make(chan []byte, 512)},
+	}
+}
+
+// SetHandler registers the message handler for incoming frames.
+// Must be called before Run.
+func (c *Client) SetHandler(h MessageHandler) {
+	c.handler = h
+}
+
+// Connect dials the relay, sends Hello, and waits for Welcome.
+// activeTasks is the list of task IDs to include in the Hello (may be nil).
+func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.Welcome, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+
+	conn, _, err := websocket.Dial(dialCtx, c.cfg.URL, &websocket.DialOptions{
+		HTTPHeader: header,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	conn.SetReadLimit(1 << 20) // 1 MB
+
+	// Send Hello
+	hello := protocol.Hello{
+		Type:          protocol.MsgTypeHello,
+		MachineID:     c.cfg.MachineID,
+		DaemonVersion: c.cfg.DaemonVersion,
+		OS:            c.cfg.OS,
+		Arch:          c.cfg.Arch,
+	}
+	buf, err := json.Marshal(hello)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("marshal hello: %w", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, buf); err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("send hello: %w", err)
+	}
+
+	// Wait for Welcome
+	welcomeCtx, welcomeCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer welcomeCancel()
+	_, data, err := conn.Read(welcomeCtx)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("read welcome: %w", err)
+	}
+	env, err := protocol.ParseEnvelope(data)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("parse welcome: %w", err)
+	}
+	welcome, ok := env.Payload.(*protocol.Welcome)
+	if !ok {
+		conn.CloseNow()
+		return nil, fmt.Errorf("unexpected first frame: %s", env.Type)
+	}
+
+	c.mu.Lock()
+	c.conn = conn
+	c.mu.Unlock()
+
+	return welcome, nil
+}
+
+// RunOnce connects, starts pumps, and blocks until the connection fails.
+// Returns the error that caused the disconnection.
+func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
+	_, err := c.Connect(ctx, activeTasks)
+	if err != nil {
+		return err
+	}
+
+	pumpCtx, pumpCancel := context.WithCancel(ctx)
+	defer pumpCancel()
+
+	errCh := make(chan error, 3)
+
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+
+	go readPump(pumpCtx, conn, c.handler, errCh)
+	go writePump(pumpCtx, conn, c.sendCh, errCh)
+	go pingManager(pumpCtx, conn, 25*time.Second, 3, errCh)
+
+	// Wait for first error from any pump
+	select {
+	case err := <-errCh:
+		pumpCancel()
+		conn.CloseNow()
+		return err
+	case <-ctx.Done():
+		pumpCancel()
+		conn.Close(websocket.StatusGoingAway, "shutdown")
+		return ctx.Err()
+	}
+}
+
+// Run connects to the relay and reconnects automatically on failure.
+// Blocks until ctx is canceled. Uses jittered exponential backoff.
+func (c *Client) Run(ctx context.Context, getActiveTasks ActiveTasksFunc) error {
+	backoff := 1 * time.Second
+	const maxBackoff = 60 * time.Second
+
+	wakeCh := WakeDetector(ctx)
+
+	for {
+		connStart := time.Now()
+
+		var tasks []string
+		if getActiveTasks != nil {
+			tasks = getActiveTasks()
+		}
+
+		err := c.RunOnce(ctx, tasks)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Reset backoff if connection was healthy (alive > 2 min)
+		if time.Since(connStart) > 2*time.Minute {
+			backoff = 1 * time.Second
+		}
+
+		// Jittered backoff: ±20%
+		jitter := time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64()))
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wakeCh:
+			// System woke from sleep — reconnect immediately
+			continue
+		case <-time.After(jitter):
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		_ = err // logged by caller; we just reconnect
+	}
+}
+
+// Close closes the underlying WebSocket connection.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		return c.conn.Close(websocket.StatusNormalClosure, "")
+	}
+	return nil
+}
