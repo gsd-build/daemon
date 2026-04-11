@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/gsd-build/daemon/internal/sockapi"
 )
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -79,6 +81,34 @@ func (m *Manager) ActiveTaskIDs() []string {
 		}
 	}
 	return ids
+}
+
+// SessionInfos returns a snapshot of all active sessions.
+func (m *Manager) SessionInfos() []sockapi.SessionInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	infos := make([]sockapi.SessionInfo, 0, len(m.actors))
+	for _, a := range m.actors {
+		infos = append(infos, a.Info())
+	}
+	return infos
+}
+
+// ActiveCount returns the number of actors with in-flight tasks.
+func (m *Manager) ActiveCount() (total int, executing int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	total = len(m.actors)
+	for _, a := range m.actors {
+		a.taskMu.Lock()
+		if a.taskID != "" {
+			executing++
+		}
+		a.taskMu.Unlock()
+	}
+	return total, executing
 }
 
 // StopAll stops every actor. Called on daemon shutdown.

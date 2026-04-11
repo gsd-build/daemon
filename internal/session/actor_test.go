@@ -434,3 +434,68 @@ func TestActorSendTaskWhenBusy(t *testing.T) {
 		t.Fatal("expected error when task channel full")
 	}
 }
+
+func TestActorInfoExecutingState(t *testing.T) {
+	relay := newFakeRelay()
+	actor, err := NewActor(Options{
+		SessionID:  "sess-info-exec",
+		BinaryPath: "echo",
+		CWD:        "/tmp",
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an in-flight task by setting fields directly.
+	actor.taskMu.Lock()
+	actor.taskID = "task-42"
+	now := time.Now()
+	actor.taskStartedAt = &now
+	actor.idleSince = nil
+	actor.taskMu.Unlock()
+
+	info := actor.Info()
+	if info.State != "executing" {
+		t.Errorf("expected executing, got %s", info.State)
+	}
+	if info.TaskID != "task-42" {
+		t.Errorf("expected task-42, got %s", info.TaskID)
+	}
+	if info.StartedAt == nil {
+		t.Error("expected StartedAt to be set")
+	}
+	if info.IdleSince != nil {
+		t.Error("expected IdleSince to be nil")
+	}
+}
+
+func TestActorInfoIdleState(t *testing.T) {
+	relay := newFakeRelay()
+	actor, err := NewActor(Options{
+		SessionID:  "sess-info-idle",
+		BinaryPath: "echo",
+		CWD:        "/tmp",
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Actor starts idle — set idleSince.
+	actor.taskMu.Lock()
+	idleTime := time.Now().Add(-10 * time.Minute)
+	actor.idleSince = &idleTime
+	actor.taskMu.Unlock()
+
+	info := actor.Info()
+	if info.State != "idle" {
+		t.Errorf("expected idle, got %s", info.State)
+	}
+	if info.TaskID != "" {
+		t.Errorf("expected empty taskID, got %s", info.TaskID)
+	}
+	if info.IdleSince == nil {
+		t.Error("expected IdleSince to be set")
+	}
+}
