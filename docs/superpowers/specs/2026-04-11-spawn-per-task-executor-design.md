@@ -156,10 +156,74 @@ No changes. The display package works on raw event bytes regardless of how the e
 
 Context cancellation kills the subprocess via `exec.CommandContext`. The process receives SIGKILL. No cleanup needed — the next spawn just `--resume`s from the last committed state.
 
+## Bundled Fixes
+
+These issues were found during a codebase audit. They're small, targeted fixes in files we're already touching or closely related to the refactor.
+
+### Fix 1: Propagate relay send errors in handleEvent (actor.go)
+
+The current code swallows relay send failures:
+```go
+if err := a.opts.Relay.Send(frame); err != nil {
+    return nil // silently swallowed
+}
+```
+
+This causes the browser to see a hung task when the relay has a network hiccup — events accumulate in the WAL but never reach the browser. Fix: log the error at warn level instead of returning it (returning the error would kill the actor, which is too aggressive — the WAL has the event and replay will recover it).
+
+```go
+if err := a.opts.Relay.Send(frame); err != nil {
+    log.Printf("[actor] relay send failed (WAL has entry): session=%s seq=%d err=%v", a.opts.SessionID, next, err)
+}
+```
+
+### Fix 2: Clean up unused taskContext fields (actor.go)
+
+`taskContext` has `Input`, `Output`, and `CostUSD` fields that are never set or read. Remove them.
+
+### Fix 3: WAL prune temp file cleanup (wal.go)
+
+If `os.Rename(tmp, l.path)` fails during prune, the temp file is orphaned on disk. Fix: remove the temp file in the error path.
+
+```go
+if err := os.Rename(tmp, l.path); err != nil {
+    os.Remove(tmp) // clean up orphan
+    return fmt.Errorf("rename: %w", err)
+}
+```
+
+### Fix 4: WAL ReadFrom-Prune race (wal.go)
+
+`PruneUpTo` calls `ReadFrom` before acquiring the lock, creating a window where `Append` can write an entry that gets lost when the pruned file is written. Fix: acquire the lock before reading.
+
+### Fix 5: Log corrupt WAL files during scan (recover.go)
+
+`ScanDirectory` silently skips WAL files that can't be opened or read. This hides disk corruption. Fix: log a warning when a WAL file is skipped.
+
+### Fix 6: Add timeout on relay Welcome read (relay/client.go)
+
+`Connect` has a 15-second timeout for the WebSocket dial but no timeout for reading the Welcome frame. If the relay accepts the connection but never sends Welcome, the daemon hangs forever. Fix: wrap the Welcome read in a 10-second timeout.
+
+```go
+welcomeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+defer cancel()
+_, data, err := conn.Read(welcomeCtx)
+```
+
+## Deferred to Separate Work
+
+These relay client issues require rethinking the two-goroutine architecture and are too risky to bundle:
+
+- **Relay send goroutine leak:** if the write goroutine crashes, buffered messages are never sent and Send() returns misleading errors
+- **Zombie connection on handler error:** connection stays open when the read goroutine exits on handler error
+- **Send queue health:** no way to detect that the send goroutine is dead
+
+These should be addressed in a dedicated relay client reliability pass.
+
 ## What Stays the Same
 
-- WAL (write-ahead log) — still records every event
-- Relay forwarding — unchanged
+- WAL (write-ahead log) — still records every event (with fixes above)
+- Relay forwarding — unchanged (with fixes above)
 - Display output — unchanged (just shipped in v0.1.8)
 - Connection lifecycle — unchanged
 - Heartbeat — unchanged
