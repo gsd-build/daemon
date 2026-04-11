@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
+	"github.com/gsd-build/daemon/internal/sockapi"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -25,14 +28,17 @@ type SessionManager interface {
 	Spawn(ctx context.Context, opts session.Options) (*session.Actor, error)
 	ActiveTaskIDs() []string
 	StopAll()
+	SessionInfos() []sockapi.SessionInfo
+	ActiveCount() (total int, executing int)
 }
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg     *config.Config
-	version string
-	manager SessionManager
-	client  *relay.Client
+	cfg       *config.Config
+	version   string
+	manager   SessionManager
+	client    *relay.Client
+	startedAt time.Time
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -70,10 +76,11 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	manager := session.NewManager(binaryPath, client)
 
 	return &Daemon{
-		cfg:     cfg,
-		version: version,
-		manager: manager,
-		client:  client,
+		cfg:       cfg,
+		version:   version,
+		manager:   manager,
+		client:    client,
+		startedAt: time.Now(),
 	}, nil
 }
 
@@ -126,6 +133,32 @@ func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
 	}
 }
 
+// Health implements sockapi.StatusProvider.
+func (d *Daemon) Health() sockapi.HealthData {
+	return sockapi.HealthData{Status: "ok"}
+}
+
+// Status implements sockapi.StatusProvider.
+func (d *Daemon) Status() sockapi.StatusData {
+	total, executing := d.manager.ActiveCount()
+	return sockapi.StatusData{
+		Version:            d.version,
+		Uptime:             time.Since(d.startedAt).Truncate(time.Second).String(),
+		RelayConnected:     true,
+		RelayURL:           d.cfg.RelayURL,
+		MachineID:          d.cfg.MachineID,
+		ActiveSessions:     total,
+		InFlightTasks:      executing,
+		MaxConcurrentTasks: runtime.NumCPU(),
+		LogLevel:           "info",
+	}
+}
+
+// Sessions implements sockapi.StatusProvider.
+func (d *Daemon) Sessions() []sockapi.SessionInfo {
+	return d.manager.SessionInfos()
+}
+
 // Run connects to the relay and blocks until ctx is canceled.
 // The client handles reconnection automatically.
 func (d *Daemon) Run(ctx context.Context) error {
@@ -133,13 +166,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Check token expiry at startup.
 	d.checkAndRefreshToken()
+
+	// Start Unix socket status API.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("user home: %w", err)
+	}
+	sockPath := filepath.Join(home, ".gsd-cloud", "daemon.sock")
+	sockSrv := sockapi.NewServer(sockPath, d)
+	go sockSrv.ListenAndServe(ctx)
+
 	go d.runTokenRefreshCheck(ctx)
 	go d.runIdleHeartbeat(ctx)
 	defer d.gracefulShutdown(ctx)
 
 	slog.Info("connecting to relay", "url", d.cfg.RelayURL, "machine", d.cfg.MachineID)
 
-	err := d.client.Run(ctx, d.getActiveTasks)
+	err = d.client.Run(ctx, d.getActiveTasks)
 	if err != nil && strings.Contains(err.Error(), "token_expired") {
 		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
