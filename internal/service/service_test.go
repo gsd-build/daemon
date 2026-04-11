@@ -142,3 +142,33 @@ func TestLaunchdPlistContent(t *testing.T) {
 		t.Error("plist missing KeepAlive")
 	}
 }
+
+func TestSystemdUnitContent(t *testing.T) {
+	p := &systemdPlatform{}
+	unit := p.generateUnit()
+
+	if !strings.Contains(unit, "[Unit]") {
+		t.Error("unit missing [Unit] section")
+	}
+	if !strings.Contains(unit, "[Service]") {
+		t.Error("unit missing [Service] section")
+	}
+	if !strings.Contains(unit, "[Install]") {
+		t.Error("unit missing [Install] section")
+	}
+	if !strings.Contains(unit, "%h/.gsd-cloud/bin/gsd-cloud start --service") {
+		t.Errorf("unit must use %%h for home dir in ExecStart:\n%s", unit)
+	}
+	if !strings.Contains(unit, "Restart=always") {
+		t.Error("unit missing Restart=always")
+	}
+	if !strings.Contains(unit, "RestartSec=5") {
+		t.Error("unit missing RestartSec=5")
+	}
+	if !strings.Contains(unit, "StartLimitBurst=5") {
+		t.Error("unit missing StartLimitBurst=5")
+	}
+	if !strings.Contains(unit, "WantedBy=default.target") {
+		t.Error("unit missing WantedBy=default.target")
+	}
+}
