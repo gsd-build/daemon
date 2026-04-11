@@ -1,70 +1,35 @@
-// fake-claude is a test helper that mimics `claude -p --input-format stream-json
-// --output-format stream-json`. It reads NDJSON from stdin and emits scripted
-// responses based on the content and on environment variables.
-//
-// IMPORTANT: this fake calls os.Stdout.Sync() after every event to force an
-// immediate flush. This is NOT how real claude (a Node.js program) behaves on
-// a pipe — Node block-buffers pipe stdout and only flushes when the buffer
-// fills or the process exits. For short stream-json events (~200 bytes), the
-// buffer never fills, and the daemon used to see zero events until the bug
-// was fixed in fix/executor-pty-buffering. The sync calls below were hiding
-// that bug for months by making every test run behave like a TTY.
-//
-// Do NOT remove the Sync() calls. They exist for a specific reason: this
-// fake is the "happy path" reference, used by tests that want a well-behaved
-// subprocess. The complementary cmd/fake-claude-blockbuf fake deliberately
-// does NOT flush and is used by the regression test that proves the executor
-// correctly handles Node-style block-buffering via a pty. Removing these
-// Sync calls will make existing tests look like they still pass, while
-// silently re-introducing the opportunity to land a regression.
+// fake-claude is a test helper that mimics `claude -p --output-format stream-json`.
+// It reads the prompt from the last positional CLI argument, emits scripted
+// stream-json events to stdout, and exits.
 //
 // Env vars:
 //
-//	FAKE_CLAUDE_DENY_TOOL=<name>  — emit a permission_denials for the first turn
-//	                                (or any turn where the tool is not in --allowedTools)
+//	FAKE_CLAUDE_DENY_TOOL=<name>  — emit permission_denials in the result
+//	                                (unless the tool is in --allowedTools)
 //	FAKE_CLAUDE_SESSION_ID=<id>   — override the synthetic session id
-//	FAKE_CLAUDE_ARGS_FILE=<path>  — write os.Args[1:] as JSON to this file (preserved from Task 9)
-//	FAKE_CLAUDE_STDERR=<text>     — write this string (plus newline) to stderr at startup
-//	FAKE_CLAUDE_EXIT_CODE=<n>     — exit with this code immediately after writing stderr,
-//	                                before reading stdin (used to test stderr capture)
-//	FAKE_CLAUDE_ASSERT_STDIN_PIPE=1 — if set, exit with code 3 and a stderr
-//	                                  message if fd 0 is a TTY. Used by the
-//	                                  TestExecutorStdinIsNotTTY regression
-//	                                  test to pin the split-stdio invariant:
-//	                                  the real claude CLI's `-p --input-format
-//	                                  stream-json` mode drops into an
-//	                                  interactive code path when stdin is a
-//	                                  TTY and refuses to run without a prompt
-//	                                  argument, so the executor MUST keep
-//	                                  stdin on a regular anonymous pipe.
+//	FAKE_CLAUDE_ARGS_FILE=<path>  — write os.Args[1:] as JSON to this file
+//	FAKE_CLAUDE_STDERR=<text>     — write this string to stderr at startup
+//	FAKE_CLAUDE_EXIT_CODE=<n>     — exit with this code immediately after stderr
 //
-// Usage: invoked by the daemon as `claude -p ...` during tests.
+// Usage: invoked by the daemon as `claude -p ... "prompt"` during tests.
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
-
-	"golang.org/x/term"
 )
 
 func main() {
-	// If FAKE_CLAUDE_ARGS_FILE is set, write argv as JSON to that file.
-	// This lets executor tests inspect the flags passed by the daemon
-	// without polluting the stdout stream that the parser reads.
+	// Write argv to file if requested
 	if argsFile := os.Getenv("FAKE_CLAUDE_ARGS_FILE"); argsFile != "" {
 		data, _ := json.Marshal(os.Args[1:])
 		_ = os.WriteFile(argsFile, data, 0o600)
 	}
 
-	// Test hooks for stderr capture: emit an optional line to stderr,
-	// and optionally force an immediate non-zero exit. When FAKE_CLAUDE_EXIT_CODE
-	// is set, we bail before touching stdin so the test deterministically
-	// sees a crashed subprocess.
+	// Stderr and exit code hooks
 	if msg := os.Getenv("FAKE_CLAUDE_STDERR"); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
 	}
@@ -74,34 +39,13 @@ func main() {
 		}
 	}
 
-	// Regression guard for the split-stdio layout. The real claude CLI's
-	// `-p --input-format stream-json` mode requires stdin to NOT be a
-	// TTY; attaching a pty slave to stdin makes claude drop into an
-	// interactive code path that refuses to run without a positional
-	// prompt argument and exits with:
-	//   Error: Input must be provided either through stdin or as a prompt argument when using --print
-	// Reproduced in production on 2026-04-08 with claude@2.1.96. The
-	// executor must therefore keep stdin on a regular anonymous pipe
-	// and only bind the pty slave to stdout. TestExecutorStdinIsNotTTY
-	// sets this env var so any future change that flips stdin back to
-	// a pty trips this check at runtime instead of silently shipping
-	// a regression to production.
-	if os.Getenv("FAKE_CLAUDE_ASSERT_STDIN_PIPE") == "1" {
-		if term.IsTerminal(int(os.Stdin.Fd())) {
-			fmt.Fprintln(os.Stderr, "fake-claude: stdin is a TTY, expected a pipe")
-			os.Exit(3)
-		}
-	}
-
 	denyTool := os.Getenv("FAKE_CLAUDE_DENY_TOOL")
 	sessionID := os.Getenv("FAKE_CLAUDE_SESSION_ID")
 	if sessionID == "" {
 		sessionID = "fake-session-123"
 	}
 
-	// Detect whether the daemon spawned us with --allowedTools (which means
-	// the user has approved a tool). If the deny tool is in the allowed list,
-	// suppress the deny.
+	// Detect --allowedTools
 	allowedSet := make(map[string]bool)
 	for i, arg := range os.Args {
 		if arg == "--allowedTools" && i+1 < len(os.Args) {
@@ -111,66 +55,57 @@ func main() {
 		}
 	}
 
-	turnNum := 0
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	// Emit events to stdout
 
-	for scanner.Scan() {
-		var msg map[string]any
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-			continue
-		}
-		turnNum++
-
-		// Emit a tiny stream_event partial (relay will skip persisting it)
-		streamEvent := map[string]any{
-			"type": "stream_event",
-			"event": map[string]any{
-				"delta": map[string]any{"text": "fake delta"},
-			},
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(streamEvent)
-
-		// Emit an assistant text block
-		assistant := map[string]any{
-			"type": "assistant",
-			"message": map[string]any{
-				"content": []map[string]any{
-					{"type": "text", "text": "fake response"},
-				},
-			},
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(assistant)
-
-		// Build result
-		result := map[string]any{
-			"type":           "result",
-			"subtype":        "success",
-			"total_cost_usd": 0.0001,
-			"duration_ms":    42,
-			"usage": map[string]int{
-				"input_tokens":  10,
-				"output_tokens": 5,
-			},
-			"session_id": sessionID,
-		}
-
-		// On the first turn, emit a permission_denial unless the tool is now allowed
-		if turnNum == 1 && denyTool != "" && !allowedSet[denyTool] {
-			result["permission_denials"] = []map[string]any{
-				{
-					"tool_name":   denyTool,
-					"tool_use_id": "toolu_fake_001",
-					"tool_input": map[string]any{
-						"file_path": "/tmp/fake.txt",
-						"content":   "fake content",
-					},
-				},
-			}
-		}
-
-		_ = json.NewEncoder(os.Stdout).Encode(result)
-		os.Stdout.Sync()
+	// 1. stream_event partial
+	streamEvent := map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"delta": map[string]any{"text": "fake delta"},
+		},
 	}
-	fmt.Fprintln(os.Stderr, "fake-claude: stdin closed, exiting")
+	_ = json.NewEncoder(os.Stdout).Encode(streamEvent)
+	os.Stdout.Sync()
+
+	// 2. assistant text block
+	assistant := map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"content": []map[string]any{
+				{"type": "text", "text": "fake response"},
+			},
+		},
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(assistant)
+	os.Stdout.Sync()
+
+	// 3. result
+	result := map[string]any{
+		"type":           "result",
+		"subtype":        "success",
+		"total_cost_usd": 0.0001,
+		"duration_ms":    42,
+		"usage": map[string]int{
+			"input_tokens":  10,
+			"output_tokens": 5,
+		},
+		"session_id": sessionID,
+	}
+
+	// Emit permission denial if configured and tool not already allowed
+	if denyTool != "" && !allowedSet[denyTool] {
+		result["permission_denials"] = []map[string]any{
+			{
+				"tool_name":   denyTool,
+				"tool_use_id": "toolu_fake_001",
+				"tool_input": map[string]any{
+					"file_path": "/tmp/fake.txt",
+					"content":   "fake content",
+				},
+			},
+		}
+	}
+
+	_ = json.NewEncoder(os.Stdout).Encode(result)
+	os.Stdout.Sync()
 }
