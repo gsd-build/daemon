@@ -49,6 +49,7 @@ func NewClient(cfg Config) *Client {
 }
 
 // SetHandler registers the message handler for incoming frames.
+// Must be called before Run.
 func (c *Client) SetHandler(h MessageHandler) {
 	c.handler = h
 }
@@ -78,7 +79,11 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 		OS:            c.cfg.OS,
 		Arch:          c.cfg.Arch,
 	}
-	buf, _ := json.Marshal(hello)
+	buf, err := json.Marshal(hello)
+	if err != nil {
+		conn.CloseNow()
+		return nil, fmt.Errorf("marshal hello: %w", err)
+	}
 	if err := conn.Write(ctx, websocket.MessageText, buf); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("send hello: %w", err)
