@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
 // Options configures a Claude process.
@@ -29,6 +30,14 @@ type Options struct {
 // Executor spawns a single `claude -p` process and reads its output.
 type Executor struct {
 	opts Options
+
+	// OnPIDStart is called with the child PID after a successful Start().
+	// Set by the actor for PID file tracking. May be nil.
+	OnPIDStart func(pid int)
+
+	// OnPIDExit is called with the child PID after the process exits.
+	// Set by the actor for PID file cleanup. May be nil.
+	OnPIDExit func(pid int)
 }
 
 // NewExecutor constructs an Executor. Call Run to spawn the process.
@@ -82,6 +91,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 
 	cmd := exec.CommandContext(ctx, e.opts.BinaryPath, args...)
 	cmd.Dir = e.opts.CWD
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if len(e.opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), e.opts.Env...)
 	}
@@ -103,6 +113,16 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 		}
 		return fmt.Errorf("start: %w", err)
 	}
+
+	pid := cmd.Process.Pid
+	if e.OnPIDStart != nil {
+		e.OnPIDStart(pid)
+	}
+	defer func() {
+		if e.OnPIDExit != nil {
+			e.OnPIDExit(pid)
+		}
+	}()
 
 	// Drain stderr in background
 	stderrDone := make(chan struct{})
