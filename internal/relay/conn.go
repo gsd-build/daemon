@@ -150,6 +150,8 @@ func (c *Client) Run(ctx context.Context, getActiveTasks ActiveTasksFunc) error 
 	backoff := 1 * time.Second
 	const maxBackoff = 60 * time.Second
 
+	wakeCh := WakeDetector(ctx)
+
 	for {
 		connStart := time.Now()
 
@@ -174,6 +176,9 @@ func (c *Client) Run(ctx context.Context, getActiveTasks ActiveTasksFunc) error 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-wakeCh:
+			// System woke from sleep — reconnect immediately
+			continue
 		case <-time.After(jitter):
 		}
 
