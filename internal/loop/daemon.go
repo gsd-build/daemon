@@ -121,85 +121,28 @@ func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
 }
 
 // Run connects to the relay and blocks until ctx is canceled.
-// Automatically reconnects with exponential backoff on connection failures.
+// The client handles reconnection automatically.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.client.SetHandler(d.handleMessage)
 
 	// Check token expiry at startup.
 	d.checkAndRefreshToken()
+	go d.runTokenRefreshCheck(ctx)
+	go d.runIdleHeartbeat(ctx)
 
-	backoff := 1 * time.Second
-	const maxBackoff = 60 * time.Second
+	fmt.Printf("Connecting to %s as %s...\n", d.cfg.RelayURL, d.cfg.MachineID)
 
-	for {
-		connStart := time.Now()
-		err := d.runOnce(ctx)
-		if err == nil || ctx.Err() != nil {
-			return err
-		}
-
-		// If the relay rejected us with token_expired, exit immediately.
-		if strings.Contains(err.Error(), "token_expired") {
-			return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
-		}
-
-		// Reset backoff if the connection was alive for a while (healthy session).
-		if time.Since(connStart) > 2*time.Minute {
-			backoff = 1 * time.Second
-		}
-
-		fmt.Printf("%srelay disconnected (%s) — %v%s\n", display.Dim, time.Since(connStart).Truncate(time.Second), err, display.Reset)
-		fmt.Printf("%sreconnecting in %s...%s\n", display.Dim, backoff, display.Reset)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-
-		backoff = backoff * 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+	err := d.client.Run(ctx, d.getActiveTasks)
+	if err != nil && strings.Contains(err.Error(), "token_expired") {
+		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
+	return err
 }
 
-// runOnce performs a single connect → run cycle.
-func (d *Daemon) runOnce(ctx context.Context) error {
-	if _, err := d.client.Connect(ctx); err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-
-	fmt.Printf("%srelay connected%s\n", display.Dim, display.Reset)
-
-	// Scope heartbeat and token refresh to this connection; cancel when Run returns.
-	connCtx, connCancel := context.WithCancel(ctx)
-	go d.runHeartbeat(connCtx)
-	go d.runIdleHeartbeat(connCtx)
-	go d.runTokenRefreshCheck(connCtx)
-
-	runErr := d.client.Run(ctx)
-	connCancel()
-	return runErr
-}
-
-func (d *Daemon) runHeartbeat(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			_ = d.client.Send(&protocol.Heartbeat{
-				Type:          protocol.MsgTypeHeartbeat,
-				MachineID:     d.cfg.MachineID,
-				DaemonVersion: d.version,
-				Status:        "online",
-				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
-			})
-		}
-	}
+// getActiveTasks returns the list of currently executing task IDs.
+// Called by the client on every connect/reconnect for Hello state sync.
+func (d *Daemon) getActiveTasks() []string {
+	return d.manager.ActiveTaskIDs()
 }
 
 func (d *Daemon) runIdleHeartbeat(ctx context.Context) {
@@ -256,7 +199,9 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			ResumeSession:  msg.ClaudeSessionID,
 		})
 		if err != nil {
-			return d.client.Send(&protocol.TaskError{
+			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			return d.client.Send(sendCtx, &protocol.TaskError{
 				Type:      protocol.MsgTypeTaskError,
 				TaskID:    msg.TaskID,
 				SessionID: msg.SessionID,
@@ -270,7 +215,9 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	// must NOT propagate up — that would kill the relay connection and take the
 	// entire daemon offline. Report the failure to the browser and keep running.
 	if err := actor.SendTask(*msg); err != nil {
-		return d.client.Send(&protocol.TaskError{
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return d.client.Send(sendCtx, &protocol.TaskError{
 			Type:      protocol.MsgTypeTaskError,
 			TaskID:    msg.TaskID,
 			SessionID: msg.SessionID,
@@ -301,7 +248,9 @@ func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
 	if err != nil {
 		result.Error = err.Error()
 	}
-	return d.client.Send(result)
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, result)
 }
 
 func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
@@ -315,7 +264,9 @@ func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
 	if err != nil {
 		result.Error = err.Error()
 	}
-	return d.client.Send(result)
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, result)
 }
 
 func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
@@ -331,7 +282,9 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 	if err != nil {
 		result.Error = err.Error()
 	}
-	return d.client.Send(result)
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, result)
 }
 
 func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {

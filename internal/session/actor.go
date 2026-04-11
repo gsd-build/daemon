@@ -19,7 +19,7 @@ import (
 
 // RelaySender is the minimal interface the actor needs to push events to the relay.
 type RelaySender interface {
-	Send(msg any) error
+	Send(ctx context.Context, msg any) error
 }
 
 // Options configures a new Actor.
@@ -98,10 +98,11 @@ func NewActor(opts Options) (*Actor, error) {
 	}, nil
 }
 
-// InFlightTaskID returns "" — in spawn-per-task, task errors are reported
-// by the actor's Run loop directly.
+// InFlightTaskID returns the ID of the currently executing task, or "" if idle.
 func (a *Actor) InFlightTaskID() string {
-	return ""
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	return a.taskID
 }
 
 // AllowedTools returns the current granted tools list.
@@ -133,13 +134,15 @@ func (a *Actor) Run(ctx context.Context) error {
 		case task := <-a.taskCh:
 			if err := a.executeTask(ctx, task); err != nil {
 				log.Printf("[actor] task %s failed: %v", task.TaskID, err)
-				_ = a.opts.Relay.Send(&protocol.TaskError{
+				sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+				_ = a.opts.Relay.Send(sendCtx, &protocol.TaskError{
 					Type:      protocol.MsgTypeTaskError,
 					TaskID:    task.TaskID,
 					SessionID: a.opts.SessionID,
 					ChannelID: task.ChannelID,
 					Error:     err.Error(),
 				})
+				sendCancel()
 			}
 		}
 	}
@@ -172,27 +175,32 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		fmt.Print(display.FormatRequestBanner(task.Prompt, a.opts.CWD, a.opts.Model))
 	}
 
-	if err := a.opts.Relay.Send(&protocol.TaskStarted{
+	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := a.opts.Relay.Send(sendCtx, &protocol.TaskStarted{
 		Type:      protocol.MsgTypeTaskStarted,
 		TaskID:    task.TaskID,
 		SessionID: a.opts.SessionID,
 		ChannelID: tc.ChannelID,
 		StartedAt: tc.StartedAt.UTC().Format(time.RFC3339Nano),
 	}); err != nil {
+		sendCancel()
 		return fmt.Errorf("send taskStarted: %w", err)
 	}
+	sendCancel()
 
 	err := a.runExecutor(taskCtx, tc, task.Prompt)
 
 	// If the task context was cancelled (user hit ESC), send taskCancelled
 	// instead of returning an error — so Run() loops back for the next task.
 	if taskCtx.Err() == context.Canceled && ctx.Err() == nil {
-		_ = a.opts.Relay.Send(&protocol.TaskCancelled{
+		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+		_ = a.opts.Relay.Send(sendCtx, &protocol.TaskCancelled{
 			Type:      protocol.MsgTypeTaskCancelled,
 			TaskID:    task.TaskID,
 			SessionID: a.opts.SessionID,
 			ChannelID: tc.ChannelID,
 		})
+		sendCancel()
 		return nil // not an error — actor stays alive
 	}
 
@@ -242,10 +250,12 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 			SequenceNumber: next,
 			Event:          e.Raw,
 		}
-		if err := a.opts.Relay.Send(frame); err != nil {
+		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := a.opts.Relay.Send(sendCtx, frame); err != nil {
 			log.Printf("[actor] relay send failed: session=%s seq=%d err=%v",
 				a.opts.SessionID, next, err)
 		}
+		sendCancel()
 
 		if e.Type == "result" {
 			resultRaw = make([]byte, len(e.Raw))
@@ -295,7 +305,9 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 
 	// Normal completion
 	cost := fmt.Sprintf("%.6f", payload.TotalCostUSD)
-	return a.opts.Relay.Send(&protocol.TaskComplete{
+	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer sendCancel()
+	return a.opts.Relay.Send(sendCtx, &protocol.TaskComplete{
 		Type:            protocol.MsgTypeTaskComplete,
 		TaskID:          tc.TaskID,
 		SessionID:       a.opts.SessionID,
@@ -351,7 +363,8 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 	// Permission requests are still handled one at a time since each
 	// approval/denial changes the executor's allowed-tools set.
 	for _, denial := range permDenials {
-		if err := a.opts.Relay.Send(&protocol.PermissionRequest{
+		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := a.opts.Relay.Send(sendCtx, &protocol.PermissionRequest{
 			Type:      protocol.MsgTypePermissionRequest,
 			SessionID: a.opts.SessionID,
 			ChannelID: tc.ChannelID,
@@ -359,8 +372,10 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 			ToolName:  denial.ToolName,
 			ToolInput: denial.ToolInput,
 		}); err != nil {
+			sendCancel()
 			return err
 		}
+		sendCancel()
 		if a.verbosity != display.Quiet {
 			fmt.Printf("%s⚠ PERMISSION REQUEST: %s%s\n", display.Yellow, denial.ToolName, display.Reset)
 			if summary, ok := toolInputSummary(denial.ToolInput); ok {
@@ -470,7 +485,8 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 
 	// Send all questions to relay at once.
 	for _, q := range allQuestions {
-		if err := a.opts.Relay.Send(&protocol.Question{
+		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := a.opts.Relay.Send(sendCtx, &protocol.Question{
 			Type:      protocol.MsgTypeQuestion,
 			SessionID: a.opts.SessionID,
 			ChannelID: tc.ChannelID,
@@ -478,8 +494,10 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 			Question:  q.Text,
 			Options:   q.Options,
 		}); err != nil {
+			sendCancel()
 			return err
 		}
+		sendCancel()
 		if a.verbosity != display.Quiet {
 			fmt.Printf("%s? %s%s\n", display.Cyan, q.Text, display.Reset)
 			for i, opt := range q.Options {

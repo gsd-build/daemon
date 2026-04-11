@@ -40,7 +40,7 @@ func newFakeRelay() *fakeRelay {
 	return r
 }
 
-func (r *fakeRelay) Send(msg any) error {
+func (r *fakeRelay) Send(ctx context.Context, msg any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.frames = append(r.frames, msg)

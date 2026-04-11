@@ -76,6 +76,19 @@ func (m *Manager) Spawn(
 	return actor, nil
 }
 
+// ActiveTaskIDs returns a list of task IDs currently being executed.
+func (m *Manager) ActiveTaskIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for _, a := range m.actors {
+		if id := a.InFlightTaskID(); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // StopAll stops every actor. Called on daemon shutdown.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
