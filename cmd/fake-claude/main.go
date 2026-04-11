@@ -106,6 +106,38 @@ func main() {
 		}
 	}
 
+	// FAKE_CLAUDE_QUESTIONS=N emits N AskUserQuestion denials in one result.
+	// Only on first invocation (no --resume flag) to avoid infinite loops.
+	hasResume := false
+	for _, arg := range os.Args {
+		if arg == "--resume" {
+			hasResume = true
+			break
+		}
+	}
+	if qCountStr := os.Getenv("FAKE_CLAUDE_QUESTIONS"); qCountStr != "" && !hasResume {
+		qCount, _ := strconv.Atoi(qCountStr)
+		var denials []map[string]any
+		for i := 0; i < qCount; i++ {
+			denials = append(denials, map[string]any{
+				"tool_name":   "AskUserQuestion",
+				"tool_use_id": fmt.Sprintf("toolu_q_%03d", i),
+				"tool_input": map[string]any{
+					"questions": []map[string]any{
+						{
+							"question": fmt.Sprintf("Question %d?", i+1),
+							"options": []map[string]any{
+								{"label": fmt.Sprintf("Option %dA", i+1)},
+								{"label": fmt.Sprintf("Option %dB", i+1)},
+							},
+						},
+					},
+				},
+			})
+		}
+		result["permission_denials"] = denials
+	}
+
 	_ = json.NewEncoder(os.Stdout).Encode(result)
 	os.Stdout.Sync()
 }
