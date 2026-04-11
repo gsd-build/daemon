@@ -7,13 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
-	"github.com/gsd-build/daemon/internal/display"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -33,7 +32,6 @@ type Options struct {
 	PermissionMode string
 	SystemPrompt   string
 	ResumeSession  string
-	Verbosity      display.VerbosityLevel
 }
 
 // Actor drives a single Claude session using spawn-per-task execution.
@@ -42,9 +40,7 @@ type Options struct {
 type Actor struct {
 	opts Options
 
-	seq       int64 // monotonic sequence counter, only touched by Run goroutine
-	verbosity display.VerbosityLevel
-	stream    *display.StreamHandler
+	seq int64 // monotonic sequence counter, only touched by Run goroutine
 
 	claudeSessionID string   // set from result events, used for --resume
 	allowedTools    []string // accumulates as user grants permissions
@@ -88,8 +84,6 @@ type permResponse struct {
 func NewActor(opts Options) (*Actor, error) {
 	return &Actor{
 		opts:            opts,
-		verbosity:       opts.Verbosity,
-		stream:          display.NewStreamHandler(os.Stdout, opts.Verbosity),
 		claudeSessionID: opts.ResumeSession,
 		taskCh:          make(chan protocol.Task, 1),
 		permCh:          make(chan permResponse, 1),
@@ -171,9 +165,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		OriginalPrompt: task.Prompt,
 	}
 
-	if a.verbosity != display.Quiet {
-		fmt.Print(display.FormatRequestBanner(task.Prompt, a.opts.CWD, a.opts.Model))
-	}
+	slog.Info("task received", "task", task.TaskID, "session", a.opts.SessionID, "prompt", truncate(task.Prompt, 80))
 
 	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := a.opts.Relay.Send(sendCtx, &protocol.TaskStarted{
@@ -225,22 +217,6 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 	err := exec.Run(ctx, func(e claude.Event) error {
 		a.seq++
 		next := a.seq
-
-		// Display to terminal
-		if a.stream.Handle(e.Raw) {
-			// stream_event handled
-		} else if a.stream.ShouldSkipText() {
-			if s := display.FormatEventSkipText(e.Raw, a.verbosity); s != "" {
-				fmt.Println(s)
-			}
-			if e.Type != "assistant" {
-				a.stream.ConsumeSkip()
-			}
-		} else {
-			if s := display.FormatEvent(e.Raw, a.verbosity); s != "" {
-				fmt.Println(s)
-			}
-		}
 
 		// Send to relay
 		frame := &protocol.Stream{
@@ -376,13 +352,8 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 			return err
 		}
 		sendCancel()
-		if a.verbosity != display.Quiet {
-			fmt.Printf("%s⚠ PERMISSION REQUEST: %s%s\n", display.Yellow, denial.ToolName, display.Reset)
-			if summary, ok := toolInputSummary(denial.ToolInput); ok {
-				fmt.Printf("%s%s%s\n", display.Dim, summary, display.Reset)
-			}
-			fmt.Printf("%swaiting for approval...%s\n", display.Dim, display.Reset)
-		}
+		summary, _ := toolInputSummary(denial.ToolInput)
+		slog.Info("permission request sent", "tool", denial.ToolName, "summary", summary)
 
 		// Wait for response
 		select {
@@ -392,9 +363,7 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 			return fmt.Errorf("actor stopped while waiting for permission")
 		case resp := <-a.permCh:
 			if resp.Approved {
-				if a.verbosity != display.Quiet {
-					fmt.Printf("\n%sApproved — resuming.%s\n\n", display.Green, display.Reset)
-				}
+				slog.Info("permission approved, resuming", "tool", denial.ToolName)
 				a.addAllowedTool(denial.ToolName)
 				return a.runExecutor(ctx, tc, tc.OriginalPrompt)
 			}
@@ -498,17 +467,10 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 			return err
 		}
 		sendCancel()
-		if a.verbosity != display.Quiet {
-			fmt.Printf("%s? %s%s\n", display.Cyan, q.Text, display.Reset)
-			for i, opt := range q.Options {
-				fmt.Printf("%s  %d) %s%s\n", display.Dim, i+1, opt, display.Reset)
-			}
-		}
+		slog.Info("question sent", "requestID", q.RequestID, "question", q.Text)
 	}
 
-	if a.verbosity != display.Quiet {
-		fmt.Printf("%swaiting for %d answer(s)...%s\n", display.Dim, len(allQuestions), display.Reset)
-	}
+	slog.Debug("waiting for answers", "count", len(allQuestions))
 
 	// Collect all answers. Order doesn't matter — each channel is keyed by requestID.
 	answers := make(map[string]string, len(allQuestions))
@@ -521,9 +483,7 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 			return fmt.Errorf("actor stopped while waiting for answers")
 		case answer := <-ch:
 			answers[q.RequestID] = answer
-			if a.verbosity != display.Quiet {
-				fmt.Printf("%sAnswer [%s]: %s%s\n", display.Green, q.RequestID, answer, display.Reset)
-			}
+			slog.Info("answer received", "requestID", q.RequestID, "answer", answer)
 		}
 	}
 
@@ -533,10 +493,6 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 		parts = append(parts, fmt.Sprintf("Q: %s\nA: %s", q.Text, answers[q.RequestID]))
 	}
 	answerPrompt := "My answers:\n\n" + strings.Join(parts, "\n\n")
-
-	if a.verbosity != display.Quiet {
-		fmt.Println()
-	}
 
 	return a.runExecutor(ctx, tc, answerPrompt)
 }
@@ -606,6 +562,14 @@ func (a *Actor) CancelTask() {
 		a.taskCancel()
 		a.taskCancel = nil
 	}
+}
+
+func truncate(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
 }
 
 func toolInputSummary(raw json.RawMessage) (string, bool) {

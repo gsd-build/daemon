@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsd-build/daemon/internal/display"
 	"github.com/gsd-build/daemon/internal/loop"
 	protocol "github.com/gsd-build/protocol-go"
 )
@@ -47,7 +46,7 @@ func TestE2EHappyPath(t *testing.T) {
 	cwd := t.TempDir()
 
 	// 6. Build the daemon with fake-claude as the spawned binary.
-	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude, display.Default)
+	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude)
 	if err != nil {
 		t.Fatalf("loop.NewWithBinaryPath: %v", err)
 	}
@@ -174,7 +173,7 @@ func TestE2EPermissionFlow(t *testing.T) {
 	cfg := makeTestConfig(relay.URL(), machineID, authToken)
 	cwd := t.TempDir()
 
-	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude, display.Default)
+	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude)
 	if err != nil {
 		t.Fatalf("loop.NewWithBinaryPath: %v", err)
 	}

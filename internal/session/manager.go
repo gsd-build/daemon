@@ -3,10 +3,8 @@ package session
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
-
-	"github.com/gsd-build/daemon/internal/display"
 )
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -16,16 +14,14 @@ type Manager struct {
 
 	relay      RelaySender
 	binaryPath string
-	verbosity  display.VerbosityLevel
 }
 
 // NewManager constructs a Manager.
-func NewManager(binaryPath string, relay RelaySender, verbosity display.VerbosityLevel) *Manager {
+func NewManager(binaryPath string, relay RelaySender) *Manager {
 	return &Manager{
 		actors:     make(map[string]*Actor),
 		relay:      relay,
 		binaryPath: binaryPath,
-		verbosity:  verbosity,
 	}
 }
 
@@ -54,7 +50,6 @@ func (m *Manager) Spawn(
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = m.binaryPath
 	}
-	opts.Verbosity = m.verbosity
 
 	actor, err := NewActor(opts)
 	if err != nil {
@@ -68,10 +63,7 @@ func (m *Manager) Spawn(
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		log.Printf("[session] actor.Run exited with error: session=%s err=%v", sessionID, err)
-		if m.verbosity != display.Quiet {
-			fmt.Print(display.FormatErrorBanner(err.Error()))
-		}
+		slog.Error("actor exited with error", "session", sessionID, "error", err)
 	}()
 	return actor, nil
 }

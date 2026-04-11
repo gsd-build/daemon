@@ -4,8 +4,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/gsd-build/daemon/internal/display"
 )
 
 type nullRelay struct{}
@@ -14,7 +12,7 @@ func (nullRelay) Send(ctx context.Context, msg any) error { return nil }
 
 func TestManagerSpawnAndGet(t *testing.T) {
 	binPath := buildFakeClaude(t)
-	m := NewManager(binPath, nullRelay{}, display.Quiet)
+	m := NewManager(binPath, nullRelay{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
