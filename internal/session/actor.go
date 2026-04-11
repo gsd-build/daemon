@@ -15,6 +15,7 @@ import (
 
 	"github.com/gsd-build/daemon/internal/claude"
 	"github.com/gsd-build/daemon/internal/pidfile"
+	"github.com/gsd-build/daemon/internal/sockapi"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -60,6 +61,9 @@ type Actor struct {
 	taskMu     sync.Mutex
 	taskCancel context.CancelFunc // cancels the in-flight task context; nil when idle
 	taskID     string             // ID of the in-flight task; empty when idle
+
+	taskStartedAt *time.Time // when current task started; nil when idle
+	idleSince     *time.Time // when actor became idle; nil when executing
 
 	// taskTimeout is the per-task deadline. Zero means no timeout.
 	// Set by the Manager from config before calling Run.
@@ -118,6 +122,25 @@ func (a *Actor) HasInFlightTask() bool {
 	a.taskMu.Lock()
 	defer a.taskMu.Unlock()
 	return a.taskID != ""
+}
+
+// Info returns a snapshot of the actor's current state for the status API.
+func (a *Actor) Info() sockapi.SessionInfo {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+
+	info := sockapi.SessionInfo{
+		SessionID: a.opts.SessionID,
+	}
+	if a.taskID != "" {
+		info.State = "executing"
+		info.TaskID = a.taskID
+		info.StartedAt = a.taskStartedAt
+	} else {
+		info.State = "idle"
+		info.IdleSince = a.idleSince
+	}
+	return info
 }
 
 // InFlightTaskID returns the ID of the currently executing task, or "" if idle.
@@ -183,6 +206,9 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	a.taskMu.Lock()
 	a.taskCancel = cancel
 	a.taskID = task.TaskID
+	now := time.Now()
+	a.taskStartedAt = &now
+	a.idleSince = nil
 	a.taskMu.Unlock()
 
 	defer func() {
@@ -190,7 +216,10 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		a.taskMu.Lock()
 		a.taskCancel = nil
 		a.taskID = ""
-		a.lastActiveAt = time.Now()
+		a.taskStartedAt = nil
+		idleNow := time.Now()
+		a.idleSince = &idleNow
+		a.lastActiveAt = idleNow
 		a.taskMu.Unlock()
 	}()
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/session"
+	"github.com/gsd-build/daemon/internal/sockapi"
 )
 
 func TestRelayURLIncludesMachineIDOnly(t *testing.T) {
@@ -107,3 +108,4 @@ func (m *mockManager) StopAll() {
 		m.stopAllFn()
 	}
 }
+func (m *mockManager) SessionInfos() []sockapi.SessionInfo { return nil }

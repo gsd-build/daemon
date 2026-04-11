@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/sockapi"
 )
 
 // ManagerOptions configures a new Manager.
@@ -151,6 +152,18 @@ func (m *Manager) ActiveTaskIDs() []string {
 		}
 	}
 	return ids
+}
+
+// SessionInfos returns a snapshot of all active sessions.
+func (m *Manager) SessionInfos() []sockapi.SessionInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	infos := make([]sockapi.SessionInfo, 0, len(m.actors))
+	for _, a := range m.actors {
+		infos = append(infos, a.Info())
+	}
+	return infos
 }
 
 // StopAll stops every actor. Called on daemon shutdown.
