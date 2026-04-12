@@ -17,6 +17,11 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
+const (
+	keepalivePingInterval = 3 * time.Second
+	keepaliveMaxFailures  = 2
+)
+
 // Config is immutable per-client settings.
 type Config struct {
 	URL           string
@@ -140,7 +145,7 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 
 	go readPump(pumpCtx, conn, c.handler, errCh)
 	go writePump(pumpCtx, conn, c.sendCh, errCh)
-	go pingManager(pumpCtx, conn, 25*time.Second, 3, errCh)
+	go pingManager(pumpCtx, conn, keepalivePingInterval, keepaliveMaxFailures, errCh)
 
 	slog.Info("relay connected, pumps started")
 
