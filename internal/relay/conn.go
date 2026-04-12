@@ -132,7 +132,7 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 	pumpCtx, pumpCancel := context.WithCancel(ctx)
 	defer pumpCancel()
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	c.mu.Lock()
 	conn := c.conn
@@ -140,8 +140,7 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 
 	go readPump(pumpCtx, conn, c.handler, errCh)
 	go writePump(pumpCtx, conn, c.sendCh, errCh)
-	// No daemon-side ping manager — the relay pings us and coder/websocket
-	// responds automatically. See pumps.go for rationale.
+	go pingManager(pumpCtx, conn, 25*time.Second, 3, errCh)
 
 	slog.Info("relay connected, pumps started")
 

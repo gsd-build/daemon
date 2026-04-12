@@ -61,7 +61,34 @@ func readPump(ctx context.Context, conn *websocket.Conn, handler MessageHandler,
 	}
 }
 
-// Note: there is no daemon-side ping manager. The relay pings the daemon
-// from its side (server.go startPingLoop). coder/websocket automatically
-// responds to pings with pongs at the frame level, and conn.Ping() is safe
-// to use alongside an active conn.Read loop on the server.
+// pingManager sends WebSocket pings at the given interval. After
+// maxFailures consecutive ping failures, it signals via errCh.
+//
+// coder/websocket's Conn.Ping writes a ping control frame and waits on a
+// channel that is fulfilled by the active Read loop when the pong arrives.
+// It does not race with readPump's conn.Read calls.
+func pingManager(ctx context.Context, conn *websocket.Conn, interval time.Duration, maxFailures int, errCh chan<- error) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				failures++
+				if failures >= maxFailures {
+					errCh <- fmt.Errorf("ping manager: %d consecutive failures: %w", failures, err)
+					return
+				}
+				continue
+			}
+			failures = 0
+		}
+	}
+}

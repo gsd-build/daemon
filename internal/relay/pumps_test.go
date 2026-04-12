@@ -139,6 +139,36 @@ func TestReadPumpDispatchesToHandler(t *testing.T) {
 	}
 }
 
-// pingManager was removed — the relay pings the daemon, not the other way
-// around. See pumps.go for rationale. coder/websocket's conn.Ping() reads
-// from the connection to await the pong, which races with readPump.
+func TestPingManagerSignalsAfterConsecutiveFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		_ = c.Close(websocket.StatusNormalClosure, "closed for ping test")
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	errCh := make(chan error, 1)
+	go pingManager(ctx, conn, 50*time.Millisecond, 2, errCh)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected ping manager error")
+		}
+	case <-time.After(12 * time.Second):
+		t.Fatal("ping manager did not signal failure")
+	}
+}
