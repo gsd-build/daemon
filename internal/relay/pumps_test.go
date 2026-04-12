@@ -139,53 +139,6 @@ func TestReadPumpDispatchesToHandler(t *testing.T) {
 	}
 }
 
-func TestPingManagerSignalsAfterConsecutiveFailures(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		// Hard-close the connection so the client detects it immediately
-		c.CloseNow()
-	}))
-	defer server.Close()
-
-	url := "ws" + strings.TrimPrefix(server.URL, "http")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, url, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.CloseNow()
-
-	// Drain reads; when the server's hard-close arrives, CloseNow the
-	// client side so Ping returns immediately instead of timing out.
-	go func() {
-		for {
-			_, _, err := conn.Read(ctx)
-			if err != nil {
-				conn.CloseNow()
-				return
-			}
-		}
-	}()
-
-	// Give the reader goroutine time to detect the server close
-	time.Sleep(200 * time.Millisecond)
-
-	errCh := make(chan error, 1)
-
-	// Use a short interval for testing
-	go pingManager(ctx, conn, 100*time.Millisecond, 3, errCh)
-
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("expected non-nil error from ping manager")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("ping manager did not signal failure within 5s")
-	}
-}
+// pingManager was removed — the relay pings the daemon, not the other way
+// around. See pumps.go for rationale. coder/websocket's conn.Ping() reads
+// from the connection to await the pong, which races with readPump.

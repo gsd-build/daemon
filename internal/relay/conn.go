@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -126,7 +127,7 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 	pumpCtx, pumpCancel := context.WithCancel(ctx)
 	defer pumpCancel()
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 
 	c.mu.Lock()
 	conn := c.conn
@@ -134,15 +135,20 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 
 	go readPump(pumpCtx, conn, c.handler, errCh)
 	go writePump(pumpCtx, conn, c.sendCh, errCh)
-	go pingManager(pumpCtx, conn, 25*time.Second, 3, errCh)
+	// No daemon-side ping manager — the relay pings us and coder/websocket
+	// responds automatically. See pumps.go for rationale.
+
+	slog.Info("relay connected, pumps started")
 
 	// Wait for first error from any pump
 	select {
 	case err := <-errCh:
+		slog.Warn("pump error, disconnecting", "err", err)
 		pumpCancel()
 		conn.CloseNow()
 		return err
 	case <-ctx.Done():
+		slog.Info("context cancelled, closing connection")
 		pumpCancel()
 		conn.Close(websocket.StatusGoingAway, "shutdown")
 		return ctx.Err()

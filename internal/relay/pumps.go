@@ -61,30 +61,11 @@ func readPump(ctx context.Context, conn *websocket.Conn, handler MessageHandler,
 	}
 }
 
-// pingManager sends WebSocket pings at the given interval. After
-// maxFailures consecutive ping failures, it signals via errCh.
-func pingManager(ctx context.Context, conn *websocket.Conn, interval time.Duration, maxFailures int, errCh chan<- error) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	failures := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err := conn.Ping(pingCtx)
-			cancel()
-			if err != nil {
-				failures++
-				if failures >= maxFailures {
-					errCh <- fmt.Errorf("ping manager: %d consecutive failures", failures)
-					return
-				}
-			} else {
-				failures = 0
-			}
-		}
-	}
-}
+// Note: there is no daemon-side ping manager. The relay pings the daemon
+// from its side (server.go startPingLoop). coder/websocket automatically
+// responds to pings with pongs at the frame level. If the relay's pings
+// fail, it closes the connection, and readPump detects the EOF.
+//
+// A daemon-side conn.Ping() would race with readPump (both call conn.Read
+// internally), and writing ping frames from a separate goroutine would
+// race with writePump. The relay-driven ping is sufficient.
