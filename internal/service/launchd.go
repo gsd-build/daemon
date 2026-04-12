@@ -18,6 +18,12 @@ func (l *launchdPlatform) plistPath() string {
 }
 
 func (l *launchdPlatform) generatePlist() string {
+	// Capture the user's current PATH so the daemon can find `claude` and
+	// other tools. launchd provides only a minimal PATH by default.
+	userPath := os.Getenv("PATH")
+	if userPath == "" {
+		userPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -30,6 +36,11 @@ func (l *launchdPlatform) generatePlist() string {
 		<string>start</string>
 		<string>--service</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>%s</string>
+	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
@@ -40,7 +51,7 @@ func (l *launchdPlatform) generatePlist() string {
 	<integer>10</integer>
 </dict>
 </plist>
-`, launchdLabel, BinaryPath(), LogPath(), LogPath())
+`, launchdLabel, BinaryPath(), userPath, LogPath(), LogPath())
 }
 
 func (l *launchdPlatform) Install() error {
