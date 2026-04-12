@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -59,8 +59,8 @@ func NewExecutor(opts Options) *Executor {
 // Stderr is captured in a bounded ring buffer so crashes, auth errors,
 // and rate-limit messages surface in the returned error.
 func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
-	log.Printf("[executor] starting claude: binary=%s dir=%s model=%q prompt=%q",
-		e.opts.BinaryPath, e.opts.CWD, e.opts.Model, truncateStr(e.opts.Prompt, 80))
+	slog.Info("starting claude", "binary", e.opts.BinaryPath, "dir", e.opts.CWD, "model", e.opts.Model, "promptLen", len(e.opts.Prompt))
+	slog.Debug("claude prompt", "prompt", truncateStr(e.opts.Prompt, 200))
 
 	args := []string{
 		"-p",

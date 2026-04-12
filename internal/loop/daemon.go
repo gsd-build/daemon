@@ -155,6 +155,9 @@ func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
 
 // Health implements sockapi.StatusProvider.
 func (d *Daemon) Health() sockapi.HealthData {
+	if !d.client.Connected() {
+		return sockapi.HealthData{Status: "disconnected"}
+	}
 	return sockapi.HealthData{Status: "ok"}
 }
 
