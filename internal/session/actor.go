@@ -236,7 +236,8 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		PermissionMode: task.PermissionMode,
 	}
 
-	slog.Info("task received", "task", task.TaskID, "session", a.opts.SessionID, "prompt", truncate(task.Prompt, 80))
+	slog.Info("task received", "task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt))
+	slog.Debug("task prompt", "task", task.TaskID, "prompt", truncate(task.Prompt, 200))
 
 	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := a.opts.Relay.Send(sendCtx, &protocol.TaskStarted{
@@ -464,7 +465,8 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 		}
 		sendCancel()
 		summary, _ := toolInputSummary(denial.ToolInput)
-		slog.Info("permission request sent", "tool", denial.ToolName, "summary", summary)
+		slog.Info("permission request sent", "tool", denial.ToolName)
+		slog.Debug("permission request detail", "tool", denial.ToolName, "summary", summary)
 
 		// Wait for response
 		select {
@@ -578,7 +580,8 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 			return err
 		}
 		sendCancel()
-		slog.Info("question sent", "requestID", q.RequestID, "question", q.Text)
+		slog.Info("question sent", "requestID", q.RequestID, "questionLen", len(q.Text))
+		slog.Debug("question detail", "requestID", q.RequestID, "question", q.Text)
 	}
 
 	slog.Debug("waiting for answers", "count", len(allQuestions))
@@ -594,7 +597,8 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 			return fmt.Errorf("actor stopped while waiting for answers")
 		case answer := <-ch:
 			answers[q.RequestID] = answer
-			slog.Info("answer received", "requestID", q.RequestID, "answer", answer)
+			slog.Info("answer received", "requestID", q.RequestID, "answerLen", len(answer))
+			slog.Debug("answer detail", "requestID", q.RequestID, "answer", answer)
 		}
 	}
 
