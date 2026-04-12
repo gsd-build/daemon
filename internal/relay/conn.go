@@ -176,13 +176,17 @@ func (c *Client) Run(ctx context.Context, getActiveTasks ActiveTasksFunc) error 
 			return ctx.Err()
 		}
 
+		connDuration := time.Since(connStart).Truncate(time.Second)
+		slog.Warn("relay disconnected", "duration", connDuration, "err", err)
+
 		// Reset backoff if connection was healthy (alive > 2 min)
-		if time.Since(connStart) > 2*time.Minute {
+		if connDuration > 2*time.Minute {
 			backoff = 1 * time.Second
 		}
 
 		// Jittered backoff: ±20%
 		jitter := time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64()))
+		slog.Info("reconnecting", "backoff", jitter.Truncate(time.Millisecond))
 
 		select {
 		case <-ctx.Done():

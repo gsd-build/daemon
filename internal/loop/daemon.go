@@ -202,7 +202,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	go d.runTokenRefreshCheck(ctx)
-	go d.runIdleHeartbeat(ctx)
+	go d.runHeartbeat(ctx)
 	d.manager.StartReaper(ctx, 5*time.Minute, 30*time.Minute)
 	defer d.gracefulShutdown(ctx)
 
@@ -221,15 +221,23 @@ func (d *Daemon) getActiveTasks() []string {
 	return d.manager.ActiveTaskIDs()
 }
 
-func (d *Daemon) runIdleHeartbeat(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute)
+func (d *Daemon) runHeartbeat(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			slog.Debug("heartbeat", "status", "connected", "state", "idle")
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = d.client.Send(sendCtx, &protocol.Heartbeat{
+				Type:          protocol.MsgTypeHeartbeat,
+				MachineID:     d.cfg.MachineID,
+				DaemonVersion: d.version,
+				Status:        "online",
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			cancel()
 		}
 	}
 }
