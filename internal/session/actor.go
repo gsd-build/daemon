@@ -85,6 +85,7 @@ type taskContext struct {
 	Model          string
 	Effort         string
 	PermissionMode string
+	Traceparent    string
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -192,11 +193,12 @@ func (a *Actor) Run(ctx context.Context) error {
 				log.Printf("[actor] task %s failed: %v", task.TaskID, err)
 				sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 				_ = a.opts.Relay.Send(sendCtx, &protocol.TaskError{
-					Type:      protocol.MsgTypeTaskError,
-					TaskID:    task.TaskID,
-					SessionID: a.opts.SessionID,
-					ChannelID: task.ChannelID,
-					Error:     err.Error(),
+					Type:        protocol.MsgTypeTaskError,
+					TaskID:      task.TaskID,
+					SessionID:   a.opts.SessionID,
+					ChannelID:   task.ChannelID,
+					Error:       err.Error(),
+					Traceparent: task.Traceparent,
 				})
 				sendCancel()
 			}
@@ -242,18 +244,24 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		Model:          task.Model,
 		Effort:         task.Effort,
 		PermissionMode: task.PermissionMode,
+		Traceparent:    task.Traceparent,
 	}
 
-	slog.Info("task received", "task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt))
+	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
+	if task.Traceparent != "" {
+		logAttrs = append(logAttrs, "traceId", protocol.TraceID(task.Traceparent))
+	}
+	slog.Info("task received", logAttrs...)
 	slog.Debug("task prompt", "task", task.TaskID, "prompt", truncate(task.Prompt, 200))
 
 	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := a.opts.Relay.Send(sendCtx, &protocol.TaskStarted{
-		Type:      protocol.MsgTypeTaskStarted,
-		TaskID:    task.TaskID,
-		SessionID: a.opts.SessionID,
-		ChannelID: tc.ChannelID,
-		StartedAt: tc.StartedAt.UTC().Format(time.RFC3339Nano),
+		Type:        protocol.MsgTypeTaskStarted,
+		TaskID:      task.TaskID,
+		SessionID:   a.opts.SessionID,
+		ChannelID:   tc.ChannelID,
+		StartedAt:   tc.StartedAt.UTC().Format(time.RFC3339Nano),
+		Traceparent: tc.Traceparent,
 	}); err != nil {
 		sendCancel()
 		return fmt.Errorf("send taskStarted: %w", err)
@@ -268,21 +276,23 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		if taskCtx.Err() == context.DeadlineExceeded {
 			errCtx, errCancel := context.WithTimeout(ctx, 30*time.Second)
 			_ = a.opts.Relay.Send(errCtx, &protocol.TaskError{
-				Type:      protocol.MsgTypeTaskError,
-				TaskID:    task.TaskID,
-				SessionID: a.opts.SessionID,
-				ChannelID: tc.ChannelID,
-				Error:     fmt.Sprintf("task timed out after %s", a.taskTimeout),
+				Type:        protocol.MsgTypeTaskError,
+				TaskID:      task.TaskID,
+				SessionID:   a.opts.SessionID,
+				ChannelID:   tc.ChannelID,
+				Error:       fmt.Sprintf("task timed out after %s", a.taskTimeout),
+				Traceparent: tc.Traceparent,
 			})
 			errCancel()
 			return nil
 		}
 		cancelCtx, cancelCancel := context.WithTimeout(ctx, 30*time.Second)
 		_ = a.opts.Relay.Send(cancelCtx, &protocol.TaskCancelled{
-			Type:      protocol.MsgTypeTaskCancelled,
-			TaskID:    task.TaskID,
-			SessionID: a.opts.SessionID,
-			ChannelID: tc.ChannelID,
+			Type:        protocol.MsgTypeTaskCancelled,
+			TaskID:      task.TaskID,
+			SessionID:   a.opts.SessionID,
+			ChannelID:   tc.ChannelID,
+			Traceparent: tc.Traceparent,
 		})
 		cancelCancel()
 		return nil
@@ -426,6 +436,7 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 		OutputTokens: int64(payload.Usage.OutputTokens),
 		CostUSD:      cost,
 		DurationMs:   payload.DurationMs,
+		Traceparent:  tc.Traceparent,
 	})
 }
 
