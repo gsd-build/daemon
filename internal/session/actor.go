@@ -127,6 +127,14 @@ func (a *Actor) HasInFlightTask() bool {
 	return a.taskID != ""
 }
 
+// HasBeenIdle returns true if the actor has completed at least one task and
+// is now idle. A freshly spawned actor that hasn't executed yet returns false.
+func (a *Actor) HasBeenIdle() bool {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	return a.idleSince != nil
+}
+
 // Info returns a snapshot of the actor's current state for the status API.
 func (a *Actor) Info() sockapi.SessionInfo {
 	a.taskMu.Lock()
