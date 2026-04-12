@@ -9,6 +9,7 @@ import (
 
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/service"
 	"github.com/spf13/cobra"
 )
 
@@ -44,13 +45,12 @@ Generate a code in the web app under Machines → Add Machine.`,
 		}
 
 		client := api.NewClient(loginServerURL)
-		resp, err := client.Pair(api.PairRequest{
-			Code:          code,
-			Hostname:      hostname,
-			OS:            runtime.GOOS,
-			Arch:          runtime.GOARCH,
-			DaemonVersion: Version,
-		})
+		req, err := buildPairRequest(code, hostname)
+		if err != nil {
+			return err
+		}
+
+		resp, err := client.Pair(req)
 		if err != nil {
 			return err
 		}
@@ -68,7 +68,21 @@ Generate a code in the web app under Machines → Add Machine.`,
 
 		fmt.Println("Paired successfully.")
 		fmt.Printf("  machine: %s (%s)\n", hostname, resp.MachineID)
-		fmt.Println("Run `gsd-cloud start` to begin.")
+
+		svcResult, err := syncPairingService()
+		if err != nil {
+			return fmt.Errorf("pair saved, but failed to reload background service: %w", err)
+		}
+
+		switch svcResult {
+		case serviceActionRestarted:
+			fmt.Println("Background service restarted with the new pairing.")
+		case serviceActionStarted:
+			fmt.Println("Background service started.")
+		default:
+			fmt.Println("Run `gsd-cloud start` to begin.")
+		}
+
 		return nil
 	},
 }
@@ -81,4 +95,56 @@ func init() {
 		"GSD Cloud server URL (override for local dev)",
 	)
 	rootCmd.AddCommand(loginCmd)
+}
+
+type serviceAction string
+
+const (
+	serviceActionNotInstalled serviceAction = "not_installed"
+	serviceActionStarted      serviceAction = "started"
+	serviceActionRestarted    serviceAction = "restarted"
+)
+
+func buildPairRequest(code string, hostname string) (api.PairRequest, error) {
+	req := api.PairRequest{
+		Code:          code,
+		Hostname:      hostname,
+		OS:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		DaemonVersion: Version,
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return req, nil
+	}
+	req.CurrentMachineID = cfg.MachineID
+	return req, nil
+}
+
+func syncPairingService() (serviceAction, error) {
+	platform, err := service.Detect()
+	if err != nil {
+		return serviceActionNotInstalled, nil
+	}
+	return syncInstalledServiceAfterPair(platform)
+}
+
+func syncInstalledServiceAfterPair(platform service.Platform) (serviceAction, error) {
+	if !platform.IsInstalled() {
+		return serviceActionNotInstalled, nil
+	}
+	if platform.IsRunning() {
+		if err := platform.Stop(); err != nil {
+			return "", fmt.Errorf("stop service: %w", err)
+		}
+		if err := platform.Start(); err != nil {
+			return "", fmt.Errorf("start service: %w", err)
+		}
+		return serviceActionRestarted, nil
+	}
+	if err := platform.Start(); err != nil {
+		return "", fmt.Errorf("start service: %w", err)
+	}
+	return serviceActionStarted, nil
 }

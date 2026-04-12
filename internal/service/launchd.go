@@ -17,6 +17,30 @@ func (l *launchdPlatform) plistPath() string {
 	return filepath.Join(HomeDir(), "Library", "LaunchAgents", launchdLabel+".plist")
 }
 
+func (l *launchdPlatform) domainTarget() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func (l *launchdPlatform) serviceTarget() string {
+	return l.domainTarget() + "/" + launchdLabel
+}
+
+func (l *launchdPlatform) run(args ...string) error {
+	out, err := exec.Command("launchctl", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl %s: %w: %s", strings.Join(args, " "), err, out)
+	}
+	return nil
+}
+
+func (l *launchdPlatform) isLoaded() bool {
+	out, err := exec.Command("launchctl", "print", l.serviceTarget()).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
 func (l *launchdPlatform) generatePlist() string {
 	// Capture the user's current PATH so the daemon can find `claude` and
 	// other tools. launchd provides only a minimal PATH by default.
@@ -69,11 +93,7 @@ func (l *launchdPlatform) Install() error {
 		return fmt.Errorf("write plist: %w", err)
 	}
 
-	out, err := exec.Command("launchctl", "load", l.plistPath()).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("launchctl load: %w: %s", err, out)
-	}
-	return nil
+	return l.run("bootstrap", l.domainTarget(), l.plistPath())
 }
 
 func (l *launchdPlatform) Uninstall() error {
@@ -81,9 +101,10 @@ func (l *launchdPlatform) Uninstall() error {
 		return fmt.Errorf("service is not installed")
 	}
 
-	out, err := exec.Command("launchctl", "unload", l.plistPath()).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("launchctl unload: %w: %s", err, out)
+	if l.isLoaded() {
+		if err := l.run("bootout", l.serviceTarget()); err != nil {
+			return err
+		}
 	}
 
 	if err := os.Remove(l.plistPath()); err != nil {
@@ -93,19 +114,17 @@ func (l *launchdPlatform) Uninstall() error {
 }
 
 func (l *launchdPlatform) Start() error {
-	out, err := exec.Command("launchctl", "start", launchdLabel).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("launchctl start: %w: %s", err, out)
+	if l.isLoaded() {
+		return l.run("kickstart", "-k", l.serviceTarget())
 	}
-	return nil
+	return l.run("bootstrap", l.domainTarget(), l.plistPath())
 }
 
 func (l *launchdPlatform) Stop() error {
-	out, err := exec.Command("launchctl", "stop", launchdLabel).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("launchctl stop: %w: %s", err, out)
+	if !l.isLoaded() {
+		return nil
 	}
-	return nil
+	return l.run("bootout", l.serviceTarget())
 }
 
 func (l *launchdPlatform) IsInstalled() bool {
@@ -114,9 +133,9 @@ func (l *launchdPlatform) IsInstalled() bool {
 }
 
 func (l *launchdPlatform) IsRunning() bool {
-	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
+	out, err := exec.Command("launchctl", "print", l.serviceTarget()).CombinedOutput()
 	if err != nil {
 		return false
 	}
-	return len(strings.TrimSpace(string(out))) > 0
+	return strings.Contains(string(out), "state = running")
 }

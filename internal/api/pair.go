@@ -28,11 +28,12 @@ func NewClient(baseURL string) *Client {
 
 // PairRequest is the body of POST /api/daemon/pair.
 type PairRequest struct {
-	Code          string `json:"code"`
-	Hostname      string `json:"hostname"`
-	OS            string `json:"os"`
-	Arch          string `json:"arch"`
-	DaemonVersion string `json:"daemonVersion"`
+	Code             string `json:"code"`
+	Hostname         string `json:"hostname"`
+	OS               string `json:"os"`
+	Arch             string `json:"arch"`
+	DaemonVersion    string `json:"daemonVersion"`
+	CurrentMachineID string `json:"currentMachineId,omitempty"`
 }
 
 // PairResponse is the successful response from the pairing endpoint.

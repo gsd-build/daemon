@@ -17,6 +17,9 @@ func TestPairSuccess(t *testing.T) {
 		if body["code"] != "ABC234" {
 			t.Errorf("unexpected code: %s", body["code"])
 		}
+		if body["currentMachineId"] != "m-old" {
+			t.Errorf("unexpected currentMachineId: %s", body["currentMachineId"])
+		}
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"machineId": "m-123",
@@ -28,11 +31,12 @@ func TestPairSuccess(t *testing.T) {
 
 	client := NewClient(server.URL)
 	resp, err := client.Pair(PairRequest{
-		Code:          "ABC234",
-		Hostname:      "test",
-		OS:            "darwin",
-		Arch:          "arm64",
-		DaemonVersion: "0.1.0",
+		Code:             "ABC234",
+		Hostname:         "test",
+		OS:               "darwin",
+		Arch:             "arm64",
+		DaemonVersion:    "0.1.0",
+		CurrentMachineID: "m-old",
 	})
 	if err != nil {
 		t.Fatalf("pair: %v", err)
