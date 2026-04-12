@@ -82,6 +82,9 @@ type taskContext struct {
 	ChannelID      string
 	StartedAt      time.Time
 	OriginalPrompt string
+	Model          string
+	Effort         string
+	PermissionMode string
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -228,6 +231,9 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		ChannelID:      task.ChannelID,
 		StartedAt:      time.Now(),
 		OriginalPrompt: task.Prompt,
+		Model:          task.Model,
+		Effort:         task.Effort,
+		PermissionMode: task.PermissionMode,
 	}
 
 	slog.Info("task received", "task", task.TaskID, "session", a.opts.SessionID, "prompt", truncate(task.Prompt, 80))
@@ -277,12 +283,27 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 }
 
 func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string) error {
+	// Use per-task model/effort/permissionMode if provided, otherwise fall back
+	// to the actor's creation-time defaults.
+	model := tc.Model
+	if model == "" {
+		model = a.opts.Model
+	}
+	effort := tc.Effort
+	if effort == "" {
+		effort = a.opts.Effort
+	}
+	permMode := tc.PermissionMode
+	if permMode == "" {
+		permMode = a.opts.PermissionMode
+	}
+
 	exec := claude.NewExecutor(claude.Options{
 		BinaryPath:     a.opts.BinaryPath,
 		CWD:            a.opts.CWD,
-		Model:          a.opts.Model,
-		Effort:         a.opts.Effort,
-		PermissionMode: a.opts.PermissionMode,
+		Model:          model,
+		Effort:         effort,
+		PermissionMode: permMode,
 		SystemPrompt:   a.opts.SystemPrompt,
 		ResumeSession:  a.claudeSessionID,
 		AllowedTools:   a.allowedTools,
