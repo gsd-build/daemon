@@ -88,16 +88,21 @@ func (m *Manager) Spawn(
 		return existing, nil
 	}
 
-	// Concurrency check
+	// Concurrency check: count actors that are executing or pending.
+	// A freshly spawned actor has taskID="" AND idleSince==nil (never
+	// completed a task yet). We must count these as "busy" because they
+	// have a task queued via SendTask that hasn't been picked up by
+	// executeTask yet. Without this, rapid task delivery bypasses the
+	// limit — all actors appear idle during the race window.
 	maxTasks := m.cfg.EffectiveMaxConcurrentTasks()
-	inFlight := 0
+	busy := 0
 	for _, a := range m.actors {
-		if a.HasInFlightTask() {
-			inFlight++
+		if a.HasInFlightTask() || !a.HasBeenIdle() {
+			busy++
 		}
 	}
-	if inFlight >= maxTasks {
-		return nil, fmt.Errorf("machine at capacity — %d/%d tasks running, try again shortly", inFlight, maxTasks)
+	if busy >= maxTasks {
+		return nil, fmt.Errorf("machine at capacity — %d/%d tasks running, try again shortly", busy, maxTasks)
 	}
 
 	// Memory safety net: reject if available memory < 10% of total
