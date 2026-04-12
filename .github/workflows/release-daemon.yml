@@ -116,6 +116,15 @@ jobs:
       - name: List artifacts
         run: ls -la dist
 
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          # Concatenate per-binary .sha256 files into a single SHA256SUMS file.
+          # Each .sha256 file contains one line: "<hash>  <filename>"
+          cat *.sha256 > SHA256SUMS
+          echo "SHA256SUMS contents:"
+          cat SHA256SUMS
+
       - name: Extract version
         id: version
         run: |
@@ -135,3 +144,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/gsd-cloud-*
+            dist/SHA256SUMS
