@@ -325,6 +325,8 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 	}
 
 	var resultRaw json.RawMessage
+	const maxConsecutiveFailures = 3
+	consecutiveFailures := 0
 
 	err := exec.Run(ctx, func(e claude.Event) error {
 		a.seq++
@@ -340,8 +342,15 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		}
 		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := a.opts.Relay.Send(sendCtx, frame); err != nil {
-			log.Printf("[actor] relay send failed: session=%s seq=%d err=%v",
-				a.opts.SessionID, next, err)
+			consecutiveFailures++
+			log.Printf("[actor] relay send failed (%d/%d): session=%s seq=%d err=%v",
+				consecutiveFailures, maxConsecutiveFailures, a.opts.SessionID, next, err)
+			if consecutiveFailures >= maxConsecutiveFailures {
+				sendCancel()
+				return fmt.Errorf("relay unreachable: %d consecutive send failures", consecutiveFailures)
+			}
+		} else {
+			consecutiveFailures = 0
 		}
 		sendCancel()
 
