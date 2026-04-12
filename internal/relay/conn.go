@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	keepalivePingInterval = 3 * time.Second
+	keepalivePingInterval = 10 * time.Second
 	keepaliveMaxFailures  = 2
 )
 
