@@ -154,7 +154,6 @@ func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
 }
 
 // Health implements sockapi.StatusProvider.
-// TODO: report "disconnected" when relay.Client exposes connection state.
 func (d *Daemon) Health() sockapi.HealthData {
 	return sockapi.HealthData{Status: "ok"}
 }
@@ -165,7 +164,7 @@ func (d *Daemon) Status() sockapi.StatusData {
 	return sockapi.StatusData{
 		Version:            d.version,
 		Uptime:             time.Since(d.startedAt).Truncate(time.Second).String(),
-		RelayConnected:     true,
+		RelayConnected:     d.client.Connected(),
 		RelayURL:           d.cfg.RelayURL,
 		MachineID:          d.cfg.MachineID,
 		ActiveSessions:     total,
@@ -434,4 +433,3 @@ func (d *Daemon) gracefulShutdown(ctx context.Context) {
 		d.client.Close()
 	}
 }
-

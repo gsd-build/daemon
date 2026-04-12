@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
 )
@@ -90,6 +91,25 @@ func TestGracefulShutdownCallsStopAll(t *testing.T) {
 	}
 }
 
+func TestStatusUsesRelayConnectionState(t *testing.T) {
+	d := &Daemon{
+		cfg:       &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version:   "test",
+		manager:   &mockManager{},
+		client:    relayClientStub(true),
+		startedAt: time.Now().Add(-5 * time.Second),
+	}
+
+	if !d.Status().RelayConnected {
+		t.Fatal("expected status to report connected relay")
+	}
+
+	d.client = relayClientStub(false)
+	if d.Status().RelayConnected {
+		t.Fatal("expected status to report disconnected relay")
+	}
+}
+
 // mockManager implements SessionManager for testing.
 type mockManager struct {
 	stopAllFn func()
@@ -109,3 +129,16 @@ func (m *mockManager) StopAll() {
 	}
 }
 func (m *mockManager) SessionInfos() []sockapi.SessionInfo { return nil }
+
+func relayClientStub(connected bool) *relay.Client {
+	c := relay.NewClient(relay.Config{
+		URL:           "wss://relay.example.com/ws/daemon",
+		AuthToken:     "token",
+		MachineID:     "m1",
+		DaemonVersion: "test",
+		OS:            "darwin",
+		Arch:          "arm64",
+	})
+	c.SetConnectedForTest(connected)
+	return c
+}

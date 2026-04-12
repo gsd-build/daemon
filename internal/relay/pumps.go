@@ -63,9 +63,5 @@ func readPump(ctx context.Context, conn *websocket.Conn, handler MessageHandler,
 
 // Note: there is no daemon-side ping manager. The relay pings the daemon
 // from its side (server.go startPingLoop). coder/websocket automatically
-// responds to pings with pongs at the frame level. If the relay's pings
-// fail, it closes the connection, and readPump detects the EOF.
-//
-// A daemon-side conn.Ping() would race with readPump (both call conn.Read
-// internally), and writing ping frames from a separate goroutine would
-// race with writePump. The relay-driven ping is sufficient.
+// responds to pings with pongs at the frame level, and conn.Ping() is safe
+// to use alongside an active conn.Read loop on the server.

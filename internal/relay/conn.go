@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -39,6 +40,8 @@ type Client struct {
 
 	mu   sync.Mutex
 	conn *websocket.Conn
+
+	connected atomic.Bool
 }
 
 // NewClient constructs a Client. Call Run to connect and process messages.
@@ -121,8 +124,10 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 	_, err := c.Connect(ctx, activeTasks)
 	if err != nil {
+		c.connected.Store(false)
 		return err
 	}
+	c.connected.Store(true)
 
 	pumpCtx, pumpCancel := context.WithCancel(ctx)
 	defer pumpCancel()
@@ -144,11 +149,13 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 	select {
 	case err := <-errCh:
 		slog.Warn("pump error, disconnecting", "err", err)
+		c.connected.Store(false)
 		pumpCancel()
 		conn.CloseNow()
 		return err
 	case <-ctx.Done():
 		slog.Info("context cancelled, closing connection")
+		c.connected.Store(false)
 		pumpCancel()
 		conn.Close(websocket.StatusGoingAway, "shutdown")
 		return ctx.Err()
@@ -208,10 +215,21 @@ func (c *Client) Run(ctx context.Context, getActiveTasks ActiveTasksFunc) error 
 
 // Close closes the underlying WebSocket connection.
 func (c *Client) Close() error {
+	c.connected.Store(false)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
 		return c.conn.Close(websocket.StatusNormalClosure, "")
 	}
 	return nil
+}
+
+// Connected reports whether the client currently has an active relay connection.
+func (c *Client) Connected() bool {
+	return c.connected.Load()
+}
+
+// SetConnectedForTest forces connection state in tests.
+func (c *Client) SetConnectedForTest(connected bool) {
+	c.connected.Store(connected)
 }
