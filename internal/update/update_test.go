@@ -60,12 +60,15 @@ func TestVersionFromTag(t *testing.T) {
 }
 
 func TestAssetName(t *testing.T) {
-	name := AssetName()
+	name := AssetName("v0.2.1")
 	if name == "" {
 		t.Fatal("AssetName() returned empty string")
 	}
 	if !contains(name, runtime.GOOS) {
 		t.Errorf("AssetName() = %q, does not contain %q", name, runtime.GOOS)
+	}
+	if !contains(name, "v0.2.1") {
+		t.Errorf("AssetName() = %q, does not contain version", name)
 	}
 }
 

@@ -113,17 +113,22 @@ func VersionFromTag(tag string) string {
 	return strings.TrimPrefix(tag, tagPrefix)
 }
 
-// AssetName returns the expected binary asset name for the current platform,
-// e.g. "gsd-cloud-darwin-arm64".
-func AssetName() string {
-	return fmt.Sprintf("gsd-cloud-%s-%s", runtime.GOOS, runtime.GOARCH)
+// AssetName returns the expected binary asset name for a given version and
+// the current platform, e.g. "gsd-cloud-v0.2.1-darwin-arm64".
+func AssetName(version string) string {
+	return fmt.Sprintf("gsd-cloud-%s-%s-%s", version, runtime.GOOS, runtime.GOARCH)
 }
 
 // Download fetches the matching asset from the release, verifies its SHA256
 // checksum against a SHA256SUMS asset (if present), and writes it to destPath
 // with an atomic rename.
 func Download(release *Release, destPath string) error {
-	assetName := AssetName()
+	// Tag is "daemon/v0.2.1", asset name needs "v0.2.1"
+	version := release.TagName
+	if i := strings.LastIndex(version, "/"); i >= 0 {
+		version = version[i+1:]
+	}
+	assetName := AssetName(version)
 
 	var assetURL string
 	var sumsURL string
