@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -136,6 +137,72 @@ func TestReadPumpDispatchesToHandler(t *testing.T) {
 	}
 	if dispatched[1] != "taskComplete" {
 		t.Errorf("second dispatch: expected taskComplete, got %s", dispatched[1])
+	}
+}
+
+func TestReadPumpContinuesAfterHandlerError(t *testing.T) {
+	var mu sync.Mutex
+	var dispatched []string
+
+	handlerCalls := 0
+	handler := func(env *protocol.Envelope) error {
+		mu.Lock()
+		dispatched = append(dispatched, env.Type)
+		mu.Unlock()
+		handlerCalls++
+		if handlerCalls == 1 {
+			return errors.New("synthetic handler failure")
+		}
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"browseDir","requestId":"r1","channelId":"ch1","machineId":"m1","path":"/tmp"}`))
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"type":"readFile","requestId":"r2","channelId":"ch1","machineId":"m1","path":"/tmp/file.txt","maxBytes":100}`))
+
+		_, _, _ = c.Read(r.Context())
+	}))
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	errCh := make(chan error, 1)
+	go readPump(ctx, conn, handler, errCh)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(dispatched)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case err := <-errCh:
+			t.Fatalf("expected handler error to be isolated, got %v", err)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dispatched) != 2 {
+		t.Fatalf("expected 2 dispatched messages despite handler error, got %d", len(dispatched))
 	}
 }
 

@@ -4,6 +4,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -116,6 +117,13 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 			prefix.WriteString("\n")
 			prompt = prefix.String() + prompt
 		}
+		defer func() {
+			for _, p := range imgPaths {
+				if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+					slog.Warn("failed to remove downloaded image", "path", p, "err", err)
+				}
+			}
+		}()
 	}
 	// "--" stops flag parsing so the prompt is never consumed by variadic flags
 	args = append(args, "--", prompt)

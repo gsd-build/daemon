@@ -279,6 +279,10 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		d.channelRoots.Store(msg.ChannelID, msg.CWD)
 	}
 	actor := d.manager.Get(msg.SessionID)
+	if actor != nil && actor.HasTaskID(msg.TaskID) {
+		slog.Info("duplicate task ignored", "session", msg.SessionID, "taskId", msg.TaskID)
+		return nil
+	}
 	if actor == nil {
 		var err error
 		actor, err = d.manager.Spawn(ctx, session.Options{

@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/coder/websocket"
@@ -54,8 +55,8 @@ func readPump(ctx context.Context, conn *websocket.Conn, handler MessageHandler,
 		}
 		if handler != nil {
 			if err := handler(env); err != nil {
-				errCh <- fmt.Errorf("handler: %w", err)
-				return
+				slog.Warn("relay handler error", "type", env.Type, "err", err)
+				continue
 			}
 		}
 	}
