@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
@@ -708,12 +709,12 @@ func (a *Actor) maybeUploadImages(raw json.RawMessage, channelID string, afterSe
 			}
 
 			// Send supplementary image_url event to relay.
-			a.seq++
+			next := atomic.AddInt64(&a.seq, 1)
 			imgFrame := &protocol.Stream{
 				Type:           protocol.MsgTypeStream,
 				SessionID:      a.opts.SessionID,
 				ChannelID:      channelID,
-				SequenceNumber: a.seq,
+				SequenceNumber: next,
 				Event: json.RawMessage(fmt.Sprintf(
 					`{"type":"image_url","toolUseId":%q,"imageUrl":%q}`,
 					toolUseID, imageURL,
