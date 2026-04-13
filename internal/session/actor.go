@@ -8,20 +8,28 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/sockapi"
+	"github.com/gsd-build/daemon/internal/upload"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
 // RelaySender is the minimal interface the actor needs to push events to the relay.
 type RelaySender interface {
 	Send(ctx context.Context, msg any) error
+}
+
+// ImageUploader uploads an image file to the relay and returns a public URL.
+type ImageUploader interface {
+	Upload(ctx context.Context, filename string, data []byte) (string, error)
 }
 
 // Options configures a new Actor.
@@ -35,6 +43,7 @@ type Options struct {
 	PermissionMode string
 	SystemPrompt   string
 	ResumeSession  string
+	Uploader       ImageUploader // nil = image upload disabled
 }
 
 // Actor drives a single Claude session using spawn-per-task execution.
@@ -86,6 +95,7 @@ type taskContext struct {
 	Effort         string
 	PermissionMode string
 	Traceparent    string
+	ImageURLs      []string
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -245,6 +255,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		Effort:         task.Effort,
 		PermissionMode: task.PermissionMode,
 		Traceparent:    task.Traceparent,
+		ImageURLs:      task.ImageURLs,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -327,6 +338,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		ResumeSession:  a.claudeSessionID,
 		AllowedTools:   a.allowedTools,
 		Prompt:         prompt,
+		ImageURLs:      tc.ImageURLs,
 	})
 
 	if a.pidDir != "" {
@@ -376,6 +388,12 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 			resultRaw = make([]byte, len(e.Raw))
 			copy(resultRaw, e.Raw)
 		}
+
+		// Detect image reads and upload asynchronously.
+		if a.opts.Uploader != nil && e.Type == "assistant" {
+			a.maybeUploadImages(e.Raw, tc.ChannelID, next)
+		}
+
 		return nil
 	})
 
@@ -638,6 +656,82 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 	answerPrompt := "My answers:\n\n" + strings.Join(parts, "\n\n")
 
 	return a.runExecutor(ctx, tc, answerPrompt)
+}
+
+// maybeUploadImages inspects an "assistant" event for Read tool_use blocks
+// targeting image files. For each image found, it reads the file from disk and
+// uploads it to the relay in a background goroutine, then sends a supplementary
+// image_url stream event. Best-effort: failures are logged, not propagated.
+func (a *Actor) maybeUploadImages(raw json.RawMessage, channelID string, afterSeq int64) {
+	var evt struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type  string `json:"type"`
+				Name  string `json:"name"`
+				ID    string `json:"id"`
+				Input struct {
+					FilePath string `json:"file_path"`
+				} `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &evt) != nil {
+		return
+	}
+
+	for _, block := range evt.Message.Content {
+		if block.Type != "tool_use" || block.Name != "Read" {
+			continue
+		}
+		filePath := block.Input.FilePath
+		if filePath == "" || !upload.IsImageFile(filePath) {
+			continue
+		}
+		toolUseID := block.ID
+
+		// Resolve relative paths against actor CWD.
+		absPath := filePath
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(a.opts.CWD, absPath)
+		}
+
+		go func() {
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				slog.Warn("image upload: read file failed", "path", absPath, "err", err)
+				return
+			}
+
+			ctx := context.Background()
+			filename := filepath.Base(absPath)
+			imageURL, err := a.opts.Uploader.Upload(ctx, filename, data)
+			if err != nil {
+				slog.Warn("image upload: upload failed", "path", absPath, "err", err)
+				return
+			}
+
+			// Send supplementary image_url event to relay.
+			next := atomic.AddInt64(&a.seq, 1)
+			imgFrame := &protocol.Stream{
+				Type:           protocol.MsgTypeStream,
+				SessionID:      a.opts.SessionID,
+				ChannelID:      channelID,
+				SequenceNumber: next,
+				Event: json.RawMessage(fmt.Sprintf(
+					`{"type":"image_url","toolUseId":%q,"imageUrl":%q}`,
+					toolUseID, imageURL,
+				)),
+			}
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if err := a.opts.Relay.Send(sendCtx, imgFrame); err != nil {
+				slog.Warn("image upload: send image_url event failed", "err", err)
+			} else {
+				slog.Info("image uploaded", "path", absPath, "url", imageURL, "toolUseId", toolUseID)
+			}
+		}()
+	}
 }
 
 func (a *Actor) handleDenyResponse(ctx context.Context, tc *taskContext) error {

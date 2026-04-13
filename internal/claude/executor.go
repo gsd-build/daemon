@@ -25,6 +25,7 @@ type Options struct {
 	AllowedTools   []string // tools to pass via --allowedTools
 	Env            []string // extra environment variables; nil = inherit
 	Prompt         string   // user's message text
+	ImageURLs      []string // user-attached image URLs; prepended as markdown image refs
 }
 
 // Executor spawns a single `claude -p` process and reads its output.
@@ -86,8 +87,18 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 	if len(e.opts.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(e.opts.AllowedTools, ","))
 	}
+	// Prepend user-attached image URLs as markdown image references
+	prompt := e.opts.Prompt
+	if len(e.opts.ImageURLs) > 0 {
+		var imgRefs strings.Builder
+		for _, u := range e.opts.ImageURLs {
+			fmt.Fprintf(&imgRefs, "![image](%s)\n", u)
+		}
+		imgRefs.WriteString("\n")
+		prompt = imgRefs.String() + prompt
+	}
 	// "--" stops flag parsing so the prompt is never consumed by variadic flags
-	args = append(args, "--", e.opts.Prompt)
+	args = append(args, "--", prompt)
 
 	cmd := exec.CommandContext(ctx, e.opts.BinaryPath, args...)
 	cmd.Dir = e.opts.CWD

@@ -16,7 +16,8 @@ type ManagerOptions struct {
 	BinaryPath string
 	Relay      RelaySender
 	Config     *config.Config
-	PIDDir     string // directory for child PID files; empty disables
+	PIDDir     string         // directory for child PID files; empty disables
+	Uploader   ImageUploader  // nil = image upload disabled
 }
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -28,6 +29,7 @@ type Manager struct {
 	binaryPath string
 	cfg        *config.Config
 	pidDir     string
+	uploader   ImageUploader
 }
 
 // NewManager constructs a Manager.
@@ -38,6 +40,7 @@ func NewManager(opts ManagerOptions) *Manager {
 		binaryPath: opts.BinaryPath,
 		cfg:        opts.Config,
 		pidDir:     opts.PIDDir,
+		uploader:   opts.Uploader,
 	}
 }
 
@@ -115,6 +118,9 @@ func (m *Manager) Spawn(
 	}
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = m.binaryPath
+	}
+	if opts.Uploader == nil {
+		opts.Uploader = m.uploader
 	}
 
 	actor, err := NewActor(opts)
