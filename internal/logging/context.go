@@ -13,6 +13,9 @@ func TaskAttrs(task *protocol.Task) []any {
 		slog.String("sessionId", task.SessionID),
 		slog.String("channelId", task.ChannelID),
 	}
+	if task.RequestID != "" {
+		attrs = append(attrs, slog.String("requestId", task.RequestID))
+	}
 	if task.Traceparent != "" {
 		attrs = append(attrs, slog.String("traceId", protocol.TraceID(task.Traceparent)))
 	}
