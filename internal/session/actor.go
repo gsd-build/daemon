@@ -95,6 +95,7 @@ type taskContext struct {
 	Effort         string
 	PermissionMode string
 	Traceparent    string
+	ImageURLs      []string
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -254,6 +255,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		Effort:         task.Effort,
 		PermissionMode: task.PermissionMode,
 		Traceparent:    task.Traceparent,
+		ImageURLs:      task.ImageURLs,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -336,6 +338,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		ResumeSession:  a.claudeSessionID,
 		AllowedTools:   a.allowedTools,
 		Prompt:         prompt,
+		ImageURLs:      tc.ImageURLs,
 	})
 
 	if a.pidDir != "" {
