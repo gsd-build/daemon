@@ -391,6 +391,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 
 		// Detect image reads and upload asynchronously.
 		if a.opts.Uploader != nil && e.Type == "assistant" {
+			slog.Debug("checking assistant event for image reads", "session", a.opts.SessionID)
 			a.maybeUploadImages(e.Raw, tc.ChannelID, next)
 		}
 
@@ -680,15 +681,19 @@ func (a *Actor) maybeUploadImages(raw json.RawMessage, channelID string, afterSe
 		return
 	}
 
+	slog.Debug("maybeUploadImages", "eventType", evt.Type, "contentBlocks", len(evt.Message.Content))
 	for _, block := range evt.Message.Content {
+		slog.Debug("inspecting content block", "type", block.Type, "name", block.Name, "filePath", block.Input.FilePath)
 		if block.Type != "tool_use" || block.Name != "Read" {
 			continue
 		}
 		filePath := block.Input.FilePath
 		if filePath == "" || !upload.IsImageFile(filePath) {
+			slog.Debug("skipping non-image read", "filePath", filePath, "isImage", upload.IsImageFile(filePath))
 			continue
 		}
 		toolUseID := block.ID
+		slog.Info("image read detected, uploading", "filePath", filePath, "toolUseId", toolUseID)
 
 		// Resolve relative paths against actor CWD.
 		absPath := filePath

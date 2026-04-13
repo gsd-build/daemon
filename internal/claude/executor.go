@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Options configures a Claude process.
@@ -87,15 +90,27 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 	if len(e.opts.AllowedTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(e.opts.AllowedTools, ","))
 	}
-	// Prepend user-attached image URLs as markdown image references
+	// Download user-attached images to temp files so Claude can read them
 	prompt := e.opts.Prompt
 	if len(e.opts.ImageURLs) > 0 {
-		var imgRefs strings.Builder
-		for _, u := range e.opts.ImageURLs {
-			fmt.Fprintf(&imgRefs, "![image](%s)\n", u)
+		var imgPaths []string
+		for i, u := range e.opts.ImageURLs {
+			tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("gsd-upload-%d-%d.png", time.Now().UnixMilli(), i))
+			if err := downloadFile(u, tmpPath); err != nil {
+				slog.Warn("failed to download user image", "url", u, "err", err)
+				continue
+			}
+			imgPaths = append(imgPaths, tmpPath)
 		}
-		imgRefs.WriteString("\n")
-		prompt = imgRefs.String() + prompt
+		if len(imgPaths) > 0 {
+			var prefix strings.Builder
+			prefix.WriteString("The user attached the following image(s). Read each file to see them:\n")
+			for _, p := range imgPaths {
+				fmt.Fprintf(&prefix, "- %s\n", p)
+			}
+			prefix.WriteString("\n")
+			prompt = prefix.String() + prompt
+		}
 	}
 	// "--" stops flag parsing so the prompt is never consumed by variadic flags
 	args = append(args, "--", prompt)
@@ -176,4 +191,26 @@ func truncateStr(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// downloadFile fetches a URL and writes it to dst.
+func downloadFile(url, dst string) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	f, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	return nil
 }
