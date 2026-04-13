@@ -21,6 +21,7 @@ import (
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
+	"github.com/gsd-build/daemon/internal/upload"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -88,11 +89,14 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		}
 	}
 
+	uploader := upload.NewClient(cfg.RelayURL, cfg.MachineID, cfg.AuthToken)
+
 	manager := session.NewManager(session.ManagerOptions{
 		BinaryPath: binaryPath,
 		Relay:      client,
 		Config:     cfg,
 		PIDDir:     pidDir,
+		Uploader:   uploader,
 	})
 
 	return &Daemon{
