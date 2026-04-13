@@ -4,25 +4,27 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 )
 
 // DefaultMaxBytes is the default file size cap.
 const DefaultMaxBytes = 512 * 1024
 
 // ReadFile returns up to maxBytes of file content and whether it was truncated.
-func ReadFile(path string, maxBytes int) (string, bool, error) {
-	if !filepath.IsAbs(path) {
-		return "", false, fmt.Errorf("path must be absolute: %q", path)
+func ReadFile(path, scopeRoot string, maxBytes int) (string, bool, error) {
+	resolvedRoot, err := resolveScopeRoot(scopeRoot, false)
+	if err != nil {
+		return "", false, err
 	}
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxBytes
 	}
 
-	cleaned := filepath.Clean(path)
-	resolved, err := filepath.EvalSymlinks(cleaned)
+	resolved, err := resolveExistingPath(path)
 	if err != nil {
-		return "", false, fmt.Errorf("resolve symlinks: %w", err)
+		return "", false, err
+	}
+	if err := ensurePathAllowed(resolved, resolvedRoot); err != nil {
+		return "", false, err
 	}
 
 	f, err := os.Open(resolved)

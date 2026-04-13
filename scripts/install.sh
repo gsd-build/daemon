@@ -8,6 +8,7 @@
 #   GSD_VERSION        - install a specific version tag (default: latest daemon/v*)
 #   GSD_API_BASE       - override GitHub API base (testing only; trusts env)
 #   GSD_DOWNLOAD_BASE  - override release asset base URL (testing only; trusts env)
+#   GSD_SIGNING_PUBLIC_KEY_PATH - override pinned release signing public key (testing only)
 
 set -eu
 
@@ -35,6 +36,36 @@ need_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
         err "required command not found: $1"
     fi
+}
+
+write_embedded_public_key() {
+    cat > "$1" <<'EOF'
+-----BEGIN PUBLIC KEY-----
+MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAp5KuwlYW0Q76WF3CtCSr
+BfH3NAn3IY5/D+jszEcjvOR0T0PTkRQe+wpz/GS0yIuDntDqQ/a5minVt2+bDCRI
+75qKx13+8Z8HmloChkJ5ISgN7NzonBWy8YKl/iHVtdL0UZq4DMBmpBD/WtRVVci9
+9mEvYgOmILScYOkvVEUtUkLCvvzLjhcg6gl8QOtQVYaboFdmEQyXLTJIidxSArx5
+D77ni+Romf+2+nNFJWR5W9FCkrR+PVq9L+oAH2lEtKJhJJEPZ3kiAx7d/QDZmU2V
+Ip+l4P1osw55RAyEgQm5duCgTVO6Vy3DvH6no6XBRtVZFMzwLD63wtK7Z5RqW50/
+9gPFhbDToGymsrYiyIN6oQAOtp/2/nMn0VQBiRD3Cu5xrVR4zgt4//uvWujkd34P
+RqiTSVAOOvy6DDsAn/onFoa3PTo0Zv5UZfsTsA22pRFJ3aaisVMqo9Qxa2J99YnC
+F0jGh0inhfDejRyhdj0b8pVkwL93kUtkiBQzhFd07SiZo8lOlQL4ZilWz/luHl/N
+co05rYuklt4lft3rXn1cTaS6vXqT89UupCT4AdKmOYaUl7gsaUuEGqQihlKEa5T6
+cqMKS+1JWENS174P12O/aa5AU9so5qeFFsndcuaYnssuoY4zhF69VhCBM92p+kpp
+p2fTCbx18bnwQv/UXWUe5E8CAwEAAQ==
+-----END PUBLIC KEY-----
+EOF
+}
+
+prepare_public_key() {
+    if [ -n "${GSD_SIGNING_PUBLIC_KEY_PATH:-}" ]; then
+        printf '%s' "$GSD_SIGNING_PUBLIC_KEY_PATH"
+        return
+    fi
+
+    pub_path="$TMPDIR_PATH/release-signing-public-key.pem"
+    write_embedded_public_key "$pub_path"
+    printf '%s' "$pub_path"
 }
 
 detect_os() {
@@ -98,8 +129,12 @@ download() {
 
 verify_checksum() {
     bin_path="$1"
-    sum_path="$2"
-    expected=$(awk '{print $1}' "$sum_path")
+    sums_path="$2"
+    asset_name="$3"
+    expected=$(awk -v name="$asset_name" '$2 == name {print $1; exit}' "$sums_path")
+    if [ -z "$expected" ]; then
+        err "checksum not found for $asset_name"
+    fi
     if command -v sha256sum >/dev/null 2>&1; then
         actual=$(sha256sum "$bin_path" | awk '{print $1}')
     elif command -v shasum >/dev/null 2>&1; then
@@ -109,6 +144,16 @@ verify_checksum() {
     fi
     if [ "$expected" != "$actual" ]; then
         err "checksum mismatch: expected $expected, got $actual"
+    fi
+}
+
+verify_signature() {
+    sums_path="$1"
+    sig_path="$2"
+    pub_path="$3"
+
+    if ! openssl dgst -sha256 -verify "$pub_path" -signature "$sig_path" "$sums_path" >/dev/null 2>&1; then
+        err "release signature verification failed"
     fi
 }
 
@@ -150,6 +195,8 @@ main() {
     need_cmd grep
     need_cmd sed
     need_cmd awk
+    need_cmd mktemp
+    need_cmd openssl
 
     OS=$(detect_os)
     ARCH=$(detect_arch)
@@ -162,17 +209,23 @@ main() {
     ASSET_NAME="gsd-cloud-${VERSION_TAG}-${OS}-${ARCH}"
     DOWNLOAD_BASE="${GSD_DOWNLOAD_BASE:-https://github.com/${REPO}/releases/download/${TAG}}"
     BIN_URL="${DOWNLOAD_BASE}/${ASSET_NAME}"
-    SUM_URL="${BIN_URL}.sha256"
+    SUMS_URL="${DOWNLOAD_BASE}/SHA256SUMS"
+    SIG_URL="${DOWNLOAD_BASE}/SHA256SUMS.sig"
 
     TMPDIR_PATH=$(mktemp -d)
     trap 'rm -rf "$TMPDIR_PATH"' EXIT INT TERM
+    PUBKEY_PATH=$(prepare_public_key)
 
     say "  downloading ${ASSET_NAME}..."
     download "$BIN_URL" "$TMPDIR_PATH/$ASSET_NAME"
-    download "$SUM_URL" "$TMPDIR_PATH/$ASSET_NAME.sha256"
+    download "$SUMS_URL" "$TMPDIR_PATH/SHA256SUMS"
+    download "$SIG_URL" "$TMPDIR_PATH/SHA256SUMS.sig"
+
+    say "  verifying release signature..."
+    verify_signature "$TMPDIR_PATH/SHA256SUMS" "$TMPDIR_PATH/SHA256SUMS.sig" "$PUBKEY_PATH"
 
     say "  verifying checksum..."
-    verify_checksum "$TMPDIR_PATH/$ASSET_NAME" "$TMPDIR_PATH/$ASSET_NAME.sha256"
+    verify_checksum "$TMPDIR_PATH/$ASSET_NAME" "$TMPDIR_PATH/SHA256SUMS" "$ASSET_NAME"
 
     mkdir -p "$INSTALL_DIR"
     # Two-step install so an upgrade works even if the old binary is running.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/api"
@@ -39,11 +40,12 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg       *config.Config
-	version   string
-	manager   SessionManager
-	client    *relay.Client
-	startedAt time.Time
+	cfg          *config.Config
+	version      string
+	manager      SessionManager
+	client       *relay.Client
+	startedAt    time.Time
+	channelRoots sync.Map
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -273,6 +275,9 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 
 func (d *Daemon) handleTask(msg *protocol.Task) error {
 	ctx := context.Background()
+	if msg.ChannelID != "" && msg.CWD != "" {
+		d.channelRoots.Store(msg.ChannelID, msg.CWD)
+	}
 	actor := d.manager.Get(msg.SessionID)
 	if actor == nil {
 		var err error
@@ -324,7 +329,7 @@ func (d *Daemon) handleStop(msg *protocol.Stop) error {
 }
 
 func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
-	entries, err := fs.BrowseDir(msg.Path)
+	entries, err := fs.BrowseDir(msg.Path, d.scopeRootForChannel(msg.ChannelID))
 	result := &protocol.BrowseDirResult{
 		Type:      protocol.MsgTypeBrowseDirResult,
 		RequestID: msg.RequestID,
@@ -341,7 +346,7 @@ func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
 }
 
 func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
-	err := fs.MkDir(msg.Path)
+	err := fs.MkDir(msg.Path, d.scopeRootForChannel(msg.ChannelID))
 	result := &protocol.MkDirResult{
 		Type:      protocol.MsgTypeMkDirResult,
 		RequestID: msg.RequestID,
@@ -357,7 +362,7 @@ func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
 }
 
 func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
-	content, truncated, err := fs.ReadFile(msg.Path, msg.MaxBytes)
+	content, truncated, err := fs.ReadFile(msg.Path, d.scopeRootForChannel(msg.ChannelID), msg.MaxBytes)
 	result := &protocol.ReadFileResult{
 		Type:      protocol.MsgTypeReadFileResult,
 		RequestID: msg.RequestID,
@@ -372,6 +377,18 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return d.client.Send(sendCtx, result)
+}
+
+func (d *Daemon) scopeRootForChannel(channelID string) string {
+	if channelID == "" {
+		return ""
+	}
+	root, ok := d.channelRoots.Load(channelID)
+	if !ok {
+		return ""
+	}
+	rootStr, _ := root.(string)
+	return rootStr
 }
 
 func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {

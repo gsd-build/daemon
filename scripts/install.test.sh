@@ -36,6 +36,7 @@ esac
 
 command -v go >/dev/null 2>&1 || { echo "SKIP: go not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
+command -v openssl >/dev/null 2>&1 || { echo "SKIP: openssl not installed"; exit 0; }
 
 VERSION="v0.0.1-test"
 ASSET_NAME="gsd-cloud-${VERSION}-${OS}-${ARCH}"
@@ -51,20 +52,25 @@ fi
 
 echo "Computing checksum..."
 if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DIST_DIR" && sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256")
+    (cd "$DIST_DIR" && sha256sum "$ASSET_NAME" > "SHA256SUMS")
 else
-    (cd "$DIST_DIR" && shasum -a 256 "$ASSET_NAME" > "$ASSET_NAME.sha256")
+    (cd "$DIST_DIR" && shasum -a 256 "$ASSET_NAME" > "SHA256SUMS")
 fi
 
+echo "Generating release signing key..."
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$WORK_DIR/release-signing-private.pem" >/dev/null 2>&1
+openssl rsa -in "$WORK_DIR/release-signing-private.pem" -pubout -out "$WORK_DIR/release-signing-public.pem" >/dev/null 2>&1
+
+echo "Signing SHA256SUMS..."
+openssl dgst -sha256 -sign "$WORK_DIR/release-signing-private.pem" -out "$DIST_DIR/SHA256SUMS.sig" "$DIST_DIR/SHA256SUMS"
+
 echo "Building fake releases JSON..."
-mkdir -p "$DIST_DIR/repos/fake/repo"
-cat > "$DIST_DIR/repos/fake/repo/releases" <<EOF
-[
-  {
-    "tag_name": "daemon/${VERSION}",
-    "name": "Daemon ${VERSION}"
-  }
-]
+mkdir -p "$DIST_DIR/repos/fake/repo/releases"
+cat > "$DIST_DIR/repos/fake/repo/releases/latest" <<EOF
+{
+  "tag_name": "daemon/${VERSION}",
+  "name": "Daemon ${VERSION}"
+}
 EOF
 
 echo "Starting local HTTP server on port 0..."
@@ -106,6 +112,7 @@ echo "Running install.sh against the fake server..."
 GSD_REPO="fake/repo" \
 GSD_API_BASE="$SERVER_BASE" \
 GSD_DOWNLOAD_BASE="$SERVER_BASE" \
+GSD_SIGNING_PUBLIC_KEY_PATH="$WORK_DIR/release-signing-public.pem" \
 GSD_INSTALL_DIR="$INSTALL_DIR" \
 sh "$SCRIPT_DIR/install.sh"
 

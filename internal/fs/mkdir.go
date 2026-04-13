@@ -1,31 +1,20 @@
 package fs
 
-import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-)
+import "os"
 
 // MkDir creates a directory at the given absolute path.
 // Parent directories are created as needed (like mkdir -p).
-func MkDir(path string) error {
-	// Resolve ~ to user home directory
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("resolve home dir: %w", err)
-		}
-		if path == "~" {
-			return fmt.Errorf("cannot mkdir home directory itself")
-		}
-		path = filepath.Join(home, path[2:])
+func MkDir(path, scopeRoot string) error {
+	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
+	if err != nil {
+		return err
 	}
-
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("path must be absolute: %q", path)
+	resolved, err := resolveCreatePath(path)
+	if err != nil {
+		return err
 	}
-	cleaned := filepath.Clean(path)
-
-	return os.MkdirAll(cleaned, 0755)
+	if err := ensurePathAllowed(resolved, resolvedRoot); err != nil {
+		return err
+	}
+	return os.MkdirAll(resolved, 0755)
 }
