@@ -8,36 +8,23 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	protocol "github.com/gsd-build/protocol-go"
 )
 
 // BrowseDir lists entries in the given absolute path.
-func BrowseDir(path string) ([]protocol.BrowseEntry, error) {
-	// Resolve ~ to user home directory
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve home dir: %w", err)
-		}
-		if path == "~" {
-			path = home
-		} else {
-			path = filepath.Join(home, path[2:])
-		}
-	}
-
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("path must be absolute: %q", path)
-	}
-	cleaned := filepath.Clean(path)
-
-	// Resolve symlinks so the caller sees the real path.
-	resolved, err := filepath.EvalSymlinks(cleaned)
+func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
+	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
 	if err != nil {
-		return nil, fmt.Errorf("resolve symlinks: %w", err)
+		return nil, err
+	}
+	resolved, err := resolveExistingPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensurePathAllowed(resolved, resolvedRoot); err != nil {
+		return nil, err
 	}
 
 	entries, err := os.ReadDir(resolved)
@@ -51,9 +38,16 @@ func BrowseDir(path string) ([]protocol.BrowseEntry, error) {
 		if err != nil {
 			continue
 		}
+		childResolved, err := resolveExistingPath(filepath.Join(resolved, e.Name()))
+		if err != nil {
+			continue
+		}
+		if err := ensurePathAllowed(childResolved, resolvedRoot); err != nil {
+			continue
+		}
 		result = append(result, protocol.BrowseEntry{
 			Name:        e.Name(),
-			Path:        filepath.Join(resolved, e.Name()),
+			Path:        childResolved,
 			IsDirectory: e.IsDir(),
 			Size:        info.Size(),
 			ModifiedAt:  info.ModTime().UTC().Format(time.RFC3339Nano),
