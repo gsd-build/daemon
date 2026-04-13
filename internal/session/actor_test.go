@@ -259,6 +259,61 @@ func TestActorHappyPath(t *testing.T) {
 	}
 }
 
+func TestActorPropagatesRequestIDToLifecycleFrames(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-request-id",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:      "task-request-id",
+		SessionID:   "sess-request-id",
+		ChannelID:   "ch-request-id",
+		Prompt:      "hello",
+		RequestID:   "11111111-2222-4333-8444-555555555555",
+		Traceparent: "00-11111111222243338444555555555555-aaaaaaaaaaaaaaaa-01",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete frame")
+	}
+
+	var started *protocol.TaskStarted
+	var completed *protocol.TaskComplete
+	for _, frame := range relay.GetFrames() {
+		switch v := frame.(type) {
+		case *protocol.TaskStarted:
+			started = v
+		case *protocol.TaskComplete:
+			completed = v
+		}
+	}
+	if started == nil || completed == nil {
+		t.Fatal("expected both TaskStarted and TaskComplete frames")
+	}
+	if started.RequestID != "11111111-2222-4333-8444-555555555555" {
+		t.Fatalf("taskStarted requestId = %q", started.RequestID)
+	}
+	if completed.RequestID != "11111111-2222-4333-8444-555555555555" {
+		t.Fatalf("taskComplete requestId = %q", completed.RequestID)
+	}
+}
+
 func TestActorPermissionDenialAndApproval(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()

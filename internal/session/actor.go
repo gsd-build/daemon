@@ -94,6 +94,7 @@ type taskContext struct {
 	Model          string
 	Effort         string
 	PermissionMode string
+	RequestID      string
 	Traceparent    string
 	ImageURLs      []string
 }
@@ -208,6 +209,7 @@ func (a *Actor) Run(ctx context.Context) error {
 					SessionID:   a.opts.SessionID,
 					ChannelID:   task.ChannelID,
 					Error:       err.Error(),
+					RequestID:   task.RequestID,
 					Traceparent: task.Traceparent,
 				})
 				sendCancel()
@@ -254,11 +256,15 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		Model:          task.Model,
 		Effort:         task.Effort,
 		PermissionMode: task.PermissionMode,
+		RequestID:      task.RequestID,
 		Traceparent:    task.Traceparent,
 		ImageURLs:      task.ImageURLs,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
+	if task.RequestID != "" {
+		logAttrs = append(logAttrs, "requestId", task.RequestID)
+	}
 	if task.Traceparent != "" {
 		logAttrs = append(logAttrs, "traceId", protocol.TraceID(task.Traceparent))
 	}
@@ -272,6 +278,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		SessionID:   a.opts.SessionID,
 		ChannelID:   tc.ChannelID,
 		StartedAt:   tc.StartedAt.UTC().Format(time.RFC3339Nano),
+		RequestID:   tc.RequestID,
 		Traceparent: tc.Traceparent,
 	}); err != nil {
 		sendCancel()
@@ -292,6 +299,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 				SessionID:   a.opts.SessionID,
 				ChannelID:   tc.ChannelID,
 				Error:       fmt.Sprintf("task timed out after %s", a.taskTimeout),
+				RequestID:   task.RequestID,
 				Traceparent: tc.Traceparent,
 			})
 			errCancel()
@@ -303,6 +311,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 			TaskID:      task.TaskID,
 			SessionID:   a.opts.SessionID,
 			ChannelID:   tc.ChannelID,
+			RequestID:   task.RequestID,
 			Traceparent: tc.Traceparent,
 		})
 		cancelCancel()
@@ -455,6 +464,7 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 		OutputTokens: int64(payload.Usage.OutputTokens),
 		CostUSD:      cost,
 		DurationMs:   payload.DurationMs,
+		RequestID:    tc.RequestID,
 		Traceparent:  tc.Traceparent,
 	})
 }
