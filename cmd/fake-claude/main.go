@@ -7,6 +7,7 @@
 //	FAKE_CLAUDE_DENY_TOOL=<name>  — emit permission_denials in the result
 //	                                (unless the tool is in --allowedTools)
 //	FAKE_CLAUDE_SESSION_ID=<id>   — override the synthetic session id
+//	FAKE_CLAUDE_INVALID_RESULT=1  — emit a result payload that fails daemon parsing
 //	FAKE_CLAUDE_ARGS_FILE=<path>  — write os.Args[1:] as JSON to this file
 //	FAKE_CLAUDE_STDERR=<text>     — write this string to stderr at startup
 //	FAKE_CLAUDE_EXIT_CODE=<n>     — exit with this code immediately after stderr
@@ -97,6 +98,9 @@ func main() {
 			"output_tokens": 5,
 		},
 		"session_id": sessionID,
+	}
+	if os.Getenv("FAKE_CLAUDE_INVALID_RESULT") == "1" {
+		result["total_cost_usd"] = "not-a-number"
 	}
 
 	// Emit permission denial if configured and tool not already allowed

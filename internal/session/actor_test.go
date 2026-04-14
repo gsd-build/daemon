@@ -338,6 +338,55 @@ func TestActorPropagatesRequestIDToLifecycleFrames(t *testing.T) {
 	}
 }
 
+func TestActorMalformedFinalResultEmitsTaskError(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	t.Setenv("FAKE_CLAUDE_INVALID_RESULT", "1")
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-invalid-result",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-invalid-result",
+		SessionID: "sess-invalid-result",
+		ChannelID: "ch-invalid-result",
+		Prompt:    "hello",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	gotError := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		for _, f := range frames {
+			if te, ok := f.(*protocol.TaskError); ok {
+				return te.TaskID == "task-invalid-result"
+			}
+		}
+		return false
+	})
+	if !gotError {
+		t.Fatal("timed out waiting for TaskError frame")
+	}
+
+	for _, frame := range relay.GetFrames() {
+		if tc, ok := frame.(*protocol.TaskComplete); ok && tc.TaskID == "task-invalid-result" {
+			t.Fatal("expected malformed final result to avoid TaskComplete")
+		}
+	}
+}
+
 func TestActorPermissionDenialAndApproval(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()

@@ -464,7 +464,17 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 			ToolInput json.RawMessage `json:"tool_input"`
 		} `json:"permission_denials"`
 	}
-	_ = json.Unmarshal(raw, &payload)
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		slog.Error("failed to parse final result payload",
+			"session", a.opts.SessionID,
+			"taskId", tc.TaskID,
+			"channelId", tc.ChannelID,
+			"requestId", tc.RequestID,
+			"err", err,
+			"raw", truncate(string(raw), 512),
+		)
+		return fmt.Errorf("parse final result payload: %w", err)
+	}
 
 	if payload.SessionID != "" {
 		a.claudeSessionID = payload.SessionID
