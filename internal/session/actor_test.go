@@ -583,8 +583,21 @@ func TestActorBatchQuestions(t *testing.T) {
 		if q.Question != expected {
 			t.Errorf("question %d: got %q, want %q", i, q.Question, expected)
 		}
+		expectedHeader := fmt.Sprintf("Header %d", i+1)
+		if q.Header != expectedHeader {
+			t.Errorf("question %d: header = %q, want %q", i, q.Header, expectedHeader)
+		}
+		if !q.MultiSelect {
+			t.Errorf("question %d: expected multiSelect true", i)
+		}
 		if len(q.Options) != 2 {
 			t.Errorf("question %d: expected 2 options, got %d", i, len(q.Options))
+		}
+		if q.Options[0].Description == "" {
+			t.Errorf("question %d: missing option description", i)
+		}
+		if q.Options[0].Preview == "" {
+			t.Errorf("question %d: missing option preview", i)
 		}
 	}
 }
