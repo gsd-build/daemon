@@ -136,10 +136,19 @@ func main() {
 				"tool_input": map[string]any{
 					"questions": []map[string]any{
 						{
-							"question": fmt.Sprintf("Question %d?", i+1),
+							"question":    fmt.Sprintf("Question %d?", i+1),
+							"header":      fmt.Sprintf("Header %d", i+1),
+							"multiSelect": true,
 							"options": []map[string]any{
-								{"label": fmt.Sprintf("Option %dA", i+1)},
-								{"label": fmt.Sprintf("Option %dB", i+1)},
+								{
+									"label":       fmt.Sprintf("Option %dA", i+1),
+									"description": fmt.Sprintf("Description %dA", i+1),
+									"preview":     fmt.Sprintf("preview %dA", i+1),
+								},
+								{
+									"label":       fmt.Sprintf("Option %dB", i+1),
+									"description": fmt.Sprintf("Description %dB", i+1),
+								},
 							},
 						},
 					},

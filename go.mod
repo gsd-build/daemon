@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/coder/websocket v1.8.14
-	github.com/gsd-build/protocol-go v0.7.1
+	github.com/gsd-build/protocol-go v0.8.0
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )

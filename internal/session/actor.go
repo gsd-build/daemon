@@ -589,10 +589,18 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 }
 
 // parsedQuestion holds the extracted fields from a single AskUserQuestion denial.
+type parsedOption struct {
+	Label       string
+	Description string
+	Preview     string
+}
+
 type parsedQuestion struct {
-	RequestID string
-	Text      string
-	Options   []string
+	RequestID   string
+	Text        string
+	Header      string
+	MultiSelect bool
+	Options     []parsedOption
 }
 
 // parseQuestionDenial extracts questions from an AskUserQuestion tool_input.
@@ -600,9 +608,13 @@ type parsedQuestion struct {
 func parseQuestionDenial(requestID string, toolInput json.RawMessage) []parsedQuestion {
 	var qPayload struct {
 		Questions []struct {
-			Question string `json:"question"`
-			Options  []struct {
-				Label string `json:"label"`
+			Question    string `json:"question"`
+			Header      string `json:"header"`
+			MultiSelect bool   `json:"multiSelect"`
+			Options     []struct {
+				Label       string `json:"label"`
+				Description string `json:"description"`
+				Preview     string `json:"preview"`
 			} `json:"options"`
 		} `json:"questions"`
 	}
@@ -615,24 +627,40 @@ func parseQuestionDenial(requestID string, toolInput json.RawMessage) []parsedQu
 	// If there's only one question, use the denial's requestID directly.
 	if len(qPayload.Questions) == 1 {
 		q := qPayload.Questions[0]
-		var opts []string
+		var opts []parsedOption
 		for _, o := range q.Options {
-			opts = append(opts, o.Label)
+			opts = append(opts, parsedOption{
+				Label:       o.Label,
+				Description: o.Description,
+				Preview:     o.Preview,
+			})
 		}
-		return []parsedQuestion{{RequestID: requestID, Text: q.Question, Options: opts}}
+		return []parsedQuestion{{
+			RequestID:   requestID,
+			Text:        q.Question,
+			Header:      q.Header,
+			MultiSelect: q.MultiSelect,
+			Options:     opts,
+		}}
 	}
 
 	// Multiple questions in one denial — synthesize sub-requestIDs.
 	var out []parsedQuestion
 	for i, q := range qPayload.Questions {
-		var opts []string
+		var opts []parsedOption
 		for _, o := range q.Options {
-			opts = append(opts, o.Label)
+			opts = append(opts, parsedOption{
+				Label:       o.Label,
+				Description: o.Description,
+				Preview:     o.Preview,
+			})
 		}
 		out = append(out, parsedQuestion{
-			RequestID: fmt.Sprintf("%s_%d", requestID, i),
-			Text:      q.Question,
-			Options:   opts,
+			RequestID:   fmt.Sprintf("%s_%d", requestID, i),
+			Text:        q.Question,
+			Header:      q.Header,
+			MultiSelect: q.MultiSelect,
+			Options:     opts,
 		})
 	}
 	return out
@@ -669,14 +697,24 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 
 	// Send all questions to relay at once.
 	for _, q := range allQuestions {
+		options := make([]protocol.QuestionOption, 0, len(q.Options))
+		for _, opt := range q.Options {
+			options = append(options, protocol.QuestionOption{
+				Label:       opt.Label,
+				Description: opt.Description,
+				Preview:     opt.Preview,
+			})
+		}
 		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 		if err := a.opts.Relay.Send(sendCtx, &protocol.Question{
-			Type:      protocol.MsgTypeQuestion,
-			SessionID: a.opts.SessionID,
-			ChannelID: tc.ChannelID,
-			RequestID: q.RequestID,
-			Question:  q.Text,
-			Options:   q.Options,
+			Type:        protocol.MsgTypeQuestion,
+			SessionID:   a.opts.SessionID,
+			ChannelID:   tc.ChannelID,
+			RequestID:   q.RequestID,
+			Question:    q.Text,
+			Header:      q.Header,
+			MultiSelect: q.MultiSelect,
+			Options:     options,
 		}); err != nil {
 			sendCancel()
 			return err
