@@ -4,6 +4,7 @@ package update
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -120,8 +121,8 @@ func AssetName(version string) string {
 }
 
 // Download fetches the matching asset from the release, verifies its SHA256
-// checksum against a SHA256SUMS asset (if present), and writes it to destPath
-// with an atomic rename.
+// checksum against a signed SHA256SUMS asset, and writes it to destPath with an
+// atomic rename.
 func Download(release *Release, destPath string) error {
 	// Tag is "daemon/v0.2.1", asset name needs "v0.2.1"
 	version := release.TagName
@@ -132,16 +133,23 @@ func Download(release *Release, destPath string) error {
 
 	var assetURL string
 	var sumsURL string
+	var sumsSigURL string
 	for _, a := range release.Assets {
 		if a.Name == assetName {
 			assetURL = a.BrowserDownloadURL
 		}
-		if a.Name == "SHA256SUMS" {
+		if a.Name == checksumAssetName {
 			sumsURL = a.BrowserDownloadURL
+		}
+		if a.Name == checksumSignatureAssetName {
+			sumsSigURL = a.BrowserDownloadURL
 		}
 	}
 	if assetURL == "" {
 		return fmt.Errorf("update: asset %q not found in release %s", assetName, release.TagName)
+	}
+	if sumsURL == "" || sumsSigURL == "" {
+		return fmt.Errorf("update: signed checksums are required for release %s", release.TagName)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Minute}
@@ -178,15 +186,12 @@ func Download(release *Release, destPath string) error {
 
 	actualSum := hex.EncodeToString(hasher.Sum(nil))
 
-	// Verify checksum if SHA256SUMS asset is available.
-	if sumsURL != "" {
-		expected, err := fetchExpectedChecksum(client, sumsURL, assetName)
-		if err != nil {
-			return fmt.Errorf("update: checksum verification: %w", err)
-		}
-		if actualSum != expected {
-			return fmt.Errorf("update: checksum mismatch: got %s, want %s", actualSum, expected)
-		}
+	expected, err := fetchVerifiedChecksum(client, sumsURL, sumsSigURL, assetName)
+	if err != nil {
+		return fmt.Errorf("update: checksum verification: %w", err)
+	}
+	if actualSum != expected {
+		return fmt.Errorf("update: checksum mismatch: got %s, want %s", actualSum, expected)
 	}
 
 	if err := os.Chmod(tmpPath, 0755); err != nil {
@@ -200,20 +205,41 @@ func Download(release *Release, destPath string) error {
 	return nil
 }
 
-// fetchExpectedChecksum downloads a SHA256SUMS file and returns the hex
-// checksum for the named asset. The file format is "<hex>  <filename>" per line.
-func fetchExpectedChecksum(client *http.Client, sumsURL, assetName string) (string, error) {
-	resp, err := client.Get(sumsURL)
+func fetchVerifiedChecksum(client *http.Client, sumsURL, signatureURL, assetName string) (string, error) {
+	checksums, err := fetchAssetBytes(client, sumsURL, checksumAssetName)
 	if err != nil {
 		return "", err
+	}
+	signature, err := fetchAssetBytes(client, signatureURL, checksumSignatureAssetName)
+	if err != nil {
+		return "", err
+	}
+	if err := verifySignedChecksums(checksums, signature); err != nil {
+		return "", err
+	}
+	return expectedChecksumFromSUMS(checksums, assetName)
+}
+
+func fetchAssetBytes(client *http.Client, assetURL, assetName string) ([]byte, error) {
+	resp, err := client.Get(assetURL)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("SHA256SUMS returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("%s returned %d", assetName, resp.StatusCode)
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func expectedChecksumFromSUMS(checksums []byte, assetName string) (string, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(checksums))
 	for scanner.Scan() {
 		line := scanner.Text()
 		// Format: "<hex>  <filename>" or "<hex> <filename>"

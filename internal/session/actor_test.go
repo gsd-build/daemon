@@ -2,11 +2,13 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,6 +89,28 @@ func (r *fakeRelay) waitFor(t *testing.T, timeout time.Duration, predicate func(
 		r.cond.Wait()
 	}
 	return true
+}
+
+type blockingUploader struct {
+	started chan context.Context
+	done    chan struct{}
+}
+
+func newBlockingUploader() *blockingUploader {
+	return &blockingUploader{
+		started: make(chan context.Context, 1),
+		done:    make(chan struct{}),
+	}
+}
+
+func (u *blockingUploader) Upload(ctx context.Context, filename string, data []byte) (string, error) {
+	select {
+	case u.started <- ctx:
+	default:
+	}
+	<-ctx.Done()
+	close(u.done)
+	return "", ctx.Err()
 }
 
 func (r *fakeRelay) waitForTaskComplete(t *testing.T, timeout time.Duration) bool {
@@ -377,6 +401,50 @@ func TestActorPermissionDenialAndApproval(t *testing.T) {
 	}
 }
 
+func TestActorPermissionRequestTimesOut(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-perm-timeout",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	actor.interactionTimeout = 50 * time.Millisecond
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-perm-timeout",
+		SessionID: "sess-perm-timeout",
+		ChannelID: "ch-perm-timeout",
+		Prompt:    "Write a file",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	gotTimeout := relay.waitFor(t, 2*time.Second, func(frames []any) bool {
+		for _, f := range frames {
+			if te, ok := f.(*protocol.TaskError); ok {
+				return strings.Contains(te.Error, "permission response")
+			}
+		}
+		return false
+	})
+	if !gotTimeout {
+		t.Fatal("expected permission timeout TaskError")
+	}
+}
+
 func TestActorBatchQuestions(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
@@ -469,6 +537,105 @@ func TestActorBatchQuestions(t *testing.T) {
 		if len(q.Options) != 2 {
 			t.Errorf("question %d: expected 2 options, got %d", i, len(q.Options))
 		}
+	}
+}
+
+func TestActorBatchQuestionsTimeout(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+
+	t.Setenv("FAKE_CLAUDE_QUESTIONS", "2")
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-batch-q-timeout",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	actor.interactionTimeout = 50 * time.Millisecond
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-batch-q-timeout",
+		SessionID: "sess-batch-q-timeout",
+		ChannelID: "ch-batch-q-timeout",
+		Prompt:    "ask me things",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	gotTimeout := relay.waitFor(t, 2*time.Second, func(frames []any) bool {
+		for _, f := range frames {
+			if te, ok := f.(*protocol.TaskError); ok {
+				return strings.Contains(te.Error, "question response")
+			}
+		}
+		return false
+	})
+	if !gotTimeout {
+		t.Fatal("expected question timeout TaskError")
+	}
+}
+
+func TestMaybeUploadImagesUsesTaskContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	imagePath := filepath.Join(tmpDir, "sample.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	uploader := newBlockingUploader()
+	actor, err := NewActor(Options{
+		SessionID: "sess-image-context",
+		CWD:       tmpDir,
+		Relay:     newFakeRelay(),
+		Uploader:  uploader,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"content": []map[string]any{
+				{
+					"type": "tool_use",
+					"name": "Read",
+					"id":   "toolu_img_1",
+					"input": map[string]any{
+						"file_path": imagePath,
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal raw event: %v", err)
+	}
+
+	taskCtx, cancel := context.WithCancel(context.Background())
+	actor.maybeUploadImages(taskCtx, raw, "ch-image-context", 1)
+
+	select {
+	case <-uploader.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected upload to start")
+	}
+
+	cancel()
+
+	select {
+	case <-uploader.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected upload goroutine to stop after task context cancellation")
 	}
 }
 

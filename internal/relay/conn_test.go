@@ -92,6 +92,38 @@ func TestClientConnectHandshake(t *testing.T) {
 	}
 }
 
+func TestClientConnectIncludesActiveTasksInHello(t *testing.T) {
+	server, state := newTestServer(t)
+	defer server.Close()
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + "?token=secret"
+	client := NewClient(Config{
+		URL:           url,
+		AuthToken:     "secret",
+		MachineID:     "m-1",
+		DaemonVersion: "0.1.0",
+		OS:            "darwin",
+		Arch:          "arm64",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := client.Connect(ctx, []string{"task-1", "task-2"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.hellos) != 1 {
+		t.Fatalf("expected 1 hello, got %d", len(state.hellos))
+	}
+	if got := state.hellos[0].ActiveTasks; len(got) != 2 || got[0] != "task-1" || got[1] != "task-2" {
+		t.Fatalf("expected active tasks [task-1 task-2], got %#v", got)
+	}
+}
+
 func TestClientReconnectsAfterDisconnect(t *testing.T) {
 	var mu sync.Mutex
 	connectCount := 0

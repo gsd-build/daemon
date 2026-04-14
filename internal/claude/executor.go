@@ -4,14 +4,18 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -43,6 +47,11 @@ type Executor struct {
 	// Set by the actor for PID file cleanup. May be nil.
 	OnPIDExit func(pid int)
 }
+
+var (
+	downloadDNSCache sync.Map
+	downloadImage    = downloadFile
+)
 
 // NewExecutor constructs an Executor. Call Run to spawn the process.
 func NewExecutor(opts Options) *Executor {
@@ -96,7 +105,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 		var imgPaths []string
 		for i, u := range e.opts.ImageURLs {
 			tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("gsd-upload-%d-%d.png", time.Now().UnixMilli(), i))
-			if err := downloadFile(u, tmpPath); err != nil {
+			if err := downloadImage(u, tmpPath); err != nil {
 				slog.Warn("failed to download user image", "url", u, "err", err)
 				continue
 			}
@@ -111,6 +120,13 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 			prefix.WriteString("\n")
 			prompt = prefix.String() + prompt
 		}
+		defer func() {
+			for _, p := range imgPaths {
+				if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+					slog.Warn("failed to remove downloaded image", "path", p, "err", err)
+				}
+			}
+		}()
 	}
 	// "--" stops flag parsing so the prompt is never consumed by variadic flags
 	args = append(args, "--", prompt)
@@ -195,7 +211,16 @@ func truncateStr(s string, max int) string {
 
 // downloadFile fetches a URL and writes it to dst.
 func downloadFile(url, dst string) error {
-	client := &http.Client{Timeout: 30 * time.Second}
+	if err := validateDownloadURL(url); err != nil {
+		return err
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
@@ -213,4 +238,64 @@ func downloadFile(url, dst string) error {
 		return fmt.Errorf("write %s: %w", dst, err)
 	}
 	return nil
+}
+
+func validateDownloadURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid download URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("download URL must use https")
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return fmt.Errorf("download URL is missing host")
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedDownloadIP(ip) {
+			return fmt.Errorf("download URL host %q is not allowed", host)
+		}
+		return nil
+	}
+
+	ips, err := resolveDownloadHost(host)
+	if err != nil {
+		return fmt.Errorf("resolve download host %q: %w", host, err)
+	}
+	for _, ip := range ips {
+		if isBlockedDownloadIP(ip) {
+			return fmt.Errorf("download URL host %q resolves to blocked address %s", host, ip.String())
+		}
+	}
+
+	return nil
+}
+
+func resolveDownloadHost(host string) ([]net.IP, error) {
+	if cached, ok := downloadDNSCache.Load(host); ok {
+		if ips, ok := cached.([]net.IP); ok {
+			return ips, nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	downloadDNSCache.Store(host, ips)
+	return ips, nil
+}
+
+func isBlockedDownloadIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
 }

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -193,7 +194,7 @@ func TestExecutorAllowedTools(t *testing.T) {
 	for i, arg := range argv {
 		if arg == "--allowedTools" && i+1 < len(argv) {
 			val := argv[i+1]
-			if (val == "Write,Bash" || val == "Bash,Write") {
+			if val == "Write,Bash" || val == "Bash,Write" {
 				found = true
 			}
 		}
@@ -247,5 +248,52 @@ func TestExecutorContextCancellation(t *testing.T) {
 	err := e.Run(ctx, func(_ Event) error { return nil })
 	if err != nil {
 		t.Errorf("expected nil error on context cancellation, got: %v", err)
+	}
+}
+
+func TestExecutorCleansUpDownloadedImageFiles(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	argsFile := filepath.Join(t.TempDir(), "argv.json")
+	origDownloadImage := downloadImage
+	downloadImage = func(url, dst string) error {
+		return os.WriteFile(dst, []byte("png"), 0o600)
+	}
+	t.Cleanup(func() {
+		downloadImage = origDownloadImage
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	e := NewExecutor(Options{
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Prompt:     "describe the image",
+		ImageURLs:  []string{"https://example.com/sample.png"},
+		Env:        []string{"FAKE_CLAUDE_ARGS_FILE=" + argsFile},
+	})
+
+	if err := e.Run(ctx, func(_ Event) error { return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgsFile(t, argsFile)
+	if len(argv) == 0 {
+		t.Fatal("empty argv")
+	}
+	prompt := argv[len(argv)-1]
+
+	var downloadedPath string
+	for _, line := range strings.Split(prompt, "\n") {
+		if strings.HasPrefix(line, "- ") && strings.Contains(line, "gsd-upload-") {
+			downloadedPath = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+			break
+		}
+	}
+	if downloadedPath == "" {
+		t.Fatalf("expected prompt to include downloaded image path, got %q", prompt)
+	}
+	if _, err := os.Stat(downloadedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected downloaded image to be cleaned up, stat err=%v", err)
 	}
 }

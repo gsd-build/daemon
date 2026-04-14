@@ -87,6 +87,7 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 		DaemonVersion: c.cfg.DaemonVersion,
 		OS:            c.cfg.OS,
 		Arch:          c.cfg.Arch,
+		ActiveTasks:   activeTasks,
 	}
 	buf, err := json.Marshal(hello)
 	if err != nil {
