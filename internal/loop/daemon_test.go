@@ -115,6 +115,24 @@ func TestStatusUsesRelayConnectionState(t *testing.T) {
 	}
 }
 
+func TestStatusUsesEffectiveConfiguredConcurrency(t *testing.T) {
+	d := &Daemon{
+		cfg: &config.Config{
+			MachineID:          "m1",
+			RelayURL:           "wss://localhost/ws",
+			MaxConcurrentTasks: 2,
+		},
+		version:   "test",
+		manager:   &mockManager{},
+		client:    relayClientStub(true),
+		startedAt: time.Now().Add(-5 * time.Second),
+	}
+
+	if got := d.Status().MaxConcurrentTasks; got != 2 {
+		t.Fatalf("expected configured max concurrency 2, got %d", got)
+	}
+}
+
 // mockManager implements SessionManager for testing.
 type mockManager struct {
 	stopAllFn func()
