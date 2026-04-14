@@ -5,7 +5,6 @@ package loop
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/url"
 	"os"
@@ -83,11 +82,11 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	// Clean up stale PID files from previous crashes
 	pidDir, err := pidfile.Dir()
 	if err != nil {
-		log.Printf("[daemon] pid dir: %v", err)
+		slog.Warn("pid dir unavailable", "err", err)
 		pidDir = "" // disable PID tracking if we can't get the dir
 	} else {
 		if n := pidfile.CleanStale(pidDir); n > 0 {
-			log.Printf("[daemon] cleaned %d stale PID file(s)", n)
+			slog.Info("cleaned stale pid files", "count", n, "pidDir", pidDir)
 		}
 	}
 

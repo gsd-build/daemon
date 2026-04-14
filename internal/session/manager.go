@@ -3,7 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -137,7 +137,7 @@ func (m *Manager) Spawn(
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		log.Printf("[session] actor.Run exited with error: session=%s err=%v", sessionID, err)
+		slog.Error("actor run exited with error", "sessionId", sessionID, "err", err)
 	}()
 	return actor, nil
 }
@@ -214,7 +214,7 @@ func (m *Manager) ReapIdleActors(maxIdle time.Duration) int {
 
 	for _, id := range toReap {
 		m.Remove(id)
-		log.Printf("[reaper] reaped idle actor: session=%s", id)
+		slog.Info("reaped idle actor", "sessionId", id)
 	}
 	return len(toReap)
 }
@@ -231,7 +231,7 @@ func (m *Manager) StartReaper(ctx context.Context, tick time.Duration, maxIdle t
 				return
 			case <-ticker.C:
 				if n := m.ReapIdleActors(maxIdle); n > 0 {
-					log.Printf("[reaper] reaped %d idle actor(s)", n)
+					slog.Info("reaped idle actors", "count", n)
 				}
 			}
 		}
