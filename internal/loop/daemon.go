@@ -177,7 +177,7 @@ func (d *Daemon) Status() sockapi.StatusData {
 		MachineID:          d.cfg.MachineID,
 		ActiveSessions:     total,
 		InFlightTasks:      executing,
-		MaxConcurrentTasks: runtime.NumCPU(),
+		MaxConcurrentTasks: d.cfg.EffectiveMaxConcurrentTasks(),
 		LogLevel:           d.cfg.LogLevel,
 	}
 }
