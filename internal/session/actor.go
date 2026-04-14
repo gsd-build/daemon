@@ -52,7 +52,7 @@ type Options struct {
 type Actor struct {
 	opts Options
 
-	seq int64 // monotonic sequence counter, only touched by Run goroutine
+	seq int64 // monotonic sequence counter, advanced via atomic ops
 
 	claudeSessionID string   // set from result events, used for --resume
 	allowedTools    []string // accumulates as user grants permissions
@@ -67,9 +67,10 @@ type Actor struct {
 
 	stopCh chan struct{}
 
-	taskMu     sync.Mutex
-	taskCancel context.CancelFunc // cancels the in-flight task context; nil when idle
-	taskID     string             // ID of the in-flight task; empty when idle
+	taskMu        sync.Mutex
+	taskCancel    context.CancelFunc // cancels the in-flight task context; nil when idle
+	taskID        string             // ID of the in-flight task; empty when idle
+	pendingTaskID string             // ID of a task accepted into taskCh but not yet started
 
 	taskStartedAt *time.Time // when current task started; nil when idle
 	idleSince     *time.Time // when actor became idle; nil when executing
@@ -77,6 +78,9 @@ type Actor struct {
 	// taskTimeout is the per-task deadline. Zero means no timeout.
 	// Set by the Manager from config before calling Run.
 	taskTimeout time.Duration
+	// interactionTimeout bounds permission/question waits. Zero falls back
+	// to the default 10-minute ceiling.
+	interactionTimeout time.Duration
 
 	// lastActiveAt tracks when this actor last completed or received a task.
 	// Protected by taskMu. Used by the reaper to detect idle actors.
@@ -112,16 +116,19 @@ type permResponse struct {
 	Answer   string // for question answers
 }
 
+const defaultInteractionTimeout = 10 * time.Minute
+
 // NewActor creates a new Actor for the given session.
 func NewActor(opts Options) (*Actor, error) {
 	return &Actor{
-		opts:            opts,
-		claudeSessionID: opts.ResumeSession,
-		taskCh:          make(chan protocol.Task, 1),
-		permCh:          make(chan permResponse, 1),
-		questionCh:      make(map[string]chan string),
-		stopCh:          make(chan struct{}),
-		lastActiveAt:    time.Now(),
+		opts:               opts,
+		claudeSessionID:    opts.ResumeSession,
+		taskCh:             make(chan protocol.Task, 1),
+		permCh:             make(chan permResponse, 1),
+		questionCh:         make(map[string]chan string),
+		stopCh:             make(chan struct{}),
+		lastActiveAt:       time.Now(),
+		interactionTimeout: defaultInteractionTimeout,
 	}, nil
 }
 
@@ -184,10 +191,28 @@ func (a *Actor) AllowedTools() []string {
 func (a *Actor) SendTask(task protocol.Task) error {
 	select {
 	case a.taskCh <- task:
+		a.taskMu.Lock()
+		a.pendingTaskID = task.TaskID
+		a.lastActiveAt = time.Now()
+		a.taskMu.Unlock()
 		return nil
 	default:
 		return fmt.Errorf("actor busy — task channel full")
 	}
+}
+
+// HasTaskID reports whether the actor already owns the task either queued or in-flight.
+func (a *Actor) HasTaskID(taskID string) bool {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	return taskID != "" && (a.taskID == taskID || a.pendingTaskID == taskID)
+}
+
+func (a *Actor) effectiveInteractionTimeout() time.Duration {
+	if a.interactionTimeout > 0 {
+		return a.interactionTimeout
+	}
+	return defaultInteractionTimeout
 }
 
 // Run is the actor's main loop. It waits for tasks, spawns executors, and
@@ -230,6 +255,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 
 	a.taskMu.Lock()
 	a.taskCancel = cancel
+	a.pendingTaskID = ""
 	a.taskID = task.TaskID
 	now := time.Now()
 	a.taskStartedAt = &now
@@ -368,8 +394,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 	consecutiveFailures := 0
 
 	err := exec.Run(ctx, func(e claude.Event) error {
-		a.seq++
-		next := a.seq
+		next := atomic.AddInt64(&a.seq, 1)
 
 		// Send to relay
 		frame := &protocol.Stream{
@@ -401,7 +426,7 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		// Detect image reads and upload asynchronously.
 		if a.opts.Uploader != nil && e.Type == "assistant" {
 			slog.Debug("checking assistant event for image reads", "session", a.opts.SessionID)
-			a.maybeUploadImages(e.Raw, tc.ChannelID, next)
+			a.maybeUploadImages(ctx, e.Raw, tc.ChannelID, next)
 		}
 
 		return nil
@@ -526,12 +551,18 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 		slog.Debug("permission request detail", "tool", denial.ToolName, "summary", summary)
 
 		// Wait for response
+		timeout := time.NewTimer(a.effectiveInteractionTimeout())
 		select {
 		case <-ctx.Done():
+			timeout.Stop()
 			return ctx.Err()
 		case <-a.stopCh:
+			timeout.Stop()
 			return fmt.Errorf("actor stopped while waiting for permission")
+		case <-timeout.C:
+			return fmt.Errorf("timed out waiting for permission response after %s", a.effectiveInteractionTimeout())
 		case resp := <-a.permCh:
+			timeout.Stop()
 			if resp.Approved {
 				slog.Info("permission approved, resuming", "tool", denial.ToolName)
 				a.addAllowedTool(denial.ToolName)
@@ -645,6 +676,8 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 
 	// Collect all answers. Order doesn't matter — each channel is keyed by requestID.
 	answers := make(map[string]string, len(allQuestions))
+	timeout := time.NewTimer(a.effectiveInteractionTimeout())
+	defer timeout.Stop()
 	for _, q := range allQuestions {
 		ch := a.questionCh[q.RequestID]
 		select {
@@ -652,6 +685,8 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 			return ctx.Err()
 		case <-a.stopCh:
 			return fmt.Errorf("actor stopped while waiting for answers")
+		case <-timeout.C:
+			return fmt.Errorf("timed out waiting for question response after %s", a.effectiveInteractionTimeout())
 		case answer := <-ch:
 			answers[q.RequestID] = answer
 			slog.Info("answer received", "requestID", q.RequestID, "answerLen", len(answer))
@@ -673,7 +708,7 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 // targeting image files. For each image found, it reads the file from disk and
 // uploads it to the relay in a background goroutine, then sends a supplementary
 // image_url stream event. Best-effort: failures are logged, not propagated.
-func (a *Actor) maybeUploadImages(raw json.RawMessage, channelID string, afterSeq int64) {
+func (a *Actor) maybeUploadImages(taskCtx context.Context, raw json.RawMessage, channelID string, afterSeq int64) {
 	var evt struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -711,14 +746,16 @@ func (a *Actor) maybeUploadImages(raw json.RawMessage, channelID string, afterSe
 			absPath = filepath.Join(a.opts.CWD, absPath)
 		}
 
-		go func() {
+		go func(ctx context.Context) {
+			if err := ctx.Err(); err != nil {
+				return
+			}
 			data, err := os.ReadFile(absPath)
 			if err != nil {
 				slog.Warn("image upload: read file failed", "path", absPath, "err", err)
 				return
 			}
 
-			ctx := context.Background()
 			filename := filepath.Base(absPath)
 			imageURL, err := a.opts.Uploader.Upload(ctx, filename, data)
 			if err != nil {
@@ -745,7 +782,7 @@ func (a *Actor) maybeUploadImages(raw json.RawMessage, channelID string, afterSe
 			} else {
 				slog.Info("image uploaded", "path", absPath, "url", imageURL, "toolUseId", toolUseID)
 			}
-		}()
+		}(taskCtx)
 	}
 }
 
