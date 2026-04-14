@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -256,12 +254,13 @@ func TestExecutorContextCancellation(t *testing.T) {
 func TestExecutorCleansUpDownloadedImageFiles(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	argsFile := filepath.Join(t.TempDir(), "argv.json")
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write([]byte("png"))
-	}))
-	defer server.Close()
+	origDownloadImage := downloadImage
+	downloadImage = func(url, dst string) error {
+		return os.WriteFile(dst, []byte("png"), 0o600)
+	}
+	t.Cleanup(func() {
+		downloadImage = origDownloadImage
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -270,7 +269,7 @@ func TestExecutorCleansUpDownloadedImageFiles(t *testing.T) {
 		BinaryPath: binPath,
 		CWD:        t.TempDir(),
 		Prompt:     "describe the image",
-		ImageURLs:  []string{server.URL + "/sample.png"},
+		ImageURLs:  []string{"https://example.com/sample.png"},
 		Env:        []string{"FAKE_CLAUDE_ARGS_FILE=" + argsFile},
 	})
 

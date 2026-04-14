@@ -48,7 +48,10 @@ type Executor struct {
 	OnPIDExit func(pid int)
 }
 
-var downloadDNSCache sync.Map
+var (
+	downloadDNSCache sync.Map
+	downloadImage    = downloadFile
+)
 
 // NewExecutor constructs an Executor. Call Run to spawn the process.
 func NewExecutor(opts Options) *Executor {
@@ -102,7 +105,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 		var imgPaths []string
 		for i, u := range e.opts.ImageURLs {
 			tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("gsd-upload-%d-%d.png", time.Now().UnixMilli(), i))
-			if err := downloadFile(u, tmpPath); err != nil {
+			if err := downloadImage(u, tmpPath); err != nil {
 				slog.Warn("failed to download user image", "url", u, "err", err)
 				continue
 			}
