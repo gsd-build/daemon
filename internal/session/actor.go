@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -201,7 +200,7 @@ func (a *Actor) Run(ctx context.Context) error {
 			return nil
 		case task := <-a.taskCh:
 			if err := a.executeTask(ctx, task); err != nil {
-				log.Printf("[actor] task %s failed: %v", task.TaskID, err)
+				slog.Error("task failed", "taskId", task.TaskID, "sessionId", a.opts.SessionID, "err", err)
 				sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 				_ = a.opts.Relay.Send(sendCtx, &protocol.TaskError{
 					Type:        protocol.MsgTypeTaskError,
@@ -350,13 +349,13 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		ImageURLs:      tc.ImageURLs,
 	})
 
-	if a.pidDir != "" {
-		exec.OnPIDStart = func(pid int) {
-			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
-			if err := pidfile.Write(path, pid); err != nil {
-				log.Printf("[actor] write pid file: %v", err)
+		if a.pidDir != "" {
+			exec.OnPIDStart = func(pid int) {
+				path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
+				if err := pidfile.Write(path, pid); err != nil {
+					slog.Warn("write pid file failed", "taskId", tc.TaskID, "path", path, "err", err)
+				}
 			}
-		}
 		exec.OnPIDExit = func(pid int) {
 			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
 			pidfile.Remove(path)
@@ -382,8 +381,13 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := a.opts.Relay.Send(sendCtx, frame); err != nil {
 			consecutiveFailures++
-			log.Printf("[actor] relay send failed (%d/%d): session=%s seq=%d err=%v",
-				consecutiveFailures, maxConsecutiveFailures, a.opts.SessionID, next, err)
+			slog.Warn("relay send failed",
+				"sessionId", a.opts.SessionID,
+				"seq", next,
+				"consecutiveFailures", consecutiveFailures,
+				"maxConsecutiveFailures", maxConsecutiveFailures,
+				"err", err,
+			)
 			if consecutiveFailures >= maxConsecutiveFailures {
 				sendCancel()
 				return fmt.Errorf("relay unreachable: %d consecutive send failures", consecutiveFailures)
