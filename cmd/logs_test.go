@@ -1,14 +1,32 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.b = append(b.b, p...)
+	return len(p), nil
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(append([]byte(nil), b.b...))
+}
 
 func TestStreamLogFileFollowsExistingAndAppendedContent(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "daemon.log")
@@ -19,7 +37,7 @@ func TestStreamLogFileFollowsExistingAndAppendedContent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var out bytes.Buffer
+	var out lockedBuffer
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- streamLogFile(ctx, logPath, &out, 10*time.Millisecond)
