@@ -49,9 +49,16 @@ type Executor struct {
 }
 
 var (
-	downloadDNSCache sync.Map
-	downloadImage    = downloadFile
+	downloadDNSCache     sync.Map
+	downloadImage        = downloadFile
+	downloadHostResolver = resolveDownloadHost
+	downloadDialContext  = (&net.Dialer{Timeout: 30 * time.Second}).DialContext
 )
+
+type downloadTarget struct {
+	url           *url.URL
+	dialAddresses []string
+}
 
 // NewExecutor constructs an Executor. Call Run to spawn the process.
 func NewExecutor(opts Options) *Executor {
@@ -210,24 +217,42 @@ func truncateStr(s string, max int) string {
 }
 
 // downloadFile fetches a URL and writes it to dst.
-func downloadFile(url, dst string) error {
-	if err := validateDownloadURL(url); err != nil {
+func downloadFile(rawURL, dst string) error {
+	target, err := resolveDownloadTarget(rawURL)
+	if err != nil {
 		return err
 	}
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				var lastErr error
+				for _, addr := range target.dialAddresses {
+					conn, err := downloadDialContext(ctx, network, addr)
+					if err == nil {
+						return conn, nil
+					}
+					lastErr = err
+				}
+				if lastErr == nil {
+					return nil, fmt.Errorf("no validated download addresses")
+				}
+				return nil, fmt.Errorf("dial validated download address: %w", lastErr)
+			},
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	resp, err := client.Get(url)
+	resp, err := client.Get(target.url.String())
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", url, err)
+		return fmt.Errorf("GET %s: %w", target.url.String(), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+		return fmt.Errorf("GET %s: status %d", target.url.String(), resp.StatusCode)
 	}
 	f, err := os.Create(dst)
 	if err != nil {
@@ -241,36 +266,56 @@ func downloadFile(url, dst string) error {
 }
 
 func validateDownloadURL(rawURL string) error {
+	_, err := resolveDownloadTarget(rawURL)
+	return err
+}
+
+func resolveDownloadTarget(rawURL string) (*downloadTarget, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid download URL: %w", err)
+		return nil, fmt.Errorf("invalid download URL: %w", err)
 	}
 	if parsed.Scheme != "https" {
-		return fmt.Errorf("download URL must use https")
+		return nil, fmt.Errorf("download URL must use https")
 	}
 	host := parsed.Hostname()
 	if host == "" {
-		return fmt.Errorf("download URL is missing host")
+		return nil, fmt.Errorf("download URL is missing host")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
 	}
 
 	if ip := net.ParseIP(host); ip != nil {
 		if isBlockedDownloadIP(ip) {
-			return fmt.Errorf("download URL host %q is not allowed", host)
+			return nil, fmt.Errorf("download URL host %q is not allowed", host)
 		}
-		return nil
+		return &downloadTarget{
+			url:           parsed,
+			dialAddresses: []string{net.JoinHostPort(ip.String(), port)},
+		}, nil
 	}
 
-	ips, err := resolveDownloadHost(host)
+	ips, err := downloadHostResolver(host)
 	if err != nil {
-		return fmt.Errorf("resolve download host %q: %w", host, err)
+		return nil, fmt.Errorf("resolve download host %q: %w", host, err)
 	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve download host %q: no addresses returned", host)
+	}
+	addresses := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		if isBlockedDownloadIP(ip) {
-			return fmt.Errorf("download URL host %q resolves to blocked address %s", host, ip.String())
+			return nil, fmt.Errorf("download URL host %q resolves to blocked address %s", host, ip.String())
 		}
+		addresses = append(addresses, net.JoinHostPort(ip.String(), port))
 	}
 
-	return nil
+	return &downloadTarget{
+		url:           parsed,
+		dialAddresses: addresses,
+	}, nil
 }
 
 func resolveDownloadHost(host string) ([]net.IP, error) {
