@@ -4,6 +4,7 @@ package loop
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
+	"github.com/gsd-build/daemon/internal/skills"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	"github.com/gsd-build/daemon/internal/upload"
 	protocol "github.com/gsd-build/protocol-go"
@@ -49,6 +51,9 @@ type Daemon struct {
 	cronStore    *crons.Store
 	cronRuntime  *crons.Runtime
 	cronSchedule *crons.Scheduler
+	skillWatcher *skills.Watcher
+	skillPublishMu    sync.Mutex
+	skillPublishTimer *time.Timer
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -218,6 +223,7 @@ func (d *Daemon) Sessions() []sockapi.SessionInfo {
 // The client handles reconnection automatically.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.client.SetHandler(d.handleMessage)
+	d.client.SetOnConnect(d.handleRelayConnect)
 
 	// Check token expiry at startup.
 	d.checkAndRefreshToken()
@@ -237,6 +243,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.runTokenRefreshCheck(ctx)
 	go d.runHeartbeat(ctx)
+	d.startSkillWatcher(ctx)
 	if d.cronSchedule != nil {
 		go d.cronSchedule.Run(ctx)
 	}
@@ -298,6 +305,12 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handlePermissionResponse(msg)
 	case *protocol.QuestionResponse:
 		return d.handleQuestionResponse(msg)
+	case *protocol.SkillContentRequest:
+		return d.handleSkillContentRequest(msg)
+	case *protocol.SkillPush:
+		return d.handleSkillPush(msg)
+	case *protocol.SkillDelete:
+		return d.handleSkillDelete(msg)
 	default:
 		// Ignore other types
 		return nil
@@ -307,7 +320,16 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 func (d *Daemon) handleTask(msg *protocol.Task) error {
 	ctx := context.Background()
 	if msg.ChannelID != "" && msg.CWD != "" {
+		projectRootAdded := !d.hasProjectRoot(msg.CWD)
 		d.channelRoots.Store(msg.ChannelID, msg.CWD)
+		d.addProjectRootsToSkillWatcher(msg.CWD)
+		if projectRootAdded {
+			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if err := d.sendSkillInventory(sendCtx); err != nil {
+				slog.Warn("skill inventory publish failed", "error", err, "projectRoot", msg.CWD)
+			}
+		}
 	}
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil && actor.HasTaskID(msg.TaskID) {
@@ -490,6 +512,203 @@ func (d *Daemon) handleQuestionResponse(msg *protocol.QuestionResponse) error {
 		slog.Warn("question response failed", "session", msg.SessionID, "error", err)
 	}
 	return nil
+}
+
+func (d *Daemon) handleRelayConnect(ctx context.Context) error {
+	return d.sendSkillInventory(ctx)
+}
+
+func (d *Daemon) handleSkillContentRequest(msg *protocol.SkillContentRequest) error {
+	managedRoots, err := daemonManagedRoots()
+	if err != nil {
+		return err
+	}
+	targetPath := filepath.Join(msg.Root, filepath.FromSlash(msg.RelativePath))
+	if _, _, err := fs.ValidateManagedPath(targetPath, managedRoots); err != nil {
+		return err
+	}
+	content, _, err := fs.ReadFile(targetPath, msg.Root, fs.DefaultMaxBytes)
+	if err != nil {
+		return err
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, &protocol.SkillContentUpload{
+		Type:               protocol.MsgTypeSkillContentUpload,
+		MachineID:          d.cfg.MachineID,
+		Slug:               msg.Slug,
+		Root:               msg.Root,
+		RelativePath:       msg.RelativePath,
+		Content:            content,
+		MachineFingerprint: skillsFingerprint([]byte(content)),
+		BaseCloudRevision:  0,
+	})
+}
+
+func (d *Daemon) handleSkillPush(msg *protocol.SkillPush) error {
+	managedRoots, err := daemonManagedRoots()
+	if err != nil {
+		return err
+	}
+	targetPath := filepath.Join(msg.Root, filepath.FromSlash(msg.RelativePath))
+	if d.skillWatcher != nil {
+		d.skillWatcher.SuppressPath(msg.Root, 500*time.Millisecond)
+		d.skillWatcher.SuppressPath(filepath.Dir(targetPath), 500*time.Millisecond)
+		d.skillWatcher.SuppressPath(targetPath, 500*time.Millisecond)
+	}
+	if err := fs.WriteManagedFile(targetPath, managedRoots, []byte(msg.Content)); err != nil {
+		return err
+	}
+	d.scheduleSkillInventoryPublish()
+	return nil
+}
+
+func (d *Daemon) handleSkillDelete(msg *protocol.SkillDelete) error {
+	managedRoots, err := daemonManagedRoots()
+	if err != nil {
+		return err
+	}
+	targetPath := filepath.Join(msg.Root, filepath.FromSlash(msg.RelativePath))
+	if d.skillWatcher != nil {
+		d.skillWatcher.SuppressPath(msg.Root, 500*time.Millisecond)
+		d.skillWatcher.SuppressPath(filepath.Dir(targetPath), 500*time.Millisecond)
+		d.skillWatcher.SuppressPath(targetPath, 500*time.Millisecond)
+	}
+	if err := fs.RemoveManagedPath(targetPath, managedRoots); err != nil {
+		return err
+	}
+	d.scheduleSkillInventoryPublish()
+	return nil
+}
+
+func (d *Daemon) scheduleSkillInventoryPublish() {
+	d.skillPublishMu.Lock()
+	defer d.skillPublishMu.Unlock()
+	if d.skillPublishTimer != nil {
+		d.skillPublishTimer.Stop()
+	}
+	d.skillPublishTimer = time.AfterFunc(75*time.Millisecond, func() {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := d.sendSkillInventory(sendCtx); err != nil {
+			slog.Warn("skill inventory publish failed", "error", err)
+		}
+	})
+}
+
+func (d *Daemon) sendSkillInventory(ctx context.Context) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	entries, err := skills.Discover(skills.DiscoverOptions{
+		HomeDir:      home,
+		ProjectRoots: d.projectRoots(),
+	})
+	if err != nil {
+		return err
+	}
+
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, &protocol.SkillInventory{
+		Type:      protocol.MsgTypeSkillInventory,
+		MachineID: d.cfg.MachineID,
+		Entries:   entries,
+	})
+}
+
+func (d *Daemon) startSkillWatcher(ctx context.Context) {
+	if d.skillWatcher != nil {
+		return
+	}
+	watcher, err := skills.NewWatcher(skills.WatchOptions{
+		Debounce: 250 * time.Millisecond,
+		OnChange: func() {
+			if d.client == nil || !d.client.Connected() {
+				return
+			}
+			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := d.sendSkillInventory(sendCtx); err != nil {
+				slog.Warn("skill inventory publish failed", "error", err)
+			}
+		},
+	})
+	if err != nil {
+		slog.Warn("skill watcher unavailable", "error", err)
+		return
+	}
+
+	managedRoots, err := daemonManagedRoots()
+	if err != nil {
+		slog.Warn("skill watcher roots unavailable", "error", err)
+		return
+	}
+	for _, root := range managedRoots {
+		_ = watcher.AddRoot(root)
+	}
+	for _, projectRoot := range d.projectRoots() {
+		for _, root := range skills.ProjectSkillRoots(projectRoot) {
+			_ = watcher.AddRoot(root)
+		}
+	}
+	d.skillWatcher = watcher
+	go func() {
+		if err := watcher.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("skill watcher stopped", "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) addProjectRootsToSkillWatcher(projectRoot string) {
+	if d.skillWatcher == nil || projectRoot == "" {
+		return
+	}
+	for _, root := range skills.ProjectSkillRoots(projectRoot) {
+		_ = d.skillWatcher.AddRoot(root)
+	}
+}
+
+func (d *Daemon) projectRoots() []string {
+	seen := map[string]struct{}{}
+	var roots []string
+	d.channelRoots.Range(func(_, value any) bool {
+		root, _ := value.(string)
+		if root == "" {
+			return true
+		}
+		if _, ok := seen[root]; ok {
+			return true
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+		return true
+	})
+	return roots
+}
+
+func (d *Daemon) hasProjectRoot(projectRoot string) bool {
+	for _, root := range d.projectRoots() {
+		if root == projectRoot {
+			return true
+		}
+	}
+	return false
+}
+
+func daemonManagedRoots() ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve home dir: %w", err)
+	}
+	return skills.ManagedRoots(home), nil
+}
+
+func skillsFingerprint(content []byte) string {
+	sum := sha256.Sum256(content)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 // gracefulShutdown performs a two-stage shutdown:

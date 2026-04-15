@@ -2,7 +2,9 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -177,6 +179,216 @@ func TestHandleSyncCronsWritesLocalStore(t *testing.T) {
 	}
 }
 
+func TestHandleSkillContentRequestUploadsManagedSkill(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRoot := filepath.Join(home, ".claude", "skills")
+	skillDir := filepath.Join(managedRoot, "managed-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("---\nname: managed-skill\ndescription: Managed\n---\n"), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:    &config.Config{MachineID: "machine-1", RelayURL: "wss://localhost/ws"},
+		client: relayClientStub(false),
+	}
+
+	err := d.handleMessage(&protocol.Envelope{
+		Type: protocol.MsgTypeSkillContentRequest,
+		Payload: &protocol.SkillContentRequest{
+			Type:         protocol.MsgTypeSkillContentRequest,
+			MachineID:    "machine-1",
+			Slug:         "managed-skill",
+			Root:         managedRoot,
+			RelativePath: "managed-skill/SKILL.md",
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle skill content request: %v", err)
+	}
+
+	env, err := d.client.DrainQueuedForTest(context.Background())
+	if err != nil {
+		t.Fatalf("drain queued message: %v", err)
+	}
+	upload, ok := env.Payload.(*protocol.SkillContentUpload)
+	if !ok {
+		t.Fatalf("expected skill content upload, got %T", env.Payload)
+	}
+	if upload.Slug != "managed-skill" || upload.Root != managedRoot || upload.RelativePath != "managed-skill/SKILL.md" {
+		t.Fatalf("unexpected upload payload: %+v", upload)
+	}
+	if upload.Content == "" || upload.MachineFingerprint == "" {
+		t.Fatalf("expected upload content and fingerprint: %+v", upload)
+	}
+	if upload.BaseCloudRevision != 0 {
+		t.Fatalf("expected default base cloud revision 0, got %d", upload.BaseCloudRevision)
+	}
+}
+
+func TestHandleSkillPushWritesManagedSkillAndPublishesInventory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRoot := filepath.Join(home, ".codex", "skills")
+	content := "---\nname: pushed-skill\ndescription: Pushed\n---\n\n# pushed\n"
+
+	d := &Daemon{
+		cfg:    &config.Config{MachineID: "machine-1", RelayURL: "wss://localhost/ws"},
+		client: relayClientStub(false),
+	}
+
+	err := d.handleMessage(&protocol.Envelope{
+		Type: protocol.MsgTypeSkillPush,
+		Payload: &protocol.SkillPush{
+			Type:             protocol.MsgTypeSkillPush,
+			MachineID:        "machine-1",
+			Slug:             "pushed-skill",
+			Root:             managedRoot,
+			RelativePath:     "pushed-skill/SKILL.md",
+			Content:          content,
+			CloudFingerprint: "cloud-fp",
+			CloudRevision:    7,
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle skill push: %v", err)
+	}
+
+	written, err := os.ReadFile(filepath.Join(managedRoot, "pushed-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read pushed file: %v", err)
+	}
+	if string(written) != content {
+		t.Fatalf("unexpected pushed content: %q", written)
+	}
+
+	env, err := drainQueuedMessage(t, d.client)
+	inventory, ok := env.Payload.(*protocol.SkillInventory)
+	if !ok {
+		t.Fatalf("expected skill inventory, got %T", env.Payload)
+	}
+	if len(inventory.Entries) != 1 || inventory.Entries[0].Slug != "pushed-skill" {
+		t.Fatalf("unexpected inventory payload: %+v", inventory)
+	}
+}
+
+func TestHandleSkillDeleteRemovesManagedSkillAndPublishesInventory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRoot := filepath.Join(home, ".claude", "skills")
+	skillDir := filepath.Join(managedRoot, "managed-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("bye"), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:    &config.Config{MachineID: "machine-1", RelayURL: "wss://localhost/ws"},
+		client: relayClientStub(false),
+	}
+
+	err := d.handleMessage(&protocol.Envelope{
+		Type: protocol.MsgTypeSkillDelete,
+		Payload: &protocol.SkillDelete{
+			Type:          protocol.MsgTypeSkillDelete,
+			MachineID:     "machine-1",
+			Slug:          "managed-skill",
+			Root:          managedRoot,
+			RelativePath:  "managed-skill",
+			CloudRevision: 8,
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle skill delete: %v", err)
+	}
+
+	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
+		t.Fatalf("expected skill dir to be removed, stat err=%v", err)
+	}
+
+	env, err := drainQueuedMessage(t, d.client)
+	inventory, ok := env.Payload.(*protocol.SkillInventory)
+	if !ok {
+		t.Fatalf("expected skill inventory, got %T", env.Payload)
+	}
+	if len(inventory.Entries) != 0 {
+		t.Fatalf("expected empty inventory after delete, got %+v", inventory.Entries)
+	}
+}
+
+func TestHandleSkillPushBatchesInventoryPublicationAcrossSequentialFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRoot := filepath.Join(home, ".codex", "skills")
+
+	d := &Daemon{
+		cfg:    &config.Config{MachineID: "machine-1", RelayURL: "wss://localhost/ws"},
+		client: relayClientStub(false),
+	}
+
+	first := &protocol.Envelope{
+		Type: protocol.MsgTypeSkillPush,
+		Payload: &protocol.SkillPush{
+			Type:         protocol.MsgTypeSkillPush,
+			MachineID:    "machine-1",
+			Slug:         "pushed-skill",
+			Root:         managedRoot,
+			RelativePath: "pushed-skill/SKILL.md",
+			Content:      "---\nname: pushed-skill\ndescription: Pushed\n---\n",
+		},
+	}
+	second := &protocol.Envelope{
+		Type: protocol.MsgTypeSkillPush,
+		Payload: &protocol.SkillPush{
+			Type:         protocol.MsgTypeSkillPush,
+			MachineID:    "machine-1",
+			Slug:         "pushed-skill",
+			Root:         managedRoot,
+			RelativePath: "pushed-skill/notes.md",
+			Content:      "notes",
+		},
+	}
+
+	if err := d.handleMessage(first); err != nil {
+		t.Fatalf("handle first skill push: %v", err)
+	}
+	if err := d.handleMessage(second); err != nil {
+		t.Fatalf("handle second skill push: %v", err)
+	}
+
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer shortCancel()
+	if _, err := d.client.DrainQueuedForTest(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected inventory publication to be deferred, got %v", err)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	env, err := d.client.DrainQueuedForTest(waitCtx)
+	if err != nil {
+		t.Fatalf("drain batched inventory: %v", err)
+	}
+	inventory, ok := env.Payload.(*protocol.SkillInventory)
+	if !ok {
+		t.Fatalf("expected skill inventory, got %T", env.Payload)
+	}
+	if len(inventory.Entries) != 1 || inventory.Entries[0].Slug != "pushed-skill" {
+		t.Fatalf("unexpected inventory payload: %+v", inventory)
+	}
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer secondCancel()
+	if _, err := d.client.DrainQueuedForTest(secondCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected one batched inventory publication, got %v", err)
+	}
+}
+
 // mockManager implements SessionManager for testing.
 type mockManager struct {
 	stopAllFn func()
@@ -214,6 +426,13 @@ func relayClientStub(connected bool) *relay.Client {
 	})
 	c.SetConnectedForTest(connected)
 	return c
+}
+
+func drainQueuedMessage(t *testing.T, client *relay.Client) (*protocol.Envelope, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return client.DrainQueuedForTest(ctx)
 }
 
 type loopFakeRelay struct {
@@ -335,5 +554,74 @@ func TestHandleTaskIgnoresDuplicateTaskID(t *testing.T) {
 
 	if got := relaySink.countTaskCompletes("dup-task-1"); got != 1 {
 		t.Fatalf("expected duplicate task to be ignored, got %d TaskComplete frames", got)
+	}
+}
+
+func TestHandleTaskPublishesInventoryWhenProjectRootIsFirstSeen(t *testing.T) {
+	binPath := buildFakeClaudeBinary(t)
+	t.Setenv("FAKE_CLAUDE_SLEEP", "1")
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectRoot := t.TempDir()
+	skillDir := filepath.Join(projectRoot, ".claude", "skills", "project-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: project-skill\ndescription: Project\n---\n"), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	relaySink := newLoopFakeRelay()
+	actor, err := session.NewActor(session.Options{
+		SessionID:  "sess-project-root",
+		BinaryPath: binPath,
+		CWD:        projectRoot,
+		Relay:      relaySink,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	d := &Daemon{
+		cfg:     &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version: "test",
+		manager: &mockManager{
+			getFn: func(sessionID string) *session.Actor {
+				if sessionID == "sess-project-root" {
+					return actor
+				}
+				return nil
+			},
+		},
+		client: relayClientStub(false),
+	}
+
+	msg := &protocol.Task{
+		TaskID:    "task-project-root",
+		SessionID: "sess-project-root",
+		ChannelID: "ch-project-root",
+		CWD:       projectRoot,
+		Prompt:    "hello",
+	}
+	if err := d.handleTask(msg); err != nil {
+		t.Fatalf("handleTask: %v", err)
+	}
+
+	env, err := d.client.DrainQueuedForTest(context.Background())
+	if err != nil {
+		t.Fatalf("drain queued inventory: %v", err)
+	}
+	inventory, ok := env.Payload.(*protocol.SkillInventory)
+	if !ok {
+		t.Fatalf("expected skill inventory, got %T", env.Payload)
+	}
+	if len(inventory.Entries) != 1 || inventory.Entries[0].Slug != "project-skill" {
+		t.Fatalf("unexpected inventory payload: %+v", inventory.Entries)
 	}
 }
