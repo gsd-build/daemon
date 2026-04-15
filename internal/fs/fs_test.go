@@ -177,3 +177,78 @@ func TestMkDirRejectsPathOutsideScope(t *testing.T) {
 		t.Fatal("expected error for path outside scope")
 	}
 }
+
+func TestWriteManagedFileCreatesParentsWithinManagedRoot(t *testing.T) {
+	home := t.TempDir()
+	managedRoot := filepath.Join(home, ".claude", "skills")
+	target := filepath.Join(managedRoot, "managed-skill", "partials", "guide.md")
+
+	if err := WriteManagedFile(target, []string{managedRoot}, []byte("hello")); err != nil {
+		t.Fatalf("write managed file: %v", err)
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("unexpected content: %q", content)
+	}
+}
+
+func TestWriteManagedFileRejectsOutsideManagedRoots(t *testing.T) {
+	managedRoot := filepath.Join(t.TempDir(), ".claude", "skills")
+	projectRoot := t.TempDir()
+	target := filepath.Join(projectRoot, ".claude", "skills", "project-skill", "SKILL.md")
+
+	if err := WriteManagedFile(target, []string{managedRoot}, []byte("blocked")); err == nil {
+		t.Fatal("expected write outside managed roots to be rejected")
+	}
+}
+
+func TestWriteManagedFileRejectsInstalledSkillPath(t *testing.T) {
+	managedRoot := filepath.Join(t.TempDir(), ".claude", "skills")
+	target := filepath.Join(managedRoot, "gsd-help", "SKILL.md")
+
+	if err := WriteManagedFile(target, []string{managedRoot}, []byte("blocked")); err == nil {
+		t.Fatal("expected installed skill write to be rejected")
+	}
+}
+
+func TestRemoveManagedPathRemovesTreeWithinManagedRoot(t *testing.T) {
+	managedRoot := filepath.Join(t.TempDir(), ".codex", "skills")
+	targetDir := filepath.Join(managedRoot, "managed-skill")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "SKILL.md"), []byte("content"), 0o644); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+
+	if err := RemoveManagedPath(targetDir, []string{managedRoot}); err != nil {
+		t.Fatalf("remove managed path: %v", err)
+	}
+	if _, err := os.Stat(targetDir); !os.IsNotExist(err) {
+		t.Fatalf("expected target dir to be removed, stat err=%v", err)
+	}
+}
+
+func TestRemoveManagedPathRejectsInstalledSkillPath(t *testing.T) {
+	managedRoot := filepath.Join(t.TempDir(), ".claude", "skills")
+	targetDir := filepath.Join(managedRoot, "gsd-help")
+
+	if err := RemoveManagedPath(targetDir, []string{managedRoot}); err == nil {
+		t.Fatal("expected installed skill remove to be rejected")
+	}
+}
+
+func TestRemoveManagedPathRejectsManagedRootItself(t *testing.T) {
+	managedRoot := filepath.Join(t.TempDir(), ".claude", "skills")
+	if err := os.MkdirAll(managedRoot, 0o755); err != nil {
+		t.Fatalf("mkdir managed root: %v", err)
+	}
+
+	if err := RemoveManagedPath(managedRoot, []string{managedRoot}); err == nil {
+		t.Fatal("expected removing the managed root itself to be rejected")
+	}
+}

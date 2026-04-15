@@ -39,9 +39,10 @@ type ActiveTasksFunc func() []string
 // Client manages a WebSocket connection to the relay with automatic
 // reconnection, independent read/write pumps, and context-aware send.
 type Client struct {
-	cfg     Config
-	sender  // embedded — provides Send(ctx, msg)
-	handler MessageHandler
+	cfg       Config
+	sender    // embedded — provides Send(ctx, msg)
+	handler   MessageHandler
+	onConnect func(context.Context) error
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -61,6 +62,11 @@ func NewClient(cfg Config) *Client {
 // Must be called before Run.
 func (c *Client) SetHandler(h MessageHandler) {
 	c.handler = h
+}
+
+// SetOnConnect registers a hook that runs after each successful welcome.
+func (c *Client) SetOnConnect(fn func(context.Context) error) {
+	c.onConnect = fn
 }
 
 // Connect dials the relay, sends Hello, and waits for Welcome.
@@ -134,6 +140,18 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 		return err
 	}
 	c.connected.Store(true)
+	if c.onConnect != nil {
+		if err := c.onConnect(ctx); err != nil {
+			c.mu.Lock()
+			if c.conn != nil {
+				c.conn.CloseNow()
+				c.conn = nil
+			}
+			c.mu.Unlock()
+			c.connected.Store(false)
+			return fmt.Errorf("on connect: %w", err)
+		}
+	}
 
 	pumpCtx, pumpCancel := context.WithCancel(ctx)
 	defer pumpCancel()
@@ -237,4 +255,10 @@ func (c *Client) Connected() bool {
 // SetConnectedForTest forces connection state in tests.
 func (c *Client) SetConnectedForTest(connected bool) {
 	c.connected.Store(connected)
+}
+
+// DrainQueuedForTest returns the next queued outbound message without needing
+// an active websocket connection.
+func (c *Client) DrainQueuedForTest(ctx context.Context) (*protocol.Envelope, error) {
+	return c.sender.drainQueued(ctx)
 }

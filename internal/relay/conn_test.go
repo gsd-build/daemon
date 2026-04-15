@@ -201,3 +201,86 @@ func TestClientReconnectsAfterDisconnect(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestClientReconnectInvokesOnConnectHook(t *testing.T) {
+	var mu sync.Mutex
+	connectCount := 0
+	onConnectCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+
+		mu.Lock()
+		connectCount++
+		count := connectCount
+		mu.Unlock()
+
+		_, _, _ = c.Read(r.Context())
+
+		welcome := protocol.Welcome{Type: protocol.MsgTypeWelcome}
+		buf, _ := json.Marshal(welcome)
+		_ = c.Write(r.Context(), websocket.MessageText, buf)
+
+		if count == 1 {
+			c.Close(websocket.StatusGoingAway, "test disconnect")
+			return
+		}
+
+		_, _, _ = c.Read(r.Context())
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		URL:           "ws" + strings.TrimPrefix(server.URL, "http"),
+		AuthToken:     "secret",
+		MachineID:     "m-1",
+		DaemonVersion: "0.1.0",
+		OS:            "darwin",
+		Arch:          "arm64",
+	})
+	client.SetHandler(func(env *protocol.Envelope) error { return nil })
+	client.SetOnConnect(func(ctx context.Context) error {
+		mu.Lock()
+		onConnectCalls++
+		mu.Unlock()
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Run(ctx, nil)
+	}()
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		connected := connectCount
+		hooks := onConnectCalls
+		mu.Unlock()
+		if connected >= 2 && hooks >= 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	mu.Lock()
+	gotConnects := connectCount
+	gotHooks := onConnectCalls
+	mu.Unlock()
+	if gotConnects < 2 {
+		t.Fatalf("expected at least 2 connections, got %d", gotConnects)
+	}
+	if gotHooks < 2 {
+		t.Fatalf("expected on-connect hook twice, got %d", gotHooks)
+	}
+
+	cancel()
+	<-done
+}
