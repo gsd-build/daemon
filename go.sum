@@ -1,8 +1,10 @@
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
-github.com/gsd-build/protocol-go v0.8.0 h1:kglhLM+uIArqAPKeX5wFlykSAyHKf3gk8zFq3o+BO5U=
-github.com/gsd-build/protocol-go v0.8.0/go.mod h1:vECSwMFp59Ihu5ZH4aLF5fuW9zJ4a3ZXCYngmzfBn8s=
+github.com/gorhill/cronexpr v0.0.0-20180427100037-88b0669f7d75 h1:f0n1xnMSmBLzVfsMMvriDyA75NB/oBgILX2GcHXIQzY=
+github.com/gorhill/cronexpr v0.0.0-20180427100037-88b0669f7d75/go.mod h1:g2644b03hfBX9Ov0ZBDgXXens4rxSxmqFBbhvKv2yVA=
+github.com/gsd-build/protocol-go v0.9.0 h1:GHmQk4owyJifsZ7I/WmNcaBSvXBIU8f3EvRKpllKq4o=
+github.com/gsd-build/protocol-go v0.9.0/go.mod h1:vECSwMFp59Ihu5ZH4aLF5fuW9zJ4a3ZXCYngmzfBn8s=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=

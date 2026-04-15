@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/crons"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
@@ -130,6 +131,49 @@ func TestStatusUsesEffectiveConfiguredConcurrency(t *testing.T) {
 
 	if got := d.Status().MaxConcurrentTasks; got != 2 {
 		t.Fatalf("expected configured max concurrency 2, got %d", got)
+	}
+}
+
+func TestHandleSyncCronsWritesLocalStore(t *testing.T) {
+	store := crons.NewStore(t.TempDir())
+	d := &Daemon{
+		cfg:       &config.Config{MachineID: "machine-1", RelayURL: "wss://localhost/ws"},
+		client:    relayClientStub(false),
+		cronStore: store,
+	}
+
+	msg := &protocol.SyncCrons{
+		Type:      protocol.MsgTypeSyncCrons,
+		MachineID: "machine-1",
+		SentAt:    "2026-04-14T13:00:00.000Z",
+		Jobs: []protocol.CronSpec{
+			{
+				ID:             "cron-1",
+				Name:           "Nightly",
+				CronExpression: "0 3 * * *",
+				Prompt:         "run tests",
+				Mode:           "fresh",
+				Model:          "claude-opus-4-6[1m]",
+				Effort:         "max",
+				ProjectID:      "project-1",
+				Enabled:        true,
+			},
+		},
+	}
+
+	if err := d.handleSyncCrons(msg); err != nil {
+		t.Fatalf("handleSyncCrons: %v", err)
+	}
+
+	locals, err := store.List()
+	if err != nil {
+		t.Fatalf("store list: %v", err)
+	}
+	if len(locals) != 1 {
+		t.Fatalf("expected 1 local cron, got %d", len(locals))
+	}
+	if locals[0].Spec.ID != "cron-1" || locals[0].Spec.Name != "Nightly" {
+		t.Fatalf("unexpected local cron: %+v", locals[0].Spec)
 	}
 }
 
