@@ -97,6 +97,7 @@ type taskContext struct {
 	Model          string
 	Effort         string
 	PermissionMode string
+	SystemPrompt   string
 	RequestID      string
 	Traceparent    string
 	ImageURLs      []string
@@ -281,6 +282,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		Model:          task.Model,
 		Effort:         task.Effort,
 		PermissionMode: task.PermissionMode,
+		SystemPrompt:   task.PersonaSystemPrompt,
 		RequestID:      task.RequestID,
 		Traceparent:    task.Traceparent,
 		ImageURLs:      task.ImageURLs,
@@ -361,6 +363,10 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 	if permMode == "" {
 		permMode = a.opts.PermissionMode
 	}
+	systemPrompt := tc.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = a.opts.SystemPrompt
+	}
 
 	exec := claude.NewExecutor(claude.Options{
 		BinaryPath:     a.opts.BinaryPath,
@@ -368,20 +374,20 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		Model:          model,
 		Effort:         effort,
 		PermissionMode: permMode,
-		SystemPrompt:   a.opts.SystemPrompt,
+		SystemPrompt:   systemPrompt,
 		ResumeSession:  a.claudeSessionID,
 		AllowedTools:   a.allowedTools,
 		Prompt:         prompt,
 		ImageURLs:      tc.ImageURLs,
 	})
 
-		if a.pidDir != "" {
-			exec.OnPIDStart = func(pid int) {
-				path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
-				if err := pidfile.Write(path, pid); err != nil {
-					slog.Warn("write pid file failed", "taskId", tc.TaskID, "path", path, "err", err)
-				}
+	if a.pidDir != "" {
+		exec.OnPIDStart = func(pid int) {
+			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
+			if err := pidfile.Write(path, pid); err != nil {
+				slog.Warn("write pid file failed", "taskId", tc.TaskID, "path", path, "err", err)
 			}
+		}
 		exec.OnPIDExit = func(pid int) {
 			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
 			pidfile.Remove(path)

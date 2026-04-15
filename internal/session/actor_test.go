@@ -31,6 +31,19 @@ func buildFakeClaude(t *testing.T) string {
 	return binPath
 }
 
+func readArgsFile(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	var argv []string
+	if err := json.Unmarshal(data, &argv); err != nil {
+		t.Fatalf("unmarshal args file: %v", err)
+	}
+	return argv
+}
+
 type fakeRelay struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -335,6 +348,102 @@ func TestActorPropagatesRequestIDToLifecycleFrames(t *testing.T) {
 	}
 	if completed.RequestID != "11111111-2222-4333-8444-555555555555" {
 		t.Fatalf("taskComplete requestId = %q", completed.RequestID)
+	}
+}
+
+func TestActorUsesCurrentTaskSystemPromptPerTurn(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+	argsFile := filepath.Join(t.TempDir(), "argv.json")
+	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-system-prompt",
+		BinaryPath: binPath,
+		CWD:        t.TempDir(),
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:              "task-1",
+		SessionID:           "sess-system-prompt",
+		ChannelID:           "ch-1",
+		Prompt:              "hello",
+		PersonaSystemPrompt: "Always reply with quack.",
+	}); err != nil {
+		t.Fatalf("send first task: %v", err)
+	}
+
+	if !relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		count := 0
+		for _, f := range frames {
+			if _, ok := f.(*protocol.TaskComplete); ok {
+				count++
+			}
+		}
+		return count >= 1
+	}) {
+		t.Fatal("timed out waiting for first TaskComplete frame")
+	}
+
+	firstArgv := readArgsFile(t, argsFile)
+	firstHasPrompt := false
+	for i, arg := range firstArgv {
+		if arg == "--append-system-prompt" && i+1 < len(firstArgv) && firstArgv[i+1] == "Always reply with quack." {
+			firstHasPrompt = true
+			break
+		}
+	}
+	if !firstHasPrompt {
+		t.Fatalf("expected first task argv to include quack system prompt, got %v", firstArgv)
+	}
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:              "task-2",
+		SessionID:           "sess-system-prompt",
+		ChannelID:           "ch-1",
+		Prompt:              "hello again",
+		PersonaSystemPrompt: "Always reply with pineapple.",
+	}); err != nil {
+		t.Fatalf("send second task: %v", err)
+	}
+
+	if !relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		count := 0
+		for _, f := range frames {
+			if _, ok := f.(*protocol.TaskComplete); ok {
+				count++
+			}
+		}
+		return count >= 2
+	}) {
+		t.Fatal("timed out waiting for second TaskComplete frame")
+	}
+
+	secondArgv := readArgsFile(t, argsFile)
+	secondHasPineapple := false
+	secondHasQuack := false
+	for i, arg := range secondArgv {
+		if arg != "--append-system-prompt" || i+1 >= len(secondArgv) {
+			continue
+		}
+		switch secondArgv[i+1] {
+		case "Always reply with pineapple.":
+			secondHasPineapple = true
+		case "Always reply with quack.":
+			secondHasQuack = true
+		}
+	}
+	if !secondHasPineapple || secondHasQuack {
+		t.Fatalf("expected second task argv to switch to pineapple prompt only, got %v", secondArgv)
 	}
 }
 
