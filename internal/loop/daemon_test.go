@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"os/exec"
@@ -265,10 +266,7 @@ func TestHandleSkillPushWritesManagedSkillAndPublishesInventory(t *testing.T) {
 		t.Fatalf("unexpected pushed content: %q", written)
 	}
 
-	env, err := d.client.DrainQueuedForTest(context.Background())
-	if err != nil {
-		t.Fatalf("drain queued message: %v", err)
-	}
+	env, err := drainQueuedMessage(t, d.client)
 	inventory, ok := env.Payload.(*protocol.SkillInventory)
 	if !ok {
 		t.Fatalf("expected skill inventory, got %T", env.Payload)
@@ -314,16 +312,80 @@ func TestHandleSkillDeleteRemovesManagedSkillAndPublishesInventory(t *testing.T)
 		t.Fatalf("expected skill dir to be removed, stat err=%v", err)
 	}
 
-	env, err := d.client.DrainQueuedForTest(context.Background())
-	if err != nil {
-		t.Fatalf("drain queued message: %v", err)
-	}
+	env, err := drainQueuedMessage(t, d.client)
 	inventory, ok := env.Payload.(*protocol.SkillInventory)
 	if !ok {
 		t.Fatalf("expected skill inventory, got %T", env.Payload)
 	}
 	if len(inventory.Entries) != 0 {
 		t.Fatalf("expected empty inventory after delete, got %+v", inventory.Entries)
+	}
+}
+
+func TestHandleSkillPushBatchesInventoryPublicationAcrossSequentialFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedRoot := filepath.Join(home, ".codex", "skills")
+
+	d := &Daemon{
+		cfg:    &config.Config{MachineID: "machine-1", RelayURL: "wss://localhost/ws"},
+		client: relayClientStub(false),
+	}
+
+	first := &protocol.Envelope{
+		Type: protocol.MsgTypeSkillPush,
+		Payload: &protocol.SkillPush{
+			Type:         protocol.MsgTypeSkillPush,
+			MachineID:    "machine-1",
+			Slug:         "pushed-skill",
+			Root:         managedRoot,
+			RelativePath: "pushed-skill/SKILL.md",
+			Content:      "---\nname: pushed-skill\ndescription: Pushed\n---\n",
+		},
+	}
+	second := &protocol.Envelope{
+		Type: protocol.MsgTypeSkillPush,
+		Payload: &protocol.SkillPush{
+			Type:         protocol.MsgTypeSkillPush,
+			MachineID:    "machine-1",
+			Slug:         "pushed-skill",
+			Root:         managedRoot,
+			RelativePath: "pushed-skill/notes.md",
+			Content:      "notes",
+		},
+	}
+
+	if err := d.handleMessage(first); err != nil {
+		t.Fatalf("handle first skill push: %v", err)
+	}
+	if err := d.handleMessage(second); err != nil {
+		t.Fatalf("handle second skill push: %v", err)
+	}
+
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer shortCancel()
+	if _, err := d.client.DrainQueuedForTest(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected inventory publication to be deferred, got %v", err)
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	env, err := d.client.DrainQueuedForTest(waitCtx)
+	if err != nil {
+		t.Fatalf("drain batched inventory: %v", err)
+	}
+	inventory, ok := env.Payload.(*protocol.SkillInventory)
+	if !ok {
+		t.Fatalf("expected skill inventory, got %T", env.Payload)
+	}
+	if len(inventory.Entries) != 1 || inventory.Entries[0].Slug != "pushed-skill" {
+		t.Fatalf("unexpected inventory payload: %+v", inventory)
+	}
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer secondCancel()
+	if _, err := d.client.DrainQueuedForTest(secondCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected one batched inventory publication, got %v", err)
 	}
 }
 
@@ -364,6 +426,13 @@ func relayClientStub(connected bool) *relay.Client {
 	})
 	c.SetConnectedForTest(connected)
 	return c
+}
+
+func drainQueuedMessage(t *testing.T, client *relay.Client) (*protocol.Envelope, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return client.DrainQueuedForTest(ctx)
 }
 
 type loopFakeRelay struct {

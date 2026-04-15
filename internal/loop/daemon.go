@@ -52,6 +52,8 @@ type Daemon struct {
 	cronRuntime  *crons.Runtime
 	cronSchedule *crons.Scheduler
 	skillWatcher *skills.Watcher
+	skillPublishMu    sync.Mutex
+	skillPublishTimer *time.Timer
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -558,7 +560,8 @@ func (d *Daemon) handleSkillPush(msg *protocol.SkillPush) error {
 	if err := fs.WriteManagedFile(targetPath, managedRoots, []byte(msg.Content)); err != nil {
 		return err
 	}
-	return d.sendSkillInventory(context.Background())
+	d.scheduleSkillInventoryPublish()
+	return nil
 }
 
 func (d *Daemon) handleSkillDelete(msg *protocol.SkillDelete) error {
@@ -575,7 +578,23 @@ func (d *Daemon) handleSkillDelete(msg *protocol.SkillDelete) error {
 	if err := fs.RemoveManagedPath(targetPath, managedRoots); err != nil {
 		return err
 	}
-	return d.sendSkillInventory(context.Background())
+	d.scheduleSkillInventoryPublish()
+	return nil
+}
+
+func (d *Daemon) scheduleSkillInventoryPublish() {
+	d.skillPublishMu.Lock()
+	defer d.skillPublishMu.Unlock()
+	if d.skillPublishTimer != nil {
+		d.skillPublishTimer.Stop()
+	}
+	d.skillPublishTimer = time.AfterFunc(75*time.Millisecond, func() {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := d.sendSkillInventory(sendCtx); err != nil {
+			slog.Warn("skill inventory publish failed", "error", err)
+		}
+	})
 }
 
 func (d *Daemon) sendSkillInventory(ctx context.Context) error {
