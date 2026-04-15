@@ -120,6 +120,37 @@ func TestExecutorResumeFlag(t *testing.T) {
 	}
 }
 
+func TestExecutorAppendSystemPromptFlag(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	argsFile := filepath.Join(t.TempDir(), "argv.json")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const systemPrompt = "Always reply with quack."
+	e := NewExecutor(Options{
+		BinaryPath:   binPath,
+		CWD:          t.TempDir(),
+		SystemPrompt: systemPrompt,
+		Prompt:       "test prompt",
+		Env:          []string{"FAKE_CLAUDE_ARGS_FILE=" + argsFile},
+	})
+
+	_ = e.Run(ctx, func(_ Event) error { return nil })
+
+	argv := readArgsFile(t, argsFile)
+	found := false
+	for i, arg := range argv {
+		if arg == "--append-system-prompt" && i+1 < len(argv) && argv[i+1] == systemPrompt {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected --append-system-prompt %q in argv, got: %v", systemPrompt, argv)
+	}
+}
+
 func TestExecutorNoResumeFlag(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	argsFile := filepath.Join(t.TempDir(), "argv.json")
