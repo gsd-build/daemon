@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -44,21 +45,21 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg          *config.Config
-	version      string
-	manager      SessionManager
-	client       *relay.Client
-	startedAt    time.Time
-	channelRoots sync.Map
-	cronStore    *crons.Store
-	cronRuntime  *crons.Runtime
-	cronSchedule *crons.Scheduler
-	skillWatcher *skills.Watcher
+	cfg               *config.Config
+	version           string
+	manager           SessionManager
+	client            *relay.Client
+	startedAt         time.Time
+	channelRoots      sync.Map
+	cronStore         *crons.Store
+	cronRuntime       *crons.Runtime
+	cronSchedule      *crons.Scheduler
+	skillWatcher      *skills.Watcher
 	skillPublishMu    sync.Mutex
 	skillPublishTimer *time.Timer
-	binaryPath   string
-	workflowMu   sync.Mutex
-	workflows    map[string]*workflow.Executor
+	binaryPath        string
+	workflowMu        sync.Mutex
+	workflows         map[string]*workflow.Executor
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -121,14 +122,14 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	cronStore := crons.NewStore(cronDir)
 
 	d := &Daemon{
-		cfg:       cfg,
-		version:   version,
-		manager:   manager,
-		client:    client,
-		startedAt: time.Now(),
-		cronStore: cronStore,
+		cfg:        cfg,
+		version:    version,
+		manager:    manager,
+		client:     client,
+		startedAt:  time.Now(),
+		cronStore:  cronStore,
 		binaryPath: binaryPath,
-		workflows: make(map[string]*workflow.Executor),
+		workflows:  make(map[string]*workflow.Executor),
 	}
 	d.cronRuntime = crons.NewRuntime(
 		cfg.MachineID,
