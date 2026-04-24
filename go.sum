@@ -5,6 +5,8 @@ github.com/gorhill/cronexpr v0.0.0-20180427100037-88b0669f7d75 h1:f0n1xnMSmBLzVf
 github.com/gorhill/cronexpr v0.0.0-20180427100037-88b0669f7d75/go.mod h1:g2644b03hfBX9Ov0ZBDgXXens4rxSxmqFBbhvKv2yVA=
 github.com/gsd-build/protocol-go v0.12.0 h1:+8zqZhYg+T6fblhFooLe2cpijxRoU3c4Q5DAVFRlLjA=
 github.com/gsd-build/protocol-go v0.12.0/go.mod h1:vECSwMFp59Ihu5ZH4aLF5fuW9zJ4a3ZXCYngmzfBn8s=
+github.com/gsd-build/protocol-go v0.12.1-0.20260424173639-72091caad785 h1:mcD1+iqAje9TKp7B1SokMO+45dvqM4+7fKZ25RfytA0=
+github.com/gsd-build/protocol-go v0.12.1-0.20260424173639-72091caad785/go.mod h1:vECSwMFp59Ihu5ZH4aLF5fuW9zJ4a3ZXCYngmzfBn8s=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
