@@ -22,7 +22,7 @@ const (
 	keepaliveMaxFailures  = 2
 )
 
-// Config is immutable per-client settings.
+// Config contains the per-client connection settings.
 type Config struct {
 	URL           string
 	AuthToken     string
@@ -69,16 +69,32 @@ func (c *Client) SetOnConnect(fn func(context.Context) error) {
 	c.onConnect = fn
 }
 
+// SetAuthToken updates the bearer token used for future relay connections.
+func (c *Client) SetAuthToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.AuthToken = token
+}
+
 // Connect dials the relay, sends Hello, and waits for Welcome.
 // activeTasks is the list of task IDs to include in the Hello (may be nil).
 func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.Welcome, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+c.cfg.AuthToken)
+	c.mu.Lock()
+	authToken := c.cfg.AuthToken
+	url := c.cfg.URL
+	machineID := c.cfg.MachineID
+	daemonVersion := c.cfg.DaemonVersion
+	osName := c.cfg.OS
+	arch := c.cfg.Arch
+	c.mu.Unlock()
 
-	conn, _, err := websocket.Dial(dialCtx, c.cfg.URL, &websocket.DialOptions{
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+authToken)
+
+	conn, _, err := websocket.Dial(dialCtx, url, &websocket.DialOptions{
 		HTTPHeader: header,
 	})
 	if err != nil {
@@ -89,10 +105,10 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 	// Send Hello
 	hello := protocol.Hello{
 		Type:          protocol.MsgTypeHello,
-		MachineID:     c.cfg.MachineID,
-		DaemonVersion: c.cfg.DaemonVersion,
-		OS:            c.cfg.OS,
-		Arch:          c.cfg.Arch,
+		MachineID:     machineID,
+		DaemonVersion: daemonVersion,
+		OS:            osName,
+		Arch:          arch,
 		ActiveTasks:   activeTasks,
 	}
 	buf, err := json.Marshal(hello)
