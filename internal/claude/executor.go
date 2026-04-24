@@ -27,7 +27,6 @@ type Options struct {
 	Model          string
 	Effort         string
 	PermissionMode string
-	SystemPrompt   string
 	ResumeSession  string   // claude session id to resume; empty = new session
 	AllowedTools   []string // tools to pass via --allowedTools
 	Env            []string // extra environment variables; nil = inherit
@@ -96,9 +95,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(Event) error) error {
 	}
 	if e.opts.PermissionMode != "" {
 		args = append(args, "--permission-mode", e.opts.PermissionMode)
-	}
-	if e.opts.SystemPrompt != "" {
-		args = append(args, "--append-system-prompt", e.opts.SystemPrompt)
 	}
 	if e.opts.ResumeSession != "" {
 		args = append(args, "--resume", e.opts.ResumeSession)

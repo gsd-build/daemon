@@ -352,7 +352,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			Model:          msg.Model,
 			Effort:         msg.Effort,
 			PermissionMode: msg.PermissionMode,
-			SystemPrompt:   msg.PersonaSystemPrompt,
 			ResumeSession:  msg.ClaudeSessionID,
 		})
 		if err != nil {
