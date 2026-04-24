@@ -42,18 +42,19 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg          *config.Config
-	version      string
-	manager      SessionManager
-	client       *relay.Client
-	startedAt    time.Time
-	channelRoots sync.Map
-	cronStore    *crons.Store
-	cronRuntime  *crons.Runtime
-	cronSchedule *crons.Scheduler
-	skillWatcher *skills.Watcher
+	cfg               *config.Config
+	version           string
+	manager           SessionManager
+	client            *relay.Client
+	startedAt         time.Time
+	channelRoots      sync.Map
+	cronStore         *crons.Store
+	cronRuntime       *crons.Runtime
+	cronSchedule      *crons.Scheduler
+	skillWatcher      *skills.Watcher
 	skillPublishMu    sync.Mutex
 	skillPublishTimer *time.Timer
+	uploader          *upload.Client
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -122,6 +123,7 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		client:    client,
 		startedAt: time.Now(),
 		cronStore: cronStore,
+		uploader:  uploader,
 	}
 	d.cronRuntime = crons.NewRuntime(
 		cfg.MachineID,
@@ -169,6 +171,12 @@ func (d *Daemon) checkAndRefreshToken() {
 
 	d.cfg.AuthToken = resp.AuthToken
 	d.cfg.TokenExpiresAt = resp.TokenExpiresAt
+	if d.client != nil {
+		d.client.SetAuthToken(resp.AuthToken)
+	}
+	if d.uploader != nil {
+		d.uploader.SetAuthToken(resp.AuthToken)
+	}
 	if err := config.Save(d.cfg); err != nil {
 		slog.Warn("failed to save refreshed config", "error", err)
 		return

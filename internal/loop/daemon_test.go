@@ -3,15 +3,20 @@ package loop
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/crons"
 	"github.com/gsd-build/daemon/internal/relay"
@@ -133,6 +138,94 @@ func TestStatusUsesEffectiveConfiguredConcurrency(t *testing.T) {
 
 	if got := d.Status().MaxConcurrentTasks; got != 2 {
 		t.Fatalf("expected configured max concurrency 2, got %d", got)
+	}
+}
+
+func TestCheckAndRefreshTokenUpdatesLiveClients(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const (
+		oldToken  = "old-token"
+		newToken  = "new-token"
+		machineID = "machine-123"
+	)
+
+	var wsAuthHeader string
+	var uploadAuthHeader string
+	var uploadMachineID string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/daemon/refresh-token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"authToken":%q,"tokenExpiresAt":"2099-01-01T00:00:00Z"}`, newToken)))
+		case "/ws/daemon":
+			wsAuthHeader = r.Header.Get("Authorization")
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("accept websocket: %v", err)
+				return
+			}
+			defer conn.CloseNow()
+
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Errorf("read hello: %v", err)
+				return
+			}
+
+			buf := []byte(`{"type":"welcome"}`)
+			if err := conn.Write(r.Context(), websocket.MessageText, buf); err != nil {
+				t.Errorf("write welcome: %v", err)
+			}
+		case "/internal/upload":
+			uploadAuthHeader = r.Header.Get("Authorization")
+			uploadMachineID = r.Header.Get("X-Machine-Id")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"url":"https://example.invalid/uploaded.png"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	relayURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/daemon"
+	cfg := &config.Config{
+		MachineID:      machineID,
+		AuthToken:      oldToken,
+		TokenExpiresAt: time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339),
+		ServerURL:      server.URL,
+		RelayURL:       relayURL,
+	}
+
+	d, err := NewWithBinaryPath(cfg, "test-version", "claude")
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+
+	d.checkAndRefreshToken()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := d.client.Connect(ctx, nil); err != nil {
+		t.Fatalf("connect after refresh: %v", err)
+	}
+	if wsAuthHeader != "Bearer "+newToken {
+		t.Fatalf("expected websocket auth header %q, got %q", "Bearer "+newToken, wsAuthHeader)
+	}
+
+	if _, err := d.uploader.Upload(ctx, "screenshot.png", []byte("img")); err != nil {
+		t.Fatalf("upload after refresh: %v", err)
+	}
+	if uploadAuthHeader != "Bearer "+newToken {
+		t.Fatalf("expected upload auth header %q, got %q", "Bearer "+newToken, uploadAuthHeader)
+	}
+	if uploadMachineID != machineID {
+		t.Fatalf("expected upload machine id %q, got %q", machineID, uploadMachineID)
+	}
+	if d.cfg.AuthToken != newToken {
+		t.Fatalf("expected daemon config token %q, got %q", newToken, d.cfg.AuthToken)
 	}
 }
 

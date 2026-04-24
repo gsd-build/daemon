@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,7 @@ func IsImageFile(path string) bool {
 
 // Client uploads images to the relay HTTP endpoint.
 type Client struct {
+	mu         sync.RWMutex
 	baseURL    string // e.g. "https://relay.gsd.build"
 	machineID  string
 	authToken  string
@@ -52,6 +54,13 @@ func NewClient(relayWSURL, machineID, authToken string) *Client {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// SetAuthToken updates the bearer token used for future upload requests.
+func (c *Client) SetAuthToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authToken = token
 }
 
 // Upload sends the image data to the relay and returns the public URL.
@@ -74,8 +83,11 @@ func (c *Client) Upload(ctx context.Context, filename string, data []byte) (stri
 	if err != nil {
 		return "", fmt.Errorf("new request: %w", err)
 	}
+	c.mu.RLock()
+	authToken := c.authToken
+	c.mu.RUnlock()
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+c.authToken)
+	req.Header.Set("Authorization", "Bearer "+authToken)
 	req.Header.Set("X-Machine-Id", c.machineID)
 
 	resp, err := c.httpClient.Do(req)
