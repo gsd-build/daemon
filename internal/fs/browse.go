@@ -13,7 +13,14 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
-// BrowseDir lists entries in the given absolute path.
+// BrowseDir lists directory entries under the given absolute path after validating it against the provided scope root.
+// 
+// It resolves the scope root and the target path, verifies the target is allowed, and reads the directory contents.
+// For each entry it builds a child path, verifies that child path is within the allowed scope, obtains file metadata,
+// and collects a protocol.BrowseEntry containing the entry name, child path, whether it is a directory, size, and modification time (UTC, RFC3339Nano).
+// Entries that fail per-entry permission checks or metadata retrieval are silently skipped.
+// The returned slice is sorted with directories before non-directories and by name ascending.
+// If scope or path resolution or the initial permission check fails the call returns an error; a directory read error is wrapped with "read dir:".
 func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
 	if err != nil {
