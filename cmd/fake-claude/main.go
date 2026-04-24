@@ -126,12 +126,7 @@ func main() {
 			break
 		}
 	}
-	prompt := ""
-	if len(os.Args) > 1 {
-		prompt = os.Args[len(os.Args)-1]
-	}
-	hasAnswers := strings.HasPrefix(prompt, "My answers:")
-	if qCountStr := os.Getenv("FAKE_CLAUDE_QUESTIONS"); qCountStr != "" && !hasResume && !hasAnswers {
+	if qCountStr := os.Getenv("FAKE_CLAUDE_QUESTIONS"); qCountStr != "" && !hasResume {
 		qCount, _ := strconv.Atoi(qCountStr)
 		var denials []map[string]any
 		for i := 0; i < qCount; i++ {

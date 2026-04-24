@@ -5,12 +5,10 @@ package loop
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -27,7 +25,6 @@ import (
 	"github.com/gsd-build/daemon/internal/skills"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	"github.com/gsd-build/daemon/internal/upload"
-	"github.com/gsd-build/daemon/internal/workflow"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -45,21 +42,18 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg               *config.Config
-	version           string
-	manager           SessionManager
-	client            *relay.Client
-	startedAt         time.Time
-	channelRoots      sync.Map
-	cronStore         *crons.Store
-	cronRuntime       *crons.Runtime
-	cronSchedule      *crons.Scheduler
-	skillWatcher      *skills.Watcher
+	cfg          *config.Config
+	version      string
+	manager      SessionManager
+	client       *relay.Client
+	startedAt    time.Time
+	channelRoots sync.Map
+	cronStore    *crons.Store
+	cronRuntime  *crons.Runtime
+	cronSchedule *crons.Scheduler
+	skillWatcher *skills.Watcher
 	skillPublishMu    sync.Mutex
 	skillPublishTimer *time.Timer
-	binaryPath        string
-	workflowMu        sync.Mutex
-	workflows         map[string]*workflow.Executor
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -122,14 +116,12 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	cronStore := crons.NewStore(cronDir)
 
 	d := &Daemon{
-		cfg:        cfg,
-		version:    version,
-		manager:    manager,
-		client:     client,
-		startedAt:  time.Now(),
-		cronStore:  cronStore,
-		binaryPath: binaryPath,
-		workflows:  make(map[string]*workflow.Executor),
+		cfg:       cfg,
+		version:   version,
+		manager:   manager,
+		client:    client,
+		startedAt: time.Now(),
+		cronStore: cronStore,
 	}
 	d.cronRuntime = crons.NewRuntime(
 		cfg.MachineID,
@@ -319,134 +311,9 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleSkillPush(msg)
 	case *protocol.SkillDelete:
 		return d.handleSkillDelete(msg)
-	case *protocol.WorkflowRun:
-		return d.handleWorkflowRun(msg)
-	case *protocol.WorkflowStop:
-		return d.handleWorkflowStop(msg)
-	case *protocol.WorkflowDesignChat:
-		return d.handleWorkflowDesignChat(msg)
 	default:
 		// Ignore other types
 		return nil
-	}
-}
-
-func (d *Daemon) claudeBinary() string {
-	return d.binaryPath
-}
-
-func (d *Daemon) handleWorkflowRun(msg *protocol.WorkflowRun) error {
-	def, err := workflow.ParseDefinition(msg.Definition)
-	if err != nil {
-		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		return d.client.Send(sendCtx, &protocol.WorkflowError{
-			Type:          protocol.MsgTypeWorkflowError,
-			WorkflowRunID: msg.WorkflowRunID,
-			ChannelID:     msg.ChannelID,
-			Error:         fmt.Sprintf("invalid workflow definition: %v", err),
-		})
-	}
-
-	cwd := msg.CWD
-	if def.WorkingDir != "" {
-		cwd = def.WorkingDir
-	}
-	if msg.ChannelID != "" && cwd != "" {
-		d.channelRoots.Store(msg.ChannelID, cwd)
-		d.addProjectRootsToSkillWatcher(cwd)
-	}
-
-	exec := workflow.NewExecutor(def, cwd, msg.ChannelID, msg.WorkflowRunID, d.client, d.claudeBinary())
-
-	d.workflowMu.Lock()
-	d.workflows[msg.WorkflowRunID] = exec
-	d.workflowMu.Unlock()
-
-	go func() {
-		exec.Run(context.Background())
-		d.workflowMu.Lock()
-		delete(d.workflows, msg.WorkflowRunID)
-		d.workflowMu.Unlock()
-	}()
-
-	return nil
-}
-
-func (d *Daemon) handleWorkflowStop(msg *protocol.WorkflowStop) error {
-	d.workflowMu.Lock()
-	exec, ok := d.workflows[msg.WorkflowRunID]
-	d.workflowMu.Unlock()
-	if ok {
-		exec.Stop()
-	}
-	return nil
-}
-
-func (d *Daemon) handleWorkflowDesignChat(msg *protocol.WorkflowDesignChat) error {
-	go d.runDesignChat(msg)
-	return nil
-}
-
-func (d *Daemon) runDesignChat(msg *protocol.WorkflowDesignChat) {
-	ctx := context.Background()
-	systemPrompt := `You are a workflow design assistant. The user will describe changes to a workflow graph.
-You must respond with a JSON array of patch operations that modify the workflow definition.
-Each patch follows JSON Patch (RFC 6902) format: {"op": "add|remove|replace", "path": "...", "value": ...}
-The workflow structure has "nodes" (array) and "edges" (array). Respond ONLY with the JSON patch array.`
-
-	prompt := fmt.Sprintf("Current workflow:\n%s\n\nUser request: %s", string(msg.Definition), msg.UserText)
-
-	args := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--model", "sonnet",
-		"--append-system-prompt", systemPrompt,
-		"--", prompt,
-	}
-
-	cmd := exec.CommandContext(ctx, d.claudeBinary(), args...)
-	cmd.Dir = msg.CWD
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		slog.Error("workflow design chat: stdout pipe", "err", err)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		slog.Error("workflow design chat: start", "err", err)
-		return
-	}
-
-	scanner := workflow.NewNDJSONScanner(stdout)
-	for scanner.Scan() {
-		event := scanner.Event()
-		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if err := d.client.Send(sendCtx, &protocol.WorkflowDesignChatStream{
-			Type:       protocol.MsgTypeWorkflowDesignChatStream,
-			WorkflowID: msg.WorkflowID,
-			ChannelID:  msg.ChannelID,
-			Event:      event.Raw,
-		}); err != nil {
-			slog.Warn("workflow design chat: stream send failed", "err", err)
-		}
-		cancel()
-	}
-
-	if err := cmd.Wait(); err != nil {
-		slog.Warn("workflow design chat: claude exited", "err", err)
-	}
-
-	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := d.client.Send(sendCtx, &protocol.WorkflowDesignChatComplete{
-		Type:       protocol.MsgTypeWorkflowDesignChatComplete,
-		WorkflowID: msg.WorkflowID,
-		ChannelID:  msg.ChannelID,
-		Patches:    json.RawMessage(`[]`),
-	}); err != nil {
-		slog.Warn("workflow design chat: complete send failed", "err", err)
 	}
 }
 
