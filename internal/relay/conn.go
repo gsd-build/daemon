@@ -17,11 +17,6 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
-const (
-	keepalivePingInterval = 10 * time.Second
-	keepaliveMaxFailures  = 2
-)
-
 // Config contains the per-client connection settings.
 type Config struct {
 	URL           string
@@ -172,15 +167,16 @@ func (c *Client) RunOnce(ctx context.Context, activeTasks []string) error {
 	pumpCtx, pumpCancel := context.WithCancel(ctx)
 	defer pumpCancel()
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
 
+	// The relay owns daemon keepalives so delayed control frames do not turn
+	// into client-side false disconnects.
 	go readPump(pumpCtx, conn, c.handler, errCh)
 	go writePump(pumpCtx, conn, c.sendCh, errCh)
-	go pingManager(pumpCtx, conn, keepalivePingInterval, keepaliveMaxFailures, errCh)
 
 	slog.Info("relay connected, pumps started")
 
