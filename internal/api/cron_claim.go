@@ -19,16 +19,15 @@ type ClaimCronRunRequest struct {
 
 // ClaimCronTask is the dispatchable task payload returned by the cloud.
 type ClaimCronTask struct {
-	TaskID              string `json:"taskId"`
-	SessionID           string `json:"sessionId"`
-	ChannelID           string `json:"channelId"`
-	Prompt              string `json:"prompt"`
-	Model               string `json:"model"`
-	Effort              string `json:"effort"`
-	PermissionMode      string `json:"permissionMode"`
-	CWD                 string `json:"cwd"`
-	PersonaSystemPrompt string `json:"personaSystemPrompt"`
-	ClaudeSessionID     string `json:"claudeSessionId,omitempty"`
+	TaskID          string `json:"taskId"`
+	SessionID       string `json:"sessionId"`
+	ChannelID       string `json:"channelId"`
+	Prompt          string `json:"prompt"`
+	Model           string `json:"model"`
+	Effort          string `json:"effort"`
+	PermissionMode  string `json:"permissionMode"`
+	CWD             string `json:"cwd"`
+	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
 }
 
 // ClaimCronRunResponse is the successful claim response from the cloud.

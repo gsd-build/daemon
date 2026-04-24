@@ -28,16 +28,15 @@ func TestClaimCronRunSuccess(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"cronRunId": "run-1",
 			"task": map[string]any{
-				"taskId":              "task-1",
-				"sessionId":           "session-1",
-				"channelId":           "cron-cron-1-123",
-				"prompt":              "run it",
-				"model":               "claude-opus-4-6[1m]",
-				"effort":              "max",
-				"permissionMode":      "acceptEdits",
-				"cwd":                 "/tmp/project",
-				"personaSystemPrompt": "Stay concise.",
-				"claudeSessionId":     "claude-session-1",
+				"taskId":          "task-1",
+				"sessionId":       "session-1",
+				"channelId":       "cron-cron-1-123",
+				"prompt":          "run it",
+				"model":           "claude-opus-4-6[1m]",
+				"effort":          "max",
+				"permissionMode":  "acceptEdits",
+				"cwd":             "/tmp/project",
+				"claudeSessionId": "claude-session-1",
 			},
 		})
 	}))

@@ -70,17 +70,16 @@ func (r *Runtime) HandleDue(spec protocol.CronSpec, scheduledFor time.Time) erro
 	}
 
 	task := &protocol.Task{
-		Type:                protocol.MsgTypeTask,
-		TaskID:              claimed.Task.TaskID,
-		SessionID:           claimed.Task.SessionID,
-		ChannelID:           claimed.Task.ChannelID,
-		Prompt:              claimed.Task.Prompt,
-		Model:               claimed.Task.Model,
-		Effort:              claimed.Task.Effort,
-		PermissionMode:      claimed.Task.PermissionMode,
-		PersonaSystemPrompt: claimed.Task.PersonaSystemPrompt,
-		CWD:                 claimed.Task.CWD,
-		ClaudeSessionID:     claimed.Task.ClaudeSessionID,
+		Type:            protocol.MsgTypeTask,
+		TaskID:          claimed.Task.TaskID,
+		SessionID:       claimed.Task.SessionID,
+		ChannelID:       claimed.Task.ChannelID,
+		Prompt:          claimed.Task.Prompt,
+		Model:           claimed.Task.Model,
+		Effort:          claimed.Task.Effort,
+		PermissionMode:  claimed.Task.PermissionMode,
+		CWD:             claimed.Task.CWD,
+		ClaudeSessionID: claimed.Task.ClaudeSessionID,
 	}
 
 	if err := r.dispatch(task); err != nil {
