@@ -34,20 +34,17 @@ func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 
 	result := make([]protocol.BrowseEntry, 0, len(entries))
 	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
+		childPath := filepath.Clean(filepath.Join(resolved, e.Name()))
+		if err := ensurePathAllowed(childPath, resolvedRoot); err != nil {
 			continue
 		}
-		childResolved, err := resolveExistingPath(filepath.Join(resolved, e.Name()))
+		info, err := os.Lstat(childPath)
 		if err != nil {
-			continue
-		}
-		if err := ensurePathAllowed(childResolved, resolvedRoot); err != nil {
 			continue
 		}
 		result = append(result, protocol.BrowseEntry{
 			Name:        e.Name(),
-			Path:        childResolved,
+			Path:        childPath,
 			IsDirectory: e.IsDir(),
 			Size:        info.Size(),
 			ModifiedAt:  info.ModTime().UTC().Format(time.RFC3339Nano),

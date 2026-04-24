@@ -69,6 +69,38 @@ func TestBrowseDirFiltersSensitiveEntriesFromHomeScope(t *testing.T) {
 	}
 }
 
+func TestBrowseDirDoesNotResolveChildSymlinks(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "missing")
+	link := filepath.Join(root, "stalled-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("cannot create symlinks on this OS")
+	}
+
+	entries, err := BrowseDir(root, root)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	resolvedRoot, err := resolveExistingPath(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Name != "stalled-link" {
+		t.Fatalf("expected symlink entry, got %q", entries[0].Name)
+	}
+	expectedPath := filepath.Join(resolvedRoot, "stalled-link")
+	if entries[0].Path != expectedPath {
+		t.Fatalf("expected symlink path %q, got %q", expectedPath, entries[0].Path)
+	}
+	if entries[0].IsDirectory {
+		t.Fatal("expected symlink entry to remain non-directory")
+	}
+}
+
 func TestReadFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hello.txt")
