@@ -19,5 +19,12 @@ func TaskAttrs(task *protocol.Task) []any {
 	if task.Traceparent != "" {
 		attrs = append(attrs, slog.String("traceId", protocol.TraceID(task.Traceparent)))
 	}
+	if task.Origin != nil {
+		attrs = append(attrs,
+			slog.String("taskOrigin", task.Origin.Kind),
+			slog.String("scheduledTaskId", task.Origin.ScheduledTaskID),
+			slog.String("scheduledRunId", task.Origin.RunID),
+		)
+	}
 	return attrs
 }

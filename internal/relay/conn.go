@@ -105,6 +105,10 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 		OS:            osName,
 		Arch:          arch,
 		ActiveTasks:   activeTasks,
+		Capabilities: &protocol.HelloCapabilities{
+			TaskOrigin: true,
+			Stop:       true,
+		},
 	}
 	buf, err := json.Marshal(hello)
 	if err != nil {

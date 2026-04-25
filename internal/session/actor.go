@@ -292,6 +292,13 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	if task.Traceparent != "" {
 		logAttrs = append(logAttrs, "traceId", protocol.TraceID(task.Traceparent))
 	}
+	if task.Origin != nil {
+		logAttrs = append(logAttrs,
+			"taskOrigin", task.Origin.Kind,
+			"scheduledTaskId", task.Origin.ScheduledTaskID,
+			"scheduledRunId", task.Origin.RunID,
+		)
+	}
 	slog.Info("task received", logAttrs...)
 	slog.Debug("task prompt", "task", task.TaskID, "prompt", truncate(task.Prompt, 200))
 

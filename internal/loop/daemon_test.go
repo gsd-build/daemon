@@ -139,6 +139,18 @@ func TestStatusUsesEffectiveConfiguredConcurrency(t *testing.T) {
 	}
 }
 
+func TestLocalCronSchedulingEnabled(t *testing.T) {
+	t.Setenv("GSD_DAEMON_LOCAL_CRON_SCHEDULER", "")
+	if localCronSchedulingEnabled() {
+		t.Fatal("expected local cron scheduler disabled by default")
+	}
+
+	t.Setenv("GSD_DAEMON_LOCAL_CRON_SCHEDULER", "1")
+	if !localCronSchedulingEnabled() {
+		t.Fatal("expected local cron scheduler enabled when explicitly requested")
+	}
+}
+
 func TestCheckAndRefreshTokenUpdatesLiveClients(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
