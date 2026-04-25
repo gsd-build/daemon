@@ -245,7 +245,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.runTokenRefreshCheck(ctx)
 	go d.runHeartbeat(ctx)
-	if d.cronSchedule != nil {
+	if d.cronSchedule != nil && localCronSchedulingEnabled() {
 		go d.cronSchedule.Run(ctx)
 	}
 	d.manager.StartReaper(ctx, 5*time.Minute, 30*time.Minute)
@@ -258,6 +258,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
 	return err
+}
+
+func localCronSchedulingEnabled() bool {
+	return os.Getenv("GSD_DAEMON_LOCAL_CRON_SCHEDULER") == "1"
 }
 
 // getActiveTasks returns the list of currently executing task IDs.
