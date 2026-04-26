@@ -88,6 +88,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pi smoke failed: %v\n", err)
 		os.Exit(1)
 	}
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Fprintf(os.Stderr, "pi smoke timed out after %s\n", timeoutFlag.String())
+		os.Exit(4)
+	}
 }
 
 func printEvent(sequence int, event claude.Event) {
