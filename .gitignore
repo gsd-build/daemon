@@ -2,3 +2,5 @@
 .DS_Store
 gsd-cloud
 fake-claude
+tests/spike-compaction/output/
+tests/spike-compaction/stress-output/
