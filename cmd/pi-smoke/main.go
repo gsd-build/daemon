@@ -1,10 +1,7 @@
-// pi-smoke: standalone smoke test for the pi-engine path.
+// pi-smoke runs the pi executor without session actor wiring.
 //
-// Spawns a session.Actor with a recording relay, dispatches one
-// protocol.Task{Engine:"pi"} that asks ask_human, simulates the human
-// answer, and prints every relay frame the daemon would send to the
-// browser. Validates the full daemon to pi to translator to relay to reducer
-// pipeline outside the test framework so you can eyeball the output.
+// It starts internal/pi.NewExecutor directly, answers ask_human requests with
+// a flag value, and prints the Claude-shaped events emitted by the translator.
 //
 // Usage:
 //
@@ -21,90 +18,151 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/gsd-build/daemon/internal/session"
-	protocol "github.com/gsd-build/protocol-go"
+	"github.com/gsd-build/daemon/internal/claude"
+	"github.com/gsd-build/daemon/internal/pi"
 )
 
-type printRelay struct {
-	mu     sync.Mutex
-	frames []any
-}
+func main() {
+	answerFlag := flag.String("answer", "blue", "answer to send to ask_human")
+	binaryFlag := flag.String("pi", "pi", "path to the pi binary")
+	modelFlag := flag.String("model", "claude-sonnet-4-6", "model id passed to pi")
+	providerFlag := flag.String("provider", "claude-cli", "pi provider name")
+	timeoutFlag := flag.Duration("timeout", 90*time.Second, "smoke run timeout")
+	flag.Parse()
 
-func (r *printRelay) Send(_ context.Context, msg any) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.frames = append(r.frames, msg)
-	r.printFrame(msg)
-	return nil
-}
-func (r *printRelay) GetFrames() []any {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]any, len(r.frames))
-	copy(out, r.frames)
-	return out
-}
-
-func (r *printRelay) printFrame(msg any) {
-	switch f := msg.(type) {
-	case *protocol.TaskStarted:
-		fmt.Printf("-> TaskStarted task=%s\n", f.TaskID)
-	case *protocol.Stream:
-		var inner struct {
-			Type    string          `json:"type"`
-			Subtype string          `json:"subtype"`
-			Event   json.RawMessage `json:"event"`
-		}
-		_ = json.Unmarshal(f.Event, &inner)
-		switch inner.Type {
-		case "system":
-			fmt.Printf("  [%4d] system{%s}\n", f.SequenceNumber, inner.Subtype)
-		case "stream_event":
-			var ev struct {
-				Type         string `json:"type"`
-				ContentBlock struct {
-					Type string `json:"type"`
-					Name string `json:"name"`
-				} `json:"content_block"`
-				Delta struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"delta"`
-			}
-			_ = json.Unmarshal(inner.Event, &ev)
-			switch ev.Type {
-			case "content_block_start":
-				fmt.Printf("  [%4d] stream_event{content_block_start type=%s name=%q}\n", f.SequenceNumber, ev.ContentBlock.Type, ev.ContentBlock.Name)
-			case "content_block_delta":
-				if ev.Delta.Type == "text_delta" {
-					fmt.Printf("  [%4d] stream_event{text_delta %q}\n", f.SequenceNumber, truncate(ev.Delta.Text, 60))
-				} else {
-					fmt.Printf("  [%4d] stream_event{%s}\n", f.SequenceNumber, ev.Delta.Type)
-				}
-			case "content_block_stop":
-				fmt.Printf("  [%4d] stream_event{content_block_stop}\n", f.SequenceNumber)
-			default:
-				fmt.Printf("  [%4d] stream_event{%s}\n", f.SequenceNumber, ev.Type)
-			}
-		case "user":
-			fmt.Printf("  [%4d] user{tool_result}\n", f.SequenceNumber)
-		case "result":
-			fmt.Printf("  [%4d] result\n", f.SequenceNumber)
-		default:
-			fmt.Printf("  [%4d] %s\n", f.SequenceNumber, inner.Type)
-		}
-	case *protocol.Question:
-		fmt.Printf("-> Question requestID=%s text=%q\n", f.RequestID, truncate(f.Question, 100))
-	case *protocol.TaskComplete:
-		fmt.Printf("<- TaskComplete cost=%s input=%d output=%d duration=%dms\n", f.CostUSD, f.InputTokens, f.OutputTokens, f.DurationMs)
-	case *protocol.TaskError:
-		fmt.Printf("x TaskError %q\n", f.Error)
-	default:
-		fmt.Printf("  ? %T\n", msg)
+	prompt := "Use ask_human to ask me my favorite color. Then in one short sentence say my color back."
+	if args := flag.Args(); len(args) > 0 {
+		prompt = strings.Join(args, " ")
 	}
+
+	extensionPath := os.Getenv("GSD_PI_EXTENSION_PATH")
+	if extensionPath == "" {
+		extensionPath = filepath.Join("internal", "pi", "extension", "index.ts")
+	}
+	if abs, err := filepath.Abs(extensionPath); err == nil {
+		extensionPath = abs
+	}
+	if _, err := os.Stat(extensionPath); err != nil {
+		fmt.Fprintf(os.Stderr, "pi extension not found at %s; set GSD_PI_EXTENSION_PATH\n", extensionPath)
+		os.Exit(2)
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "get cwd: %v\n", err)
+		os.Exit(1)
+	}
+
+	executor := pi.NewExecutor(pi.Options{
+		BinaryPath:    *binaryFlag,
+		CWD:           cwd,
+		Model:         *modelFlag,
+		Provider:      *providerFlag,
+		ExtensionPath: extensionPath,
+		TaskID:        "smoke-1",
+		Prompt:        prompt,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag)
+	defer cancel()
+
+	var sequence int
+	err = executor.Run(ctx, func(event claude.Event) error {
+		sequence++
+		printEvent(sequence, event)
+		return nil
+	}, func(ctx context.Context, req pi.UIRequest) (string, error) {
+		fmt.Printf("-> ui_request id=%s method=%s title=%q\n", req.ID, req.Method, truncate(req.Title, 100))
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+			return *answerFlag, nil
+		}
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pi smoke failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func printEvent(sequence int, event claude.Event) {
+	var top struct {
+		Type    string          `json:"type"`
+		Subtype string          `json:"subtype"`
+		Event   json.RawMessage `json:"event"`
+		Message struct {
+			Content []struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	_ = json.Unmarshal(event.Raw, &top)
+
+	switch top.Type {
+	case "system":
+		fmt.Printf("  [%4d] system{%s}\n", sequence, top.Subtype)
+	case "stream_event":
+		printStreamEvent(sequence, top.Event)
+	case "assistant":
+		fmt.Printf("  [%4d] assistant{%s}\n", sequence, summarizeContent(top.Message.Content))
+	case "user":
+		fmt.Printf("  [%4d] user{tool_result}\n", sequence)
+	case "result":
+		fmt.Printf("  [%4d] result\n", sequence)
+	default:
+		fmt.Printf("  [%4d] %s\n", sequence, top.Type)
+	}
+}
+
+func printStreamEvent(sequence int, raw json.RawMessage) {
+	var event struct {
+		Type         string `json:"type"`
+		ContentBlock struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	}
+	_ = json.Unmarshal(raw, &event)
+
+	switch event.Type {
+	case "content_block_start":
+		fmt.Printf("  [%4d] stream_event{content_block_start type=%s name=%q}\n", sequence, event.ContentBlock.Type, event.ContentBlock.Name)
+	case "content_block_delta":
+		if event.Delta.Type == "text_delta" {
+			fmt.Printf("  [%4d] stream_event{text_delta %q}\n", sequence, truncate(event.Delta.Text, 60))
+			return
+		}
+		fmt.Printf("  [%4d] stream_event{%s}\n", sequence, event.Delta.Type)
+	case "content_block_stop":
+		fmt.Printf("  [%4d] stream_event{content_block_stop}\n", sequence)
+	default:
+		fmt.Printf("  [%4d] stream_event{%s}\n", sequence, event.Type)
+	}
+}
+
+func summarizeContent(content []struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}) string {
+	parts := make([]string, 0, len(content))
+	for _, block := range content {
+		if block.Name != "" {
+			parts = append(parts, block.Type+":"+block.Name)
+			continue
+		}
+		parts = append(parts, block.Type)
+	}
+	return strings.Join(parts, ",")
 }
 
 func truncate(s string, max int) string {
@@ -113,89 +171,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
-}
-
-func main() {
-	answerFlag := flag.String("answer", "blue", "answer to send to ask_human")
-	flag.Parse()
-	args := flag.Args()
-	prompt := "Use ask_human to ask me my favorite color. Then in one short sentence say my color back."
-	if len(args) > 0 {
-		prompt = strings.Join(args, " ")
-	}
-
-	piExt := os.Getenv("GSD_PI_EXTENSION_PATH")
-	if piExt == "" {
-		piExt = filepath.Join("internal", "pi", "extension", "index.ts")
-	}
-	if abs, err := filepath.Abs(piExt); err == nil {
-		piExt = abs
-	}
-	if _, err := os.Stat(piExt); err != nil {
-		fmt.Fprintf(os.Stderr, "pi extension not found at %s; set GSD_PI_EXTENSION_PATH\n", piExt)
-		os.Exit(2)
-	}
-
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
-
-	cwd, _ := os.Getwd()
-	relay := &printRelay{}
-	actor, err := session.NewActor(session.Options{
-		SessionID:       "pi-smoke",
-		CWD:             cwd,
-		Relay:           relay,
-		Model:           "claude-sonnet-4-6",
-		PiExtensionPath: piExt,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "new actor: %v\n", err)
-		os.Exit(1)
-	}
-	defer actor.Stop()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-
-	go func() { _ = actor.Run(ctx) }()
-
-	if err := actor.SendTask(protocol.Task{
-		TaskID:    "smoke-1",
-		SessionID: "pi-smoke",
-		ChannelID: "ch-smoke",
-		Prompt:    prompt,
-		Engine:    "pi",
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "send task: %v\n", err)
-		os.Exit(1)
-	}
-
-	deadline := time.Now().Add(60 * time.Second)
-	answered := false
-	for time.Now().Before(deadline) {
-		for _, f := range relay.GetFrames() {
-			if !answered {
-				if q, ok := f.(*protocol.Question); ok {
-					if err := actor.HandleQuestionResponse(&protocol.QuestionResponse{
-						Type:      protocol.MsgTypeQuestionResponse,
-						ChannelID: "ch-smoke",
-						SessionID: "pi-smoke",
-						RequestID: q.RequestID,
-						Answer:    *answerFlag,
-					}); err != nil {
-						fmt.Fprintf(os.Stderr, "answer error: %v\n", err)
-					}
-					answered = true
-				}
-			}
-			if _, ok := f.(*protocol.TaskComplete); ok {
-				return
-			}
-			if _, ok := f.(*protocol.TaskError); ok {
-				os.Exit(3)
-			}
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	fmt.Fprintln(os.Stderr, "timed out")
-	os.Exit(4)
 }

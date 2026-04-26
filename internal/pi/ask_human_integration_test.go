@@ -83,14 +83,18 @@ func TestPiExecutor_AskHuman_RoundTrip(t *testing.T) {
 		return nil
 	}
 
-	onUI := func(req UIRequest) (string, error) {
+	onUI := func(ctx context.Context, req UIRequest) (string, error) {
 		mu.Lock()
 		uiQueries = append(uiQueries, req)
 		askedAt = time.Now()
 		mu.Unlock()
 		// Simulate phone-typing delay so we know the executor genuinely
 		// waited for the answer rather than racing past it.
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 		mu.Lock()
 		answeredAt = time.Now()
 		mu.Unlock()

@@ -41,6 +41,20 @@ type piToolEnd struct {
 	IsError bool `json:"isError"`
 }
 
+type piMessageEnd struct {
+	Type    string `json:"type"`
+	Message struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type      string         `json:"type"`
+			Text      string         `json:"text"`
+			ID        string         `json:"id"`
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
 type piSession struct {
 	Type string `json:"type"`
 	ID   string `json:"id"`
@@ -89,9 +103,19 @@ func translatePiEvent(piRaw json.RawMessage, state *translatorState) []rawEvent 
 		}
 		return nil
 
-	case "turn_start", "turn_end", "message_start", "message_end":
+	case "turn_start", "turn_end", "message_start":
 		// Lifecycle events with no claude analog the browser dispatches on.
 		return nil
+
+	case "message_end":
+		var me piMessageEnd
+		if err := json.Unmarshal(piRaw, &me); err != nil {
+			return nil
+		}
+		if me.Message.Role != "assistant" {
+			return nil
+		}
+		return []rawEvent{makeAssistantMessage(state, &me)}
 
 	case "message_update":
 		var mu piMessageUpdate
@@ -296,4 +320,34 @@ func makeToolResultUser(state *translatorState, toolUseID, resultText string, is
 		"session_id": state.sessionID,
 	})
 	return rawEvent{Type: "user", Raw: out}
+}
+
+func makeAssistantMessage(state *translatorState, me *piMessageEnd) rawEvent {
+	content := make([]map[string]any, 0, len(me.Message.Content))
+	for _, block := range me.Message.Content {
+		switch block.Type {
+		case "text":
+			content = append(content, map[string]any{
+				"type": "text",
+				"text": block.Text,
+			})
+		case "toolCall":
+			content = append(content, map[string]any{
+				"type":  "tool_use",
+				"id":    block.ID,
+				"name":  block.Name,
+				"input": block.Arguments,
+			})
+		}
+	}
+
+	out, _ := json.Marshal(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": content,
+		},
+		"session_id": state.sessionID,
+	})
+	return rawEvent{Type: "assistant", Raw: out}
 }

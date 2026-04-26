@@ -6,10 +6,13 @@ package pi
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func loadPiSample(t *testing.T) [][]byte {
@@ -60,6 +63,7 @@ func TestTranslator_AllBrowserDispatchPoints(t *testing.T) {
 		contentBlockDeltaToolJ int
 		contentBlockStop       int
 		toolResult             int
+		assistant              int
 	}
 	var c counts
 
@@ -117,6 +121,8 @@ func TestTranslator_AllBrowserDispatchPoints(t *testing.T) {
 					c.toolResult++
 				}
 			}
+		case "assistant":
+			c.assistant++
 		}
 	}
 
@@ -126,6 +132,7 @@ func TestTranslator_AllBrowserDispatchPoints(t *testing.T) {
 	t.Logf("  content_block_delta: text=%d input_json=%d", c.contentBlockDeltaText, c.contentBlockDeltaToolJ)
 	t.Logf("  content_block_stop: %d", c.contentBlockStop)
 	t.Logf("  tool_result: %d", c.toolResult)
+	t.Logf("  assistant: %d", c.assistant)
 
 	if c.systemInit != 1 {
 		t.Errorf("expected 1 system init, got %d", c.systemInit)
@@ -142,6 +149,9 @@ func TestTranslator_AllBrowserDispatchPoints(t *testing.T) {
 	}
 	if c.toolResult != 1 {
 		t.Errorf("expected exactly 1 tool_result, got %d", c.toolResult)
+	}
+	if c.assistant < 1 {
+		t.Errorf("expected at least 1 assistant event, got %d", c.assistant)
 	}
 	// This sample has no streaming text response
 	// (the model called Bash and the answer came at agent_end without a
@@ -292,6 +302,104 @@ func TestTranslator_ToolResultShape(t *testing.T) {
 	}
 	if c.Content != "hello world" {
 		t.Errorf("content=%q want 'hello world'", c.Content)
+	}
+}
+
+func TestTranslator_MessageEndAssistantShape(t *testing.T) {
+	state := &translatorState{sessionID: "sess-assistant"}
+	piEnd := []byte(`{
+	  "type": "message_end",
+	  "message": {
+	    "role": "assistant",
+	    "content": [
+	      {"type":"text","text":"hello"},
+	      {"type":"toolCall","id":"toolu_abc","name":"bash","arguments":{"command":"pwd"}}
+	    ]
+	  }
+	}`)
+
+	out := translatePiEvent(piEnd, state)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(out))
+	}
+
+	var top struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type  string         `json:"type"`
+				Text  string         `json:"text"`
+				ID    string         `json:"id"`
+				Name  string         `json:"name"`
+				Input map[string]any `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(out[0].Raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	if out[0].Type != "assistant" || top.Type != "assistant" {
+		t.Fatalf("event type=%q raw type=%q", out[0].Type, top.Type)
+	}
+	if top.Message.Role != "assistant" {
+		t.Fatalf("message.role=%q", top.Message.Role)
+	}
+	if top.SessionID != "sess-assistant" {
+		t.Fatalf("session_id=%q", top.SessionID)
+	}
+	if len(top.Message.Content) != 2 {
+		t.Fatalf("content len=%d", len(top.Message.Content))
+	}
+	if top.Message.Content[0].Type != "text" || top.Message.Content[0].Text != "hello" {
+		t.Fatalf("text block=%+v", top.Message.Content[0])
+	}
+	tool := top.Message.Content[1]
+	if tool.Type != "tool_use" || tool.ID != "toolu_abc" || tool.Name != "bash" {
+		t.Fatalf("tool block=%+v", tool)
+	}
+	if tool.Input["command"] != "pwd" {
+		t.Fatalf("tool input=%+v", tool.Input)
+	}
+}
+
+func TestHandleUIRequestReturnsOnContextCancel(t *testing.T) {
+	raw := json.RawMessage(`{
+	  "type":"extension_ui_request",
+	  "id":"ui-1",
+	  "method":"input",
+	  "title":"Need input"
+	}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+
+	errCh := make(chan error, 1)
+	go func() {
+		var stdin bytes.Buffer
+		errCh <- handleUIRequest(ctx, raw, &stdin, func(context.Context, UIRequest) (string, error) {
+			close(started)
+			<-release
+			return "late answer", nil
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handleUIRequest did not return after context cancellation")
 	}
 }
 

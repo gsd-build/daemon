@@ -57,9 +57,9 @@ type UIRequest struct {
 
 // UIRequestHandler resolves a UIRequest to a string answer. Returning an
 // empty string means "user cancelled". Returning an error aborts the task.
-// Implementations typically translate UIRequest into a protocol.Question for
-// the relay, wait on a questionResponse channel, and return the answer.
-type UIRequestHandler func(UIRequest) (string, error)
+// Implementations typically wait on a questionResponse channel and return
+// when ctx is cancelled.
+type UIRequestHandler func(context.Context, UIRequest) (string, error)
 
 // Run spawns pi, sends the prompt over stdin as an RPC `prompt` frame, and
 // streams events to onEvent. Blocks until pi exits or ctx is cancelled.
@@ -182,6 +182,8 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	})
 	if _, err := stdin.Write(append(promptFrame, '\n')); err != nil {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = stdin.Close()
+		_ = cmd.Wait()
 		<-stderrDone
 		return fmt.Errorf("write prompt frame: %w", err)
 	}
@@ -195,7 +197,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		model:  e.opts.Model,
 		taskID: e.opts.TaskID,
 	}
-	parseErr := streamPiEvents(stdout, stdin, onEvent, onUIRequest, agentEndCh, true, state, startedAt)
+	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, agentEndCh, true, state, startedAt)
 	select {
 	case <-agentEndCh:
 		// Signal the whole process group so pi's child claude binary exits
@@ -246,6 +248,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 //
 // translate=false bypasses the translator and forwards raw pi events.
 func streamPiEvents(
+	ctx context.Context,
 	r io.Reader,
 	stdin io.Writer,
 	onEvent func(claude.Event) error,
@@ -285,7 +288,7 @@ func streamPiEvents(
 
 		// Intercept extension_ui_request before translation; never forwarded.
 		if peek.Type == "extension_ui_request" {
-			if err := handleUIRequest(raw, stdin, onUIRequest); err != nil {
+			if err := handleUIRequest(ctx, raw, stdin, onUIRequest); err != nil {
 				return err
 			}
 			continue
@@ -328,7 +331,7 @@ func streamPiEvents(
 // and writes the resulting extension_ui_response back to pi's stdin. If no
 // handler is registered, sends a "cancelled" response so the tool returns
 // cleanly rather than hanging the agent forever.
-func handleUIRequest(raw json.RawMessage, stdin io.Writer, handler UIRequestHandler) error {
+func handleUIRequest(ctx context.Context, raw json.RawMessage, stdin io.Writer, handler UIRequestHandler) error {
 	var req struct {
 		Type        string `json:"type"`
 		ID          string `json:"id"`
@@ -347,22 +350,39 @@ func handleUIRequest(raw json.RawMessage, stdin io.Writer, handler UIRequestHand
 		return writeUIResponse(stdin, req.ID, true, "")
 	}
 
-	answer, err := handler(UIRequest{
-		ID:          req.ID,
-		Method:      req.Method,
-		Title:       req.Title,
-		Placeholder: req.Placeholder,
-	})
-	if err != nil {
+	type uiResult struct {
+		answer string
+		err    error
+	}
+	resultCh := make(chan uiResult, 1)
+	go func() {
+		answer, err := handler(ctx, UIRequest{
+			ID:          req.ID,
+			Method:      req.Method,
+			Title:       req.Title,
+			Placeholder: req.Placeholder,
+		})
+		resultCh <- uiResult{answer: answer, err: err}
+	}()
+
+	var result uiResult
+	select {
+	case <-ctx.Done():
+		_ = writeUIResponse(stdin, req.ID, true, "")
+		return ctx.Err()
+	case result = <-resultCh:
+	}
+
+	if result.err != nil {
 		// Treat handler errors as cancellation rather than killing pi;
 		// the tool will see the cancelled flag and return an error result.
 		_ = writeUIResponse(stdin, req.ID, true, "")
-		return fmt.Errorf("ui handler: %w", err)
+		return fmt.Errorf("ui handler: %w", result.err)
 	}
-	if answer == "" {
+	if result.answer == "" {
 		return writeUIResponse(stdin, req.ID, true, "")
 	}
-	return writeUIResponse(stdin, req.ID, false, answer)
+	return writeUIResponse(stdin, req.ID, false, result.answer)
 }
 
 func writeUIResponse(stdin io.Writer, id string, cancelled bool, value string) error {
