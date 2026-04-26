@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
+	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	"github.com/gsd-build/daemon/internal/upload"
@@ -33,19 +34,21 @@ type ImageUploader interface {
 
 // Options configures a new Actor.
 type Options struct {
-	SessionID      string
-	BinaryPath     string
-	CWD            string
-	Relay          RelaySender
-	Model          string
-	Effort         string
-	PermissionMode string
-	ResumeSession  string
-	Uploader       ImageUploader // nil = image upload disabled
+	SessionID       string
+	BinaryPath      string
+	CWD             string
+	Relay           RelaySender
+	Model           string
+	Effort          string
+	PermissionMode  string
+	ResumeSession   string
+	PiBinaryPath    string
+	PiExtensionPath string
+	Uploader        ImageUploader // nil = image upload disabled
 }
 
-// Actor drives a single Claude session using spawn-per-task execution.
-// Each incoming task spawns a fresh claude process; no processes remain
+// Actor drives a single agent session using spawn-per-task execution.
+// Each incoming task spawns a fresh executor process; no processes remain
 // alive between tasks.
 type Actor struct {
 	opts Options
@@ -93,6 +96,7 @@ type taskContext struct {
 	ChannelID      string
 	StartedAt      time.Time
 	OriginalPrompt string
+	Engine         string
 	Model          string
 	Effort         string
 	PermissionMode string
@@ -277,6 +281,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		ChannelID:      task.ChannelID,
 		StartedAt:      time.Now(),
 		OriginalPrompt: task.Prompt,
+		Engine:         task.Engine,
 		Model:          task.Model,
 		Effort:         task.Effort,
 		PermissionMode: task.PermissionMode,
@@ -352,7 +357,20 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	return err
 }
 
+type executorRunner func(context.Context, func(claude.Event) error) error
+
 func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string) error {
+	switch tc.Engine {
+	case "", "claude":
+		return a.runClaudeExecutor(ctx, tc, prompt)
+	case "pi":
+		return a.runPiExecutor(ctx, tc, prompt)
+	default:
+		return fmt.Errorf("unsupported task engine %q", tc.Engine)
+	}
+}
+
+func (a *Actor) runClaudeExecutor(ctx context.Context, tc *taskContext, prompt string) error {
 	// Use per-task model/effort/permissionMode if provided, otherwise fall back
 	// to the actor's creation-time defaults.
 	model := tc.Model
@@ -380,24 +398,136 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 		ImageURLs:      tc.ImageURLs,
 	})
 
-	if a.pidDir != "" {
-		exec.OnPIDStart = func(pid int) {
-			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
-			if err := pidfile.Write(path, pid); err != nil {
-				slog.Warn("write pid file failed", "taskId", tc.TaskID, "path", path, "err", err)
-			}
-		}
-		exec.OnPIDExit = func(pid int) {
-			path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", tc.TaskID))
-			pidfile.Remove(path)
-		}
+	a.attachClaudePIDCallbacks(exec, tc.TaskID)
+
+	resultRaw, err := a.forwardExecutorEvents(ctx, tc, exec.Run)
+	if err != nil {
+		return err
 	}
 
+	return a.handleResult(ctx, tc, resultRaw)
+}
+
+func (a *Actor) attachClaudePIDCallbacks(exec *claude.Executor, taskID string) {
+	if a.pidDir == "" {
+		return
+	}
+	exec.OnPIDStart = func(pid int) {
+		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		if err := pidfile.Write(path, pid); err != nil {
+			slog.Warn("write pid file failed", "taskId", taskID, "path", path, "err", err)
+		}
+	}
+	exec.OnPIDExit = func(pid int) {
+		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		pidfile.Remove(path)
+	}
+}
+
+func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt string) error {
+	model := tc.Model
+	if model == "" {
+		model = a.opts.Model
+	}
+	binaryPath := a.opts.PiBinaryPath
+	if binaryPath == "" {
+		binaryPath = "pi"
+	}
+
+	exec := pi.NewExecutor(pi.Options{
+		BinaryPath:    binaryPath,
+		CWD:           a.opts.CWD,
+		Model:         model,
+		ResumeSession: a.claudeSessionID,
+		TaskID:        tc.TaskID,
+		Prompt:        prompt,
+		ExtensionPath: a.opts.PiExtensionPath,
+		Provider:      "claude-cli",
+	})
+
+	a.attachPiPIDCallbacks(exec, tc.TaskID)
+
+	resultRaw, err := a.forwardExecutorEvents(ctx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
+		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc))
+	})
+	if err != nil {
+		return err
+	}
+
+	return a.handleResult(ctx, tc, resultRaw)
+}
+
+func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {
+	if a.pidDir == "" {
+		return
+	}
+	exec.OnPIDStart = func(pid int) {
+		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		if err := pidfile.Write(path, pid); err != nil {
+			slog.Warn("write pid file failed", "taskId", taskID, "path", path, "err", err)
+		}
+	}
+	exec.OnPIDExit = func(pid int) {
+		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		pidfile.Remove(path)
+	}
+}
+
+func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext) pi.UIRequestHandler {
+	return func(handlerCtx context.Context, req pi.UIRequest) (string, error) {
+		question := req.Title
+		if question == "" {
+			question = "The agent is asking for input."
+		}
+
+		ch := make(chan string, 1)
+		a.questionMu.Lock()
+		a.questionCh[req.ID] = ch
+		a.questionMu.Unlock()
+
+		defer func() {
+			a.questionMu.Lock()
+			delete(a.questionCh, req.ID)
+			a.questionMu.Unlock()
+		}()
+
+		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := a.opts.Relay.Send(sendCtx, &protocol.Question{
+			Type:      protocol.MsgTypeQuestion,
+			SessionID: a.opts.SessionID,
+			ChannelID: tc.ChannelID,
+			RequestID: req.ID,
+			Question:  question,
+		}); err != nil {
+			sendCancel()
+			return "", err
+		}
+		sendCancel()
+
+		timeout := time.NewTimer(a.effectiveInteractionTimeout())
+		defer timeout.Stop()
+
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-handlerCtx.Done():
+			return "", handlerCtx.Err()
+		case <-a.stopCh:
+			return "", fmt.Errorf("actor stopped while waiting for pi UI response")
+		case <-timeout.C:
+			return "", fmt.Errorf("timed out waiting for question response after %s", a.effectiveInteractionTimeout())
+		case answer := <-ch:
+			return answer, nil
+		}
+	}
+}
+
+func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run executorRunner) (json.RawMessage, error) {
 	var resultRaw json.RawMessage
 	const maxConsecutiveFailures = 3
 	consecutiveFailures := 0
 
-	err := exec.Run(ctx, func(e claude.Event) error {
+	err := run(ctx, func(e claude.Event) error {
 		next := atomic.AddInt64(&a.seq, 1)
 
 		// Send to relay
@@ -442,14 +572,14 @@ func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string)
 	})
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if resultRaw == nil {
-		return fmt.Errorf("executor exited without result event")
+		return nil, fmt.Errorf("executor exited without result event")
 	}
 
-	return a.handleResult(ctx, tc, resultRaw)
+	return resultRaw, nil
 }
 
 func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawMessage) error {
@@ -899,7 +1029,7 @@ func (a *Actor) Stop() error {
 }
 
 // CancelTask cancels the in-flight task (if any) without shutting down the actor.
-// The executor's context.Done fires, SIGKILLing the Claude subprocess.
+// The executor's context.Done fires, stopping the subprocess.
 // Run() loops back and waits for the next task.
 func (a *Actor) CancelTask() {
 	a.taskMu.Lock()
