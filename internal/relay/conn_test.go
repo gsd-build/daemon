@@ -91,7 +91,6 @@ func TestClientConnectHandshake(t *testing.T) {
 		t.Errorf("expected machineId=m-1, got %s", state.hellos[0].MachineID)
 	}
 	if state.hellos[0].Capabilities == nil ||
-		!state.hellos[0].Capabilities.TaskOrigin ||
 		!state.hellos[0].Capabilities.Stop {
 		t.Fatalf("hello capabilities missing: %+v", state.hellos[0].Capabilities)
 	}

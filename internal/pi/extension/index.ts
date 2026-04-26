@@ -37,11 +37,11 @@ const CLAUDE_BUILTINS = [
   "Glob", "Grep", "WebFetch", "WebSearch",
   "Task", "Agent", "TodoWrite", "ExitPlanMode", "EnterPlanMode",
   "ListMcpResourcesTool", "ReadMcpResourceTool",
-  "AskUserQuestion", "Monitor", "PushNotification", "Skill", "ToolSearch",
-  "TeamCreate", "TeamDelete", "ScheduleWakeup", "SendMessage",
+  "AskUserQuestion", "Monitor", "Skill", "ToolSearch",
+  "TeamCreate", "TeamDelete", "SendMessage",
   "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
   "EnterWorktree", "ExitWorktree",
-  "RemoteTrigger", "CronCreate", "CronDelete", "CronList",
+  "RemoteTrigger",
 ];
 
 const MCP_PREFIX = "mcp__pi-tools__";
