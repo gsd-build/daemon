@@ -1,10 +1,13 @@
-// Package update queries GitHub Releases for new daemon versions and handles
-// downloading, checksum verification, backup, and rollback of the daemon binary.
+// Package update queries GitHub Releases for daemon versions and handles
+// downloading, checksum verification, pi extension installation, backup, and
+// rollback of the daemon binary.
 package update
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -120,9 +124,15 @@ func AssetName(version string) string {
 	return fmt.Sprintf("gsd-cloud-%s-%s-%s", version, runtime.GOOS, runtime.GOARCH)
 }
 
+// PiExtensionAssetName returns the platform-independent pi extension archive
+// name bundled with daemon releases.
+func PiExtensionAssetName(version string) string {
+	return fmt.Sprintf("gsd-cloud-pi-extension-%s.tar.gz", version)
+}
+
 // Download fetches the matching asset from the release, verifies its SHA256
-// checksum against a signed SHA256SUMS asset, and writes it to destPath with an
-// atomic rename.
+// checksum against a signed SHA256SUMS asset, installs the bundled pi extension,
+// and writes the binary to destPath with an atomic rename.
 func Download(release *Release, destPath string) error {
 	// Tag is "daemon/v0.2.1", asset name needs "v0.2.1"
 	version := release.TagName
@@ -130,13 +140,18 @@ func Download(release *Release, destPath string) error {
 		version = version[i+1:]
 	}
 	assetName := AssetName(version)
+	extensionAssetName := PiExtensionAssetName(version)
 
 	var assetURL string
+	var extensionURL string
 	var sumsURL string
 	var sumsSigURL string
 	for _, a := range release.Assets {
 		if a.Name == assetName {
 			assetURL = a.BrowserDownloadURL
+		}
+		if a.Name == extensionAssetName {
+			extensionURL = a.BrowserDownloadURL
 		}
 		if a.Name == checksumAssetName {
 			sumsURL = a.BrowserDownloadURL
@@ -148,22 +163,45 @@ func Download(release *Release, destPath string) error {
 	if assetURL == "" {
 		return fmt.Errorf("update: asset %q not found in release %s", assetName, release.TagName)
 	}
+	if extensionURL == "" {
+		return fmt.Errorf("update: asset %q not found in release %s", extensionAssetName, release.TagName)
+	}
 	if sumsURL == "" || sumsSigURL == "" {
 		return fmt.Errorf("update: signed checksums are required for release %s", release.TagName)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 
-	// Download to a temp file, computing SHA256 as we go.
 	tmpPath := destPath + ".tmp"
-	out, err := os.Create(tmpPath)
+	defer func() {
+		os.Remove(tmpPath) // clean up on any error path
+	}()
+
+	if err := downloadVerifiedAsset(client, assetURL, sumsURL, sumsSigURL, assetName, tmpPath, 0755); err != nil {
+		return err
+	}
+
+	extensionArchivePath := destPath + ".pi-extension.tar.gz.tmp"
+	defer os.Remove(extensionArchivePath)
+	if err := downloadVerifiedAsset(client, extensionURL, sumsURL, sumsSigURL, extensionAssetName, extensionArchivePath, 0644); err != nil {
+		return err
+	}
+	if err := installPiExtensionArchive(extensionArchivePath, filepath.Dir(destPath)); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return fmt.Errorf("update: atomic rename: %w", err)
+	}
+
+	return nil
+}
+
+func downloadVerifiedAsset(client *http.Client, assetURL, sumsURL, sumsSigURL, assetName, destPath string, mode os.FileMode) error {
+	out, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("update: create temp file: %w", err)
 	}
-	defer func() {
-		out.Close()
-		os.Remove(tmpPath) // clean up on any error path
-	}()
+	defer out.Close()
 
 	resp, err := client.Get(assetURL)
 	if err != nil {
@@ -191,18 +229,150 @@ func Download(release *Release, destPath string) error {
 		return fmt.Errorf("update: checksum verification: %w", err)
 	}
 	if actualSum != expected {
-		return fmt.Errorf("update: checksum mismatch: got %s, want %s", actualSum, expected)
+		return fmt.Errorf("update: checksum mismatch for %s: got %s, want %s", assetName, actualSum, expected)
 	}
 
-	if err := os.Chmod(tmpPath, 0755); err != nil {
+	if err := os.Chmod(destPath, mode); err != nil {
 		return fmt.Errorf("update: chmod: %w", err)
 	}
+	return nil
+}
 
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		return fmt.Errorf("update: atomic rename: %w", err)
+func installPiExtensionArchive(archivePath, installDir string) error {
+	finalDir := filepath.Join(installDir, "pi-extension")
+	tmpDir := filepath.Join(installDir, "pi-extension.tmp")
+	prevDir := filepath.Join(installDir, "pi-extension.prev")
+
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("update: remove temp pi extension: %w", err)
+	}
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("update: create temp pi extension: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := extractTarGz(archivePath, tmpDir); err != nil {
+		return err
 	}
 
+	if err := os.RemoveAll(prevDir); err != nil {
+		return fmt.Errorf("update: remove previous pi extension backup: %w", err)
+	}
+	if _, err := os.Stat(finalDir); err == nil {
+		if err := os.Rename(finalDir, prevDir); err != nil {
+			return fmt.Errorf("update: backup pi extension: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("update: inspect pi extension: %w", err)
+	}
+	if err := os.Rename(tmpDir, finalDir); err != nil {
+		_ = os.Rename(prevDir, finalDir)
+		return fmt.Errorf("update: install pi extension: %w", err)
+	}
+	if err := os.RemoveAll(prevDir); err != nil {
+		return fmt.Errorf("update: remove previous pi extension backup: %w", err)
+	}
 	return nil
+}
+
+func extractTarGz(archivePath, destDir string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("update: open pi extension archive: %w", err)
+	}
+	defer f.Close()
+
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("update: read pi extension archive: %w", err)
+	}
+	defer gzr.Close()
+
+	destClean, err := filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("update: resolve pi extension path: %w", err)
+	}
+
+	tr := tar.NewReader(gzr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("update: read pi extension entry: %w", err)
+		}
+		target, err := safeArchiveTarget(destClean, hdr.Name)
+		if err != nil {
+			return err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("update: create pi extension dir: %w", err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("update: create pi extension parent: %w", err)
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode().Perm())
+			if err != nil {
+				return fmt.Errorf("update: create pi extension file: %w", err)
+			}
+			if _, err := io.Copy(out, tr); err != nil {
+				_ = out.Close()
+				return fmt.Errorf("update: write pi extension file: %w", err)
+			}
+			if err := out.Close(); err != nil {
+				return fmt.Errorf("update: close pi extension file: %w", err)
+			}
+		case tar.TypeSymlink:
+			targetLink, err := safeArchiveLinkTarget(destClean, target, hdr.Linkname)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("update: create pi extension symlink parent: %w", err)
+			}
+			if err := os.Symlink(targetLink, target); err != nil {
+				return fmt.Errorf("update: create pi extension symlink: %w", err)
+			}
+		default:
+			return fmt.Errorf("update: unsupported pi extension archive entry %q", hdr.Name)
+		}
+	}
+	return nil
+}
+
+func safeArchiveTarget(destDir, name string) (string, error) {
+	clean := filepath.Clean(name)
+	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) || clean == ".." {
+		return "", fmt.Errorf("update: unsafe pi extension archive entry %q", name)
+	}
+	target := filepath.Join(destDir, clean)
+	targetClean, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("update: resolve pi extension entry: %w", err)
+	}
+	if targetClean != destDir && !strings.HasPrefix(targetClean, destDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("update: unsafe pi extension archive entry %q", name)
+	}
+	return targetClean, nil
+}
+
+func safeArchiveLinkTarget(destDir, targetPath, linkName string) (string, error) {
+	if filepath.IsAbs(linkName) {
+		return "", fmt.Errorf("update: unsafe pi extension symlink target %q", linkName)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(targetPath), linkName))
+	resolvedAbs, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("update: resolve pi extension symlink: %w", err)
+	}
+	if resolvedAbs != destDir && !strings.HasPrefix(resolvedAbs, destDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("update: unsafe pi extension symlink target %q", linkName)
+	}
+	return linkName, nil
 }
 
 func fetchVerifiedChecksum(client *http.Client, sumsURL, signatureURL, assetName string) (string, error) {
