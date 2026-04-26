@@ -71,8 +71,12 @@ func main() {
 	defer cancel()
 
 	var sequence int
+	seenResult := false
 	err = executor.Run(ctx, func(event claude.Event) error {
 		sequence++
+		if event.Type == "result" {
+			seenResult = true
+		}
 		printEvent(sequence, event)
 		return nil
 	}, func(ctx context.Context, req pi.UIRequest) (string, error) {
@@ -91,6 +95,10 @@ func main() {
 	if ctx.Err() == context.DeadlineExceeded {
 		fmt.Fprintf(os.Stderr, "pi smoke timed out after %s\n", timeoutFlag.String())
 		os.Exit(4)
+	}
+	if !seenResult {
+		fmt.Fprintln(os.Stderr, "pi smoke failed: executor exited without result event")
+		os.Exit(5)
 	}
 }
 

@@ -181,9 +181,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"message": e.opts.Prompt,
 	})
 	if _, err := stdin.Write(append(promptFrame, '\n')); err != nil {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_ = stdin.Close()
-		_ = cmd.Wait()
+		_ = terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
 		<-stderrDone
 		return fmt.Errorf("write prompt frame: %w", err)
 	}
@@ -208,7 +206,31 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	default:
 	}
 	if !agentEnded {
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		waitErr := terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
+		<-stderrDone
+		if ctx.Err() != nil {
+			return nil
+		}
+		if parseErr != nil && parseErr != io.EOF {
+			if len(stderrBuf) > 0 {
+				return fmt.Errorf("%w (pi stderr: %s)", parseErr, string(stderrBuf))
+			}
+			return parseErr
+		}
+		if waitErr != nil {
+			if exitErr, ok := waitErr.(*exec.ExitError); ok {
+				code := exitErr.ExitCode()
+				if code > 0 {
+					if len(stderrBuf) > 0 {
+						return fmt.Errorf("pi exited with code %d: %s", code, string(stderrBuf))
+					}
+					return fmt.Errorf("pi exited with code %d (no stderr)", code)
+				}
+			} else {
+				return fmt.Errorf("pi wait: %w", waitErr)
+			}
+		}
+		return fmt.Errorf("pi stream ended before agent_end")
 	}
 	_ = stdin.Close()
 	waitErr := cmd.Wait()
@@ -237,6 +259,29 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		return parseErr
 	}
 	return nil
+}
+
+func terminateProcessGroupAndWait(cmd *exec.Cmd, pid int, stdin io.Closer, timeout time.Duration) error {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-waitCh:
+		return err
+	case <-timer.C:
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		return <-waitCh
+	}
 }
 
 // streamPiEvents reads pi NDJSON from r, translates each event into the

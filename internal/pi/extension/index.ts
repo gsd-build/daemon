@@ -26,6 +26,10 @@ import {
 } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { z } from "zod";
+import {
+  applyUsageFromSdkMessage,
+  ensureNonZeroUsageForAbortedToolTurn,
+} from "./usage-estimator.js";
 
 const CLAUDE_BUILTINS = [
   "Bash", "BashOutput", "KillShell",
@@ -197,6 +201,7 @@ function streamClaudeSdk(
       const q = query({ prompt: promptIter, options: sdkOptions });
 
       for await (const msg of q as AsyncIterable<SDKMessage>) {
+        applyUsageFromSdkMessage(output.usage, msg, (model as any).cost);
         if (msg.type === "stream_event") {
           const ev = (msg as any).event;
           if (ev?.type === "content_block_start") {
@@ -237,27 +242,6 @@ function streamClaudeSdk(
             }
             // tool_use content_block_stop: handled when sentinel fires inside the MCP handler.
           }
-        } else if (msg.type === "result") {
-          const r: any = msg;
-          if (r.usage) {
-            output.usage.input = r.usage.input_tokens ?? 0;
-            output.usage.output = r.usage.output_tokens ?? 0;
-            output.usage.cacheRead = r.usage.cache_read_input_tokens ?? 0;
-            output.usage.cacheWrite = r.usage.cache_creation_input_tokens ?? 0;
-            output.usage.totalTokens =
-              output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-          }
-          // Pi only auto-computes cost for its own anthropic provider, not streamSimple. Compute here.
-          const c = (model as any).cost;
-          if (c) {
-            output.usage.cost.input = (c.input / 1_000_000) * output.usage.input;
-            output.usage.cost.output = (c.output / 1_000_000) * output.usage.output;
-            output.usage.cost.cacheRead = (c.cacheRead / 1_000_000) * output.usage.cacheRead;
-            output.usage.cost.cacheWrite = (c.cacheWrite / 1_000_000) * output.usage.cacheWrite;
-            output.usage.cost.total =
-              output.usage.cost.input + output.usage.cost.output +
-              output.usage.cost.cacheRead + output.usage.cost.cacheWrite;
-          }
         }
       }
 
@@ -284,6 +268,7 @@ function streamClaudeSdk(
           activeToolCall = null;
         }
         output.stopReason = "toolUse";
+        ensureNonZeroUsageForAbortedToolTurn(output.usage, output.content, (model as any).cost);
         stream.push({ type: "done", reason: "toolUse", message: output });
         stream.end();
         return;
