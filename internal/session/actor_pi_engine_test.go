@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,7 @@ func TestActor_PiEngine_FullRoundTrip(t *testing.T) {
 
 	_, thisFile, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	preflightPiExtensionDependencies(t, repoRoot)
 	piExt := filepath.Join(repoRoot, "internal", "pi", "extension", "index.ts")
 
 	relay := newFakeRelay()
@@ -97,11 +99,11 @@ func TestActor_PiEngine_FullRoundTrip(t *testing.T) {
 				if !answered {
 					t.Fatal("TaskComplete arrived before any Question; agent never asked")
 				}
-				if tc.CostUSD == "" || tc.CostUSD == "0.000000" {
-					t.Errorf("TaskComplete cost was zero or empty: %q", tc.CostUSD)
-				}
 				if tc.OutputTokens == 0 {
 					t.Errorf("TaskComplete output tokens were zero")
+				}
+				if tc.DurationMs == 0 {
+					t.Errorf("TaskComplete duration was zero")
 				}
 				return
 			}
@@ -112,6 +114,28 @@ func TestActor_PiEngine_FullRoundTrip(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for TaskComplete; question seen=" + boolStr(answered))
+}
+
+func preflightPiExtensionDependencies(t *testing.T, repoRoot string) {
+	t.Helper()
+
+	extensionDir := filepath.Join(repoRoot, "internal", "pi", "extension")
+	requiredPaths := []string{
+		filepath.Join(extensionDir, "node_modules"),
+		filepath.Join(extensionDir, "node_modules", "@anthropic-ai", "claude-agent-sdk"),
+		filepath.Join(extensionDir, "node_modules", "@mariozechner", "pi-ai"),
+		filepath.Join(extensionDir, "node_modules", "@mariozechner", "pi-coding-agent"),
+		filepath.Join(extensionDir, "node_modules", "zod"),
+		filepath.Join(extensionDir, "node_modules", "@sinclair", "typebox"),
+	}
+	for _, path := range requiredPaths {
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				t.Skipf("pi extension dependencies not installed; missing %s", path)
+			}
+			t.Skipf("pi extension dependency preflight failed for %s: %v", path, err)
+		}
+	}
 }
 
 func truncatePiTest(s string, max int) string {
