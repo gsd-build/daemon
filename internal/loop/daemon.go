@@ -40,16 +40,19 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg          *config.Config
-	version      string
-	manager      SessionManager
-	client       *relay.Client
-	startedAt    time.Time
-	channelRoots sync.Map
-	cronStore    *crons.Store
-	cronRuntime  *crons.Runtime
-	cronSchedule *crons.Scheduler
-	uploader     *upload.Client
+	cfg             *config.Config
+	version         string
+	manager         SessionManager
+	client          *relay.Client
+	startedAt       time.Time
+	channelRoots    sync.Map
+	cronStore       *crons.Store
+	cronRuntime     *crons.Runtime
+	cronSchedule    *crons.Scheduler
+	uploader        *upload.Client
+	piBinaryPath    string
+	piExtensionPath string
+	forcePi         bool
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -70,6 +73,20 @@ func buildRelayURL(cfg *config.Config) string {
 // New constructs a Daemon that spawns the real `claude` CLI on PATH.
 func New(cfg *config.Config, version string) (*Daemon, error) {
 	return NewWithBinaryPath(cfg, version, "claude")
+}
+
+func defaultPiExtensionPath() string {
+	if override := os.Getenv("GSD_PI_EXTENSION_PATH"); override != "" {
+		return override
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "pi-extension", "index.ts")
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate
+		}
+	}
+	return filepath.Join("internal", "pi", "extension", "index.ts")
 }
 
 // NewWithBinaryPath constructs a Daemon that spawns the given binary instead
@@ -96,13 +113,21 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	}
 
 	uploader := upload.NewClient(cfg.RelayURL, cfg.MachineID, cfg.AuthToken)
+	piBinaryPath := os.Getenv("GSD_PI_BINARY")
+	if piBinaryPath == "" {
+		piBinaryPath = "pi"
+	}
+	piExtensionPath := defaultPiExtensionPath()
+	forcePi := os.Getenv("GSD_FORCE_PI") == "1"
 
 	manager := session.NewManager(session.ManagerOptions{
-		BinaryPath: binaryPath,
-		Relay:      client,
-		Config:     cfg,
-		PIDDir:     pidDir,
-		Uploader:   uploader,
+		BinaryPath:      binaryPath,
+		PiBinaryPath:    piBinaryPath,
+		PiExtensionPath: piExtensionPath,
+		Relay:           client,
+		Config:          cfg,
+		PIDDir:          pidDir,
+		Uploader:        uploader,
 	})
 
 	cronDir, err := crons.DefaultDir()
@@ -112,13 +137,16 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	cronStore := crons.NewStore(cronDir)
 
 	d := &Daemon{
-		cfg:       cfg,
-		version:   version,
-		manager:   manager,
-		client:    client,
-		startedAt: time.Now(),
-		cronStore: cronStore,
-		uploader:  uploader,
+		cfg:             cfg,
+		version:         version,
+		manager:         manager,
+		client:          client,
+		startedAt:       time.Now(),
+		cronStore:       cronStore,
+		uploader:        uploader,
+		piBinaryPath:    piBinaryPath,
+		piExtensionPath: piExtensionPath,
+		forcePi:         forcePi,
 	}
 	d.cronRuntime = crons.NewRuntime(
 		cfg.MachineID,
@@ -321,6 +349,9 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	if msg.ChannelID != "" && msg.CWD != "" {
 		d.channelRoots.Store(msg.ChannelID, msg.CWD)
 	}
+	if d.forcePi {
+		msg.Engine = "pi"
+	}
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil && actor.HasTaskID(msg.TaskID) {
 		slog.Info("duplicate task ignored", "session", msg.SessionID, "taskId", msg.TaskID)
@@ -329,12 +360,14 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	if actor == nil {
 		var err error
 		actor, err = d.manager.Spawn(ctx, session.Options{
-			SessionID:      msg.SessionID,
-			CWD:            msg.CWD,
-			Model:          msg.Model,
-			Effort:         msg.Effort,
-			PermissionMode: msg.PermissionMode,
-			ResumeSession:  msg.ClaudeSessionID,
+			SessionID:       msg.SessionID,
+			CWD:             msg.CWD,
+			Model:           msg.Model,
+			Effort:          msg.Effort,
+			PermissionMode:  msg.PermissionMode,
+			ResumeSession:   msg.ClaudeSessionID,
+			PiBinaryPath:    d.piBinaryPath,
+			PiExtensionPath: d.piExtensionPath,
 		})
 		if err != nil {
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
