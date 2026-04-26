@@ -30,6 +30,7 @@ func main() {
 	modelFlag := flag.String("model", "claude-sonnet-4-6", "model id passed to pi")
 	providerFlag := flag.String("provider", "claude-cli", "pi provider name")
 	timeoutFlag := flag.Duration("timeout", 90*time.Second, "smoke run timeout")
+	requireUIFlag := flag.Bool("require-ui", true, "fail if no UI request is observed")
 	flag.Parse()
 
 	prompt := "Use ask_human to ask me my favorite color. Then in one short sentence say my color back."
@@ -72,6 +73,7 @@ func main() {
 
 	var sequence int
 	seenResult := false
+	uiRequests := 0
 	err = executor.Run(ctx, func(event claude.Event) error {
 		sequence++
 		if event.Type == "result" {
@@ -80,6 +82,7 @@ func main() {
 		printEvent(sequence, event)
 		return nil
 	}, func(ctx context.Context, req pi.UIRequest) (string, error) {
+		uiRequests++
 		fmt.Printf("-> ui_request id=%s method=%s title=%q\n", req.ID, req.Method, truncate(req.Title, 100))
 		select {
 		case <-ctx.Done():
@@ -99,6 +102,10 @@ func main() {
 	if !seenResult {
 		fmt.Fprintln(os.Stderr, "pi smoke failed: executor exited without result event")
 		os.Exit(5)
+	}
+	if *requireUIFlag && uiRequests == 0 {
+		fmt.Fprintln(os.Stderr, "pi smoke failed: no UI request observed")
+		os.Exit(6)
 	}
 }
 

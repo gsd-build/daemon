@@ -200,9 +200,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	select {
 	case <-agentEndCh:
 		agentEnded = true
-		// Signal the whole process group so pi's child claude binary exits
-		// too. Signaling cmd.Process alone would leave the child reparented.
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
 	default:
 	}
 	if !agentEnded {
@@ -232,8 +229,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		}
 		return fmt.Errorf("pi stream ended before agent_end")
 	}
-	_ = stdin.Close()
-	waitErr := cmd.Wait()
+	waitErr := terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
 	<-stderrDone
 
 	if waitErr != nil {
