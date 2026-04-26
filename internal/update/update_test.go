@@ -72,6 +72,14 @@ func TestAssetName(t *testing.T) {
 	}
 }
 
+func TestPiExtensionAssetName(t *testing.T) {
+	name := PiExtensionAssetName("v0.2.1")
+	want := "gsd-cloud-pi-extension-v0.2.1.tar.gz"
+	if name != want {
+		t.Fatalf("PiExtensionAssetName() = %q, want %q", name, want)
+	}
+}
+
 func TestBackupAndRollback(t *testing.T) {
 	tmp := t.TempDir()
 

@@ -56,6 +56,36 @@ func TestManagerSpawnAndGet(t *testing.T) {
 	}
 }
 
+func TestManagerSpawnUsesPiDefaults(t *testing.T) {
+	cfg := &config.Config{MaxConcurrentTasks: 10}
+	m := NewManager(ManagerOptions{
+		BinaryPath:      "fake",
+		PiBinaryPath:    "/opt/gsd/pi",
+		PiExtensionPath: "/opt/gsd/pi-extension/index.ts",
+		Relay:           nullRelay{},
+		Config:          cfg,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := m.Spawn(ctx, Options{
+		SessionID: "s-pi-defaults",
+		CWD:       t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer m.StopAll()
+
+	if a.opts.PiBinaryPath != "/opt/gsd/pi" {
+		t.Fatalf("expected pi binary default, got %q", a.opts.PiBinaryPath)
+	}
+	if a.opts.PiExtensionPath != "/opt/gsd/pi-extension/index.ts" {
+		t.Fatalf("expected pi extension default, got %q", a.opts.PiExtensionPath)
+	}
+}
+
 func TestManagerRejectAtCapacity(t *testing.T) {
 	relay := newFakeRelay()
 	cfg := &config.Config{MaxConcurrentTasks: 1}

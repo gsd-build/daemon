@@ -157,6 +157,35 @@ verify_signature() {
     fi
 }
 
+install_pi_extension() {
+    archive_path="$1"
+    install_dir="$2"
+    new_dir="$install_dir/pi-extension.new"
+    final_dir="$install_dir/pi-extension"
+    prev_dir="$install_dir/pi-extension.prev"
+
+    rm -rf "$new_dir" "$prev_dir"
+    mkdir -p "$new_dir"
+    if ! tar -xzf "$archive_path" -C "$new_dir"; then
+        rm -rf "$new_dir"
+        err "failed to extract pi extension"
+    fi
+
+    if [ -d "$final_dir" ]; then
+        mv "$final_dir" "$prev_dir"
+    fi
+    if mv "$new_dir" "$final_dir"; then
+        rm -rf "$prev_dir"
+        return
+    fi
+
+    if [ -d "$prev_dir" ]; then
+        mv "$prev_dir" "$final_dir" || true
+    fi
+    rm -rf "$new_dir"
+    err "failed to install pi extension"
+}
+
 ensure_path_hint() {
     case ":${PATH}:" in
         *":${INSTALL_DIR}:"*)
@@ -191,12 +220,14 @@ main() {
     need_cmd uname
     need_cmd mkdir
     need_cmd mv
+    need_cmd rm
     need_cmd chmod
     need_cmd grep
     need_cmd sed
     need_cmd awk
     need_cmd mktemp
     need_cmd openssl
+    need_cmd tar
 
     OS=$(detect_os)
     ARCH=$(detect_arch)
@@ -207,8 +238,10 @@ main() {
     say "  version:  ${VERSION_TAG}"
 
     ASSET_NAME="gsd-cloud-${VERSION_TAG}-${OS}-${ARCH}"
+    EXTENSION_ASSET_NAME="gsd-cloud-pi-extension-${VERSION_TAG}.tar.gz"
     DOWNLOAD_BASE="${GSD_DOWNLOAD_BASE:-https://github.com/${REPO}/releases/download/${TAG}}"
     BIN_URL="${DOWNLOAD_BASE}/${ASSET_NAME}"
+    EXTENSION_URL="${DOWNLOAD_BASE}/${EXTENSION_ASSET_NAME}"
     SUMS_URL="${DOWNLOAD_BASE}/SHA256SUMS"
     SIG_URL="${DOWNLOAD_BASE}/SHA256SUMS.sig"
 
@@ -218,6 +251,8 @@ main() {
 
     say "  downloading ${ASSET_NAME}..."
     download "$BIN_URL" "$TMPDIR_PATH/$ASSET_NAME"
+    say "  downloading ${EXTENSION_ASSET_NAME}..."
+    download "$EXTENSION_URL" "$TMPDIR_PATH/$EXTENSION_ASSET_NAME"
     download "$SUMS_URL" "$TMPDIR_PATH/SHA256SUMS"
     download "$SIG_URL" "$TMPDIR_PATH/SHA256SUMS.sig"
 
@@ -226,8 +261,10 @@ main() {
 
     say "  verifying checksum..."
     verify_checksum "$TMPDIR_PATH/$ASSET_NAME" "$TMPDIR_PATH/SHA256SUMS" "$ASSET_NAME"
+    verify_checksum "$TMPDIR_PATH/$EXTENSION_ASSET_NAME" "$TMPDIR_PATH/SHA256SUMS" "$EXTENSION_ASSET_NAME"
 
     mkdir -p "$INSTALL_DIR"
+    install_pi_extension "$TMPDIR_PATH/$EXTENSION_ASSET_NAME" "$INSTALL_DIR"
     # Two-step install so an upgrade works even if the old binary is running.
     # Stage in the install dir (same filesystem -> rename is atomic), then rename over.
     NEW_BIN="$INSTALL_DIR/$BIN_NAME.new"
@@ -238,6 +275,7 @@ main() {
     say ""
     say "${bold}Installed!${reset}"
     say "  $INSTALL_DIR/$BIN_NAME"
+    say "  $INSTALL_DIR/pi-extension"
     say ""
     "$INSTALL_DIR/$BIN_NAME" version || true
 

@@ -13,11 +13,13 @@ import (
 
 // ManagerOptions configures a new Manager.
 type ManagerOptions struct {
-	BinaryPath string
-	Relay      RelaySender
-	Config     *config.Config
-	PIDDir     string         // directory for child PID files; empty disables
-	Uploader   ImageUploader  // nil = image upload disabled
+	BinaryPath      string
+	PiBinaryPath    string
+	PiExtensionPath string
+	Relay           RelaySender
+	Config          *config.Config
+	PIDDir          string        // directory for child PID files; empty disables
+	Uploader        ImageUploader // nil = image upload disabled
 }
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -25,22 +27,26 @@ type Manager struct {
 	mu     sync.Mutex
 	actors map[string]*Actor
 
-	relay      RelaySender
-	binaryPath string
-	cfg        *config.Config
-	pidDir     string
-	uploader   ImageUploader
+	relay           RelaySender
+	binaryPath      string
+	piBinaryPath    string
+	piExtensionPath string
+	cfg             *config.Config
+	pidDir          string
+	uploader        ImageUploader
 }
 
 // NewManager constructs a Manager.
 func NewManager(opts ManagerOptions) *Manager {
 	return &Manager{
-		actors:     make(map[string]*Actor),
-		relay:      opts.Relay,
-		binaryPath: opts.BinaryPath,
-		cfg:        opts.Config,
-		pidDir:     opts.PIDDir,
-		uploader:   opts.Uploader,
+		actors:          make(map[string]*Actor),
+		relay:           opts.Relay,
+		binaryPath:      opts.BinaryPath,
+		piBinaryPath:    opts.PiBinaryPath,
+		piExtensionPath: opts.PiExtensionPath,
+		cfg:             opts.Config,
+		pidDir:          opts.PIDDir,
+		uploader:        opts.Uploader,
 	}
 }
 
@@ -118,6 +124,12 @@ func (m *Manager) Spawn(
 	}
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = m.binaryPath
+	}
+	if opts.PiBinaryPath == "" {
+		opts.PiBinaryPath = m.piBinaryPath
+	}
+	if opts.PiExtensionPath == "" {
+		opts.PiExtensionPath = m.piExtensionPath
 	}
 	if opts.Uploader == nil {
 		opts.Uploader = m.uploader

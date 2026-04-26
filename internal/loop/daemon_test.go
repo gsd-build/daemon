@@ -151,6 +151,99 @@ func TestLocalCronSchedulingEnabled(t *testing.T) {
 	}
 }
 
+func TestDefaultPiExtensionPathUsesEnvOverride(t *testing.T) {
+	t.Setenv("GSD_PI_EXTENSION_PATH", "/tmp/gsd-pi-extension/index.ts")
+
+	if got := defaultPiExtensionPath(); got != "/tmp/gsd-pi-extension/index.ts" {
+		t.Fatalf("expected env override, got %q", got)
+	}
+}
+
+func TestHandleTaskForcePiSetsEngine(t *testing.T) {
+	actor, err := session.NewActor(session.Options{
+		SessionID: "sess-force-pi",
+		CWD:       t.TempDir(),
+		Relay:     newLoopFakeRelay(),
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	d := &Daemon{
+		cfg:     &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version: "test",
+		manager: &mockManager{
+			getFn: func(sessionID string) *session.Actor {
+				if sessionID == "sess-force-pi" {
+					return actor
+				}
+				return nil
+			},
+		},
+		client:  relayClientStub(false),
+		forcePi: true,
+	}
+
+	msg := &protocol.Task{
+		TaskID:    "task-force-pi",
+		SessionID: "sess-force-pi",
+		ChannelID: "ch-force-pi",
+		Prompt:    "hello",
+		Engine:    "claude",
+	}
+	if err := d.handleTask(msg); err != nil {
+		t.Fatalf("handleTask: %v", err)
+	}
+	if msg.Engine != "pi" {
+		t.Fatalf("expected forced pi engine, got %q", msg.Engine)
+	}
+}
+
+func TestHandleTaskSpawnsWithPiSettings(t *testing.T) {
+	var got session.Options
+	actor, err := session.NewActor(session.Options{
+		SessionID: "sess-spawn-pi",
+		CWD:       t.TempDir(),
+		Relay:     newLoopFakeRelay(),
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	d := &Daemon{
+		cfg:             &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version:         "test",
+		client:          relayClientStub(false),
+		piBinaryPath:    "/opt/gsd/pi",
+		piExtensionPath: "/opt/gsd/pi-extension/index.ts",
+		manager: &mockManager{
+			spawnFn: func(ctx context.Context, opts session.Options) (*session.Actor, error) {
+				got = opts
+				return actor, nil
+			},
+		},
+	}
+
+	msg := &protocol.Task{
+		TaskID:    "task-spawn-pi",
+		SessionID: "sess-spawn-pi",
+		ChannelID: "ch-spawn-pi",
+		CWD:       t.TempDir(),
+		Prompt:    "hello",
+	}
+	if err := d.handleTask(msg); err != nil {
+		t.Fatalf("handleTask: %v", err)
+	}
+	if got.PiBinaryPath != "/opt/gsd/pi" {
+		t.Fatalf("expected pi binary path in spawn options, got %q", got.PiBinaryPath)
+	}
+	if got.PiExtensionPath != "/opt/gsd/pi-extension/index.ts" {
+		t.Fatalf("expected pi extension path in spawn options, got %q", got.PiExtensionPath)
+	}
+}
+
 func TestCheckAndRefreshTokenUpdatesLiveClients(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -286,6 +379,7 @@ func TestHandleSyncCronsWritesLocalStore(t *testing.T) {
 type mockManager struct {
 	stopAllFn func()
 	getFn     func(sessionID string) *session.Actor
+	spawnFn   func(ctx context.Context, opts session.Options) (*session.Actor, error)
 }
 
 func (m *mockManager) Get(sessionID string) *session.Actor {
@@ -295,6 +389,9 @@ func (m *mockManager) Get(sessionID string) *session.Actor {
 	return nil
 }
 func (m *mockManager) Spawn(ctx context.Context, opts session.Options) (*session.Actor, error) {
+	if m.spawnFn != nil {
+		return m.spawnFn(ctx, opts)
+	}
 	return nil, nil
 }
 func (m *mockManager) ActiveTaskIDs() []string                                                    { return nil }

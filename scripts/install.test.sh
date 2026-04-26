@@ -37,9 +37,11 @@ esac
 command -v go >/dev/null 2>&1 || { echo "SKIP: go not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 command -v openssl >/dev/null 2>&1 || { echo "SKIP: openssl not installed"; exit 0; }
+command -v tar >/dev/null 2>&1 || { echo "SKIP: tar not installed"; exit 0; }
 
 VERSION="v0.0.1-test"
 ASSET_NAME="gsd-cloud-${VERSION}-${OS}-${ARCH}"
+EXTENSION_ASSET_NAME="gsd-cloud-pi-extension-${VERSION}.tar.gz"
 
 echo "Building daemon binary for ${OS}/${ARCH}..."
 if ! (cd "$REPO_ROOT" && \
@@ -50,11 +52,18 @@ if ! (cd "$REPO_ROOT" && \
     exit 1
 fi
 
+echo "Packaging fake pi extension..."
+EXTENSION_DIR="$WORK_DIR/pi-extension"
+mkdir -p "$EXTENSION_DIR"
+printf '%s\n' 'export default {};' > "$EXTENSION_DIR/index.ts"
+printf '%s\n' 'export function applyUsageFromSdkMessage() {}' > "$EXTENSION_DIR/usage-estimator.js"
+tar -czf "$DIST_DIR/$EXTENSION_ASSET_NAME" -C "$EXTENSION_DIR" .
+
 echo "Computing checksum..."
 if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DIST_DIR" && sha256sum "$ASSET_NAME" > "SHA256SUMS")
+    (cd "$DIST_DIR" && sha256sum "$ASSET_NAME" "$EXTENSION_ASSET_NAME" > "SHA256SUMS")
 else
-    (cd "$DIST_DIR" && shasum -a 256 "$ASSET_NAME" > "SHA256SUMS")
+    (cd "$DIST_DIR" && shasum -a 256 "$ASSET_NAME" "$EXTENSION_ASSET_NAME" > "SHA256SUMS")
 fi
 
 echo "Generating release signing key..."
@@ -126,6 +135,11 @@ fi
 OUTPUT=$("$INSTALL_DIR/gsd-cloud" version)
 if ! echo "$OUTPUT" | grep -q "0.0.1-test"; then
     echo "FAIL: installed binary did not report expected version: $OUTPUT"
+    exit 1
+fi
+
+if [ ! -f "$INSTALL_DIR/pi-extension/index.ts" ]; then
+    echo "FAIL: pi extension not installed"
     exit 1
 fi
 
