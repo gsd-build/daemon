@@ -44,6 +44,22 @@ func readArgsFile(t *testing.T, path string) []string {
 	return argv
 }
 
+func TestNormalizePiModelStripsBracketSuffix(t *testing.T) {
+	tests := map[string]string{
+		"claude-opus-4-6[1m]":      "claude-opus-4-6",
+		" claude-opus-4-6[1m] ":    "claude-opus-4-6",
+		"claude-sonnet-4-6":        "claude-sonnet-4-6",
+		"claude-sonnet-4-6:high":   "claude-sonnet-4-6:high",
+		"anthropic/[custom-model]": "anthropic/[custom-model]",
+	}
+
+	for input, want := range tests {
+		if got := normalizePiModel(input); got != want {
+			t.Fatalf("normalizePiModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 type fakeRelay struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
