@@ -75,6 +75,21 @@ func NewExecutor(opts Options) *Executor {
 	return &Executor{opts: opts}
 }
 
+func piRPCCommand(ctx context.Context, binaryPath string, cwd string, sessionFile string, args ...string) *exec.Cmd {
+	baseArgs := []string{"-p", "--mode", "rpc"}
+	baseArgs = append(baseArgs, args...)
+	if sessionFile != "" {
+		baseArgs = append(baseArgs, "--session", sessionFile)
+	} else {
+		baseArgs = append(baseArgs, "--no-session")
+	}
+	cmd := exec.CommandContext(ctx, binaryPath, baseArgs...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	return cmd
+}
+
 // UIRequest is a question or prompt the agent issued through pi's UI APIs.
 type UIRequest struct {
 	ID          string
@@ -115,8 +130,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	}
 
 	args := []string{
-		"-p",
-		"--mode", "rpc",
 		"-e", e.opts.ExtensionPath,
 		"--provider", e.opts.Provider,
 		"--no-extensions", "--no-skills", "--no-prompt-templates",
@@ -124,11 +137,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	}
 	if e.opts.Model != "" {
 		args = append(args, "--model", e.opts.Model)
-	}
-	if e.opts.ResumeSession != "" {
-		args = append(args, "--session", e.opts.ResumeSession)
-	} else {
-		args = append(args, "--no-session")
 	}
 
 	slog.Info("starting pi",
@@ -140,8 +148,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"promptLen", len(e.opts.Prompt),
 	)
 
-	cmd := exec.CommandContext(ctx, e.opts.BinaryPath, args...)
-	cmd.Dir = e.opts.CWD
+	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()

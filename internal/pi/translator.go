@@ -7,6 +7,8 @@ package pi
 
 import (
 	"encoding/json"
+
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 // pi event shapes (only the fields we read).
@@ -93,6 +95,17 @@ func piToAnthropicToolName(name string) string {
 		return "Grep"
 	default:
 		return name
+	}
+}
+
+func NormalizeCompactReason(reason string) protocol.CompactReason {
+	switch reason {
+	case string(protocol.CompactReasonThreshold):
+		return protocol.CompactReasonThreshold
+	case string(protocol.CompactReasonOverflow):
+		return protocol.CompactReasonOverflow
+	default:
+		return protocol.CompactReasonManual
 	}
 }
 
