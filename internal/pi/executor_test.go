@@ -153,3 +153,58 @@ func assertToolExecutionStart(t *testing.T, got ToolExecutionStart) {
 		t.Fatalf("question id = %#v, want scope", question["id"])
 	}
 }
+
+func TestNotifyToolExecutionEnd_ParsesWriteResult(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type":"tool_execution_end",
+		"toolCallId":"call_abc",
+		"toolName":"write",
+		"result":{"content":[{"type":"text","text":"Successfully wrote 12 bytes to a.txt"}]},
+		"isError":false
+	}`)
+	var got *ToolExecutionEnd
+	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { got = &ev })
+	if got == nil {
+		t.Fatalf("callback not fired")
+	}
+	if got.ToolCallID != "call_abc" || got.ToolName != "write" || got.IsError {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+	if got.Result == nil {
+		t.Fatalf("expected non-nil Result map")
+	}
+}
+
+func TestNotifyToolExecutionEnd_PreservesEditFirstChangedLine(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type":"tool_execution_end",
+		"toolCallId":"call_xyz",
+		"toolName":"edit",
+		"result":{"content":[{"type":"text","text":"ok"}],"details":{"firstChangedLine":42,"diff":"-1 a\n+1 b"}},
+		"isError":false
+	}`)
+	var got *ToolExecutionEnd
+	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { got = &ev })
+	if got == nil {
+		t.Fatalf("callback not fired")
+	}
+	details, _ := got.Result["details"].(map[string]any)
+	fcl, _ := details["firstChangedLine"].(float64)
+	if int(fcl) != 42 {
+		t.Fatalf("firstChangedLine: got %v want 42", fcl)
+	}
+}
+
+func TestNotifyToolExecutionEnd_NilCallbackIsNoop(t *testing.T) {
+	raw := json.RawMessage(`{"type":"tool_execution_end","toolName":"write"}`)
+	notifyToolExecutionEnd(raw, nil) // must not panic
+}
+
+func TestNotifyToolExecutionEnd_IgnoresWrongType(t *testing.T) {
+	raw := json.RawMessage(`{"type":"something_else"}`)
+	called := false
+	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { called = true })
+	if called {
+		t.Fatalf("callback should not fire on wrong type")
+	}
+}

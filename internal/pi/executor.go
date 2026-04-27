@@ -65,6 +65,7 @@ type Executor struct {
 	OnPIDStart           func(pid int)
 	OnPIDExit            func(pid int)
 	OnToolExecutionStart func(ToolExecutionStart)
+	OnToolExecutionEnd   func(ToolExecutionEnd)
 }
 
 // NewExecutor constructs an Executor. Call Run to spawn.
@@ -447,6 +448,50 @@ func notifyToolExecutionStart(raw json.RawMessage, notify func(ToolExecutionStar
 		ToolCallID: toolCallID,
 		ToolName:   toolName,
 		Args:       event.Args,
+	})
+}
+
+// ToolExecutionEnd describes a pi tool execution that has completed.
+// Result is the raw pi result map (with content[] and optional details).
+// IsError is true when pi reported the tool errored.
+type ToolExecutionEnd struct {
+	ToolCallID string
+	ToolName   string
+	Result     map[string]any
+	IsError    bool
+}
+
+type piToolExecutionEnd struct {
+	Type            string         `json:"type"`
+	ToolCallID      string         `json:"tool_call_id"`
+	ToolCallIDCamel string         `json:"toolCallId"`
+	ToolName        string         `json:"tool_name"`
+	ToolNameCamel   string         `json:"toolName"`
+	Result          map[string]any `json:"result"`
+	IsError         bool           `json:"isError"`
+}
+
+func notifyToolExecutionEnd(raw json.RawMessage, notify func(ToolExecutionEnd)) {
+	if notify == nil {
+		return
+	}
+	var event piToolExecutionEnd
+	if err := json.Unmarshal(raw, &event); err != nil || event.Type != "tool_execution_end" {
+		return
+	}
+	toolCallID := event.ToolCallID
+	if toolCallID == "" {
+		toolCallID = event.ToolCallIDCamel
+	}
+	toolName := event.ToolName
+	if toolName == "" {
+		toolName = event.ToolNameCamel
+	}
+	notify(ToolExecutionEnd{
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+		Result:     event.Result,
+		IsError:    event.IsError,
 	})
 }
 
