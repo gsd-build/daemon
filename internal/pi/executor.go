@@ -15,11 +15,37 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
 )
+
+// piExitError wraps pi's exit code + stderr into a user-friendly error.
+// Detects the "extension dependencies missing" signature and returns a
+// repair hint instead of the raw npm-shaped failure that confuses users.
+func piExitError(code int, stderr string) error {
+	stderr = strings.TrimSpace(stderr)
+	// Specific known failure: pi extension's node_modules is missing or
+	// missing the platform-native @anthropic-ai/claude-agent-sdk binary.
+	// Surfaces as either "Cannot find module '@anthropic-ai/claude-agent-sdk'"
+	// or "Unknown provider \"claude-cli\"" (the second is the symptom; the
+	// first is the cause when both appear together).
+	if strings.Contains(stderr, "Cannot find module '@anthropic-ai/claude-agent-sdk'") ||
+		(strings.Contains(stderr, "Unknown provider") && strings.Contains(stderr, "claude-cli")) {
+		return fmt.Errorf(
+			"pi extension dependencies are missing — restart the daemon "+
+				"(self-heal will run npm ci) or run `gsd-cloud doctor` to diagnose. "+
+				"Raw error: %s",
+			stderr,
+		)
+	}
+	if stderr != "" {
+		return fmt.Errorf("pi exited with code %d: %s", code, stderr)
+	}
+	return fmt.Errorf("pi exited with code %d (no stderr)", code)
+}
 
 // Options configures a pi process.
 type Options struct {
@@ -226,10 +252,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 			if exitErr, ok := waitErr.(*exec.ExitError); ok {
 				code := exitErr.ExitCode()
 				if code > 0 {
-					if len(stderrBuf) > 0 {
-						return fmt.Errorf("pi exited with code %d: %s", code, string(stderrBuf))
-					}
-					return fmt.Errorf("pi exited with code %d (no stderr)", code)
+					return piExitError(code, string(stderrBuf))
 				}
 			} else {
 				return fmt.Errorf("pi wait: %w", waitErr)
@@ -247,10 +270,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			code := exitErr.ExitCode()
 			if code > 0 {
-				if len(stderrBuf) > 0 {
-					return fmt.Errorf("pi exited with code %d: %s", code, string(stderrBuf))
-				}
-				return fmt.Errorf("pi exited with code %d (no stderr)", code)
+				return piExitError(code, string(stderrBuf))
 			}
 		} else {
 			return fmt.Errorf("pi wait: %w", waitErr)

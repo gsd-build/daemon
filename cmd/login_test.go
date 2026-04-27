@@ -36,6 +36,12 @@ func (f *fakePlatform) Stop() error {
 	return nil
 }
 
+func (f *fakePlatform) Restart() error {
+	f.running = true
+	f.starts++
+	return nil
+}
+
 func (f *fakePlatform) IsInstalled() bool {
 	return f.installed
 }

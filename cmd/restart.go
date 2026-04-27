@@ -19,13 +19,8 @@ var restartCmd = &cobra.Command{
 			return fmt.Errorf("service not installed — run 'gsd-cloud install' first")
 		}
 		fmt.Println("Restarting daemon...")
-		if platform.IsRunning() {
-			if err := platform.Stop(); err != nil {
-				return fmt.Errorf("stop: %w", err)
-			}
-		}
-		if err := platform.Start(); err != nil {
-			return fmt.Errorf("start: %w", err)
+		if err := platform.Restart(); err != nil {
+			return fmt.Errorf("restart: %w", err)
 		}
 		fmt.Println("Daemon restarted.")
 		return nil

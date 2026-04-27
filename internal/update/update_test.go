@@ -152,6 +152,52 @@ func TestBackupAndRollback(t *testing.T) {
 	}
 }
 
+// TestEnsureExtensionHealthy_NoExtensionInstalled covers the fresh-machine
+// case: no extension dir at all → no-op, no error. Pi-routed tasks will
+// still fail later, but that's not the self-heal path's job.
+func TestEnsureExtensionHealthy_NoExtensionInstalled(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureExtensionHealthy(dir); err != nil {
+		t.Fatalf("expected nil for missing extension, got %v", err)
+	}
+}
+
+// TestEnsureExtensionHealthy_AlreadyHealthy covers the steady-state case:
+// extension is installed with a platform-native claude SDK binary present.
+// Should be a no-op (no npm invocation).
+func TestEnsureExtensionHealthy_AlreadyHealthy(t *testing.T) {
+	dir := t.TempDir()
+	// Stub a healthy extension layout: package.json + node_modules with a
+	// platform-specific claude SDK binary.
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	platDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if err := os.MkdirAll(platDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(platDir, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureExtensionHealthy(dir); err != nil {
+		t.Fatalf("expected nil for healthy extension, got %v", err)
+	}
+}
+
+// TestExtensionHasNativeBinary_RejectsAggregatePackage ensures we don't
+// accept the non-platform-specific @anthropic-ai/claude-agent-sdk dir as
+// proof of health — that dir exists in node_modules but doesn't carry the
+// platform-native binary.
+func TestExtensionHasNativeBinary_RejectsAggregatePackage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if extensionHasNativeBinary(dir) {
+		t.Fatal("expected false when only the aggregate package is present")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

@@ -42,10 +42,7 @@ var updateCmd = &cobra.Command{
 		platform, err := service.Detect()
 		if err == nil && platform.IsInstalled() {
 			fmt.Println("Restarting service...")
-			if platform.IsRunning() {
-				_ = platform.Stop()
-			}
-			if err := platform.Start(); err != nil {
+			if err := platform.Restart(); err != nil {
 				return fmt.Errorf("restart after update: %w", err)
 			}
 		}

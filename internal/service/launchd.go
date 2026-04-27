@@ -127,6 +127,15 @@ func (l *launchdPlatform) Stop() error {
 	return l.run("bootout", l.serviceTarget())
 }
 
+func (l *launchdPlatform) Restart() error {
+	// kickstart -k = "kill if running, then start". Atomic from launchd's
+	// view, so KeepAlive=true can't race a Stop()/Start() pair.
+	if l.isLoaded() {
+		return l.run("kickstart", "-k", l.serviceTarget())
+	}
+	return l.run("bootstrap", l.domainTarget(), l.plistPath())
+}
+
 func (l *launchdPlatform) IsInstalled() bool {
 	_, err := os.Stat(l.plistPath())
 	return err == nil
