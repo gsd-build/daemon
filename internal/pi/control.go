@@ -14,6 +14,7 @@ import (
 const (
 	defaultReserveTokens    int64 = 16384
 	defaultKeepRecentTokens int64 = 20000
+	defaultContextWindow    int64 = 200000
 )
 
 type ControlCommandType string
@@ -71,18 +72,41 @@ type controlFrame struct {
 
 type rawControlFrame struct {
 	Type             string           `json:"type"`
+	Command          string           `json:"command"`
+	Success          *bool            `json:"success"`
 	OK               bool             `json:"ok"`
 	Error            string           `json:"error"`
+	Message          string           `json:"message"`
 	Reason           string           `json:"reason"`
 	Summary          string           `json:"summary"`
 	FirstKeptEntryID string           `json:"firstKeptEntryId"`
 	ContextUsage     *rawContextUsage `json:"contextUsage"`
+	Data             *rawControlData  `json:"data"`
 }
 
 type rawContextUsage struct {
 	Tokens        *int64   `json:"tokens"`
 	ContextWindow int64    `json:"contextWindow"`
 	Percent       *float64 `json:"percent"`
+}
+
+type rawControlData struct {
+	Summary          string           `json:"summary"`
+	FirstKeptEntryID string           `json:"firstKeptEntryId"`
+	TokensBefore     *int64           `json:"tokensBefore"`
+	TokensAfter      *int64           `json:"tokensAfter"`
+	Tokens           *rawTokenUsage   `json:"tokens"`
+	ContextUsage     *rawContextUsage `json:"contextUsage"`
+	Error            string           `json:"error"`
+	Message          string           `json:"message"`
+}
+
+type rawTokenUsage struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
+	Total      int64 `json:"total"`
 }
 
 func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error) {
@@ -139,8 +163,11 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 	if waitErr != nil {
 		return ControlResult{}, fmt.Errorf("pi control process failed: %w: %s", waitErr, string(stderrBytes))
 	}
-	if !result.OK && result.Error != "" {
-		return result, errors.New(result.Error)
+	if !result.OK {
+		if result.Error != "" {
+			return result, errors.New(result.Error)
+		}
+		return result, errors.New("pi control command failed")
 	}
 	return result, nil
 }
@@ -165,6 +192,8 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	result := ControlResult{}
 	sawTerminalFrame := false
+	sawCompactionStart := false
+	sawCompactionEnd := false
 
 	for scanner.Scan() {
 		var frame rawControlFrame
@@ -173,12 +202,24 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 		}
 		switch frame.Type {
 		case "compaction_start":
+			sawCompactionStart = true
 			if onEvent != nil {
 				onEvent(frame.toEvent(ControlEventCompactionStart))
 			}
 		case "compaction_end":
+			sawCompactionEnd = true
 			if onEvent != nil {
 				onEvent(frame.toEvent(ControlEventCompactionEnd))
+			}
+		case "response":
+			terminalResult, ok := frame.toResponseResult(onEvent, !sawCompactionStart, !sawCompactionEnd)
+			if ok {
+				if frame.Command == string(ControlCommandCompact) {
+					sawCompactionStart = true
+					sawCompactionEnd = true
+				}
+				sawTerminalFrame = true
+				result = terminalResult
 			}
 		case "control_result", "session_stats":
 			sawTerminalFrame = true
@@ -209,6 +250,127 @@ func (frame rawControlFrame) toEvent(eventType ControlEventType) ControlEvent {
 	}
 }
 
+func (frame rawControlFrame) toResponseResult(onEvent func(ControlEvent), synthesizeStart bool, synthesizeEnd bool) (ControlResult, bool) {
+	switch frame.Command {
+	case string(ControlCommandGetSessionStats):
+		return ControlResult{
+			OK:           frame.responseOK(),
+			Error:        frame.responseError(),
+			ContextUsage: frame.responseContextUsage(),
+		}, true
+	case string(ControlCommandCompact):
+		if frame.responseOK() && onEvent != nil {
+			if synthesizeStart {
+				onEvent(frame.toResponseCompactionStartEvent())
+			}
+			if synthesizeEnd {
+				onEvent(frame.toResponseCompactionEndEvent())
+			}
+		}
+		return ControlResult{
+			OK:           frame.responseOK(),
+			Error:        frame.responseError(),
+			ContextUsage: frame.responseContextUsage(),
+		}, true
+	default:
+		return ControlResult{}, false
+	}
+}
+
+func (frame rawControlFrame) responseOK() bool {
+	if frame.Success != nil {
+		return *frame.Success
+	}
+	return frame.OK || frame.responseError() == ""
+}
+
+func (frame rawControlFrame) responseError() string {
+	if frame.Error != "" {
+		return frame.Error
+	}
+	if frame.Message != "" {
+		return frame.Message
+	}
+	if frame.Data != nil {
+		if frame.Data.Error != "" {
+			return frame.Data.Error
+		}
+		if frame.Data.Message != "" {
+			return frame.Data.Message
+		}
+	}
+	return ""
+}
+
+func (frame rawControlFrame) responseContextUsage() *ContextUsage {
+	if usage := frame.ContextUsage.toContextUsage(); usage != nil {
+		return usage.withFallbackWindow(defaultContextWindow)
+	}
+	if frame.Data == nil {
+		return nil
+	}
+	if usage := frame.Data.ContextUsage.toContextUsage(); usage != nil {
+		return usage.withFallbackWindow(defaultContextWindow)
+	}
+	if usage := frame.Data.Tokens.toContextUsage(); usage != nil {
+		return usage
+	}
+	if frame.Data.TokensAfter != nil {
+		return contextUsageFromTokenCount(*frame.Data.TokensAfter)
+	}
+	if frame.Data.TokensBefore != nil {
+		return contextUsageFromTokenCount(*frame.Data.TokensBefore)
+	}
+	return nil
+}
+
+func (frame rawControlFrame) toResponseCompactionStartEvent() ControlEvent {
+	event := ControlEvent{
+		Type:       ControlEventCompactionStart,
+		Reason:     frame.Reason,
+		ObservedAt: time.Now().UTC(),
+	}
+	if event.Reason == "" {
+		event.Reason = "manual"
+	}
+	if frame.Data != nil && frame.Data.TokensBefore != nil {
+		event.ContextUsage = contextUsageFromTokenCount(*frame.Data.TokensBefore)
+	} else {
+		event.ContextUsage = frame.responseContextUsage()
+	}
+	return event
+}
+
+func (frame rawControlFrame) toResponseCompactionEndEvent() ControlEvent {
+	event := ControlEvent{
+		Type:       ControlEventCompactionEnd,
+		Reason:     frame.Reason,
+		ObservedAt: time.Now().UTC(),
+	}
+	if event.Reason == "" {
+		event.Reason = "manual"
+	}
+	if frame.Data != nil {
+		event.Summary = frame.Data.Summary
+		event.FirstKeptEntryID = frame.Data.FirstKeptEntryID
+		if frame.Data.TokensAfter != nil {
+			event.ContextUsage = contextUsageFromTokenCount(*frame.Data.TokensAfter)
+		} else if usage := frame.Data.ContextUsage.toContextUsage(); usage != nil {
+			event.ContextUsage = usage.withFallbackWindow(defaultContextWindow)
+		}
+	}
+	if event.Summary == "" {
+		event.Summary = frame.Summary
+	}
+	if event.FirstKeptEntryID == "" {
+		event.FirstKeptEntryID = frame.FirstKeptEntryID
+	}
+	if event.ContextUsage == nil {
+		event.ContextUsage = frame.ContextUsage.toContextUsage().withFallbackWindow(defaultContextWindow)
+	}
+	return event
+}
+
 func (usage *rawContextUsage) toContextUsage() *ContextUsage {
 	if usage == nil {
 		return nil
@@ -217,6 +379,37 @@ func (usage *rawContextUsage) toContextUsage() *ContextUsage {
 		Tokens:        usage.Tokens,
 		ContextWindow: usage.ContextWindow,
 		Percent:       usage.Percent,
+	}
+}
+
+func (usage *ContextUsage) withFallbackWindow(contextWindow int64) *ContextUsage {
+	if usage == nil {
+		return nil
+	}
+	if usage.ContextWindow > 0 || contextWindow <= 0 {
+		return usage
+	}
+	usage.ContextWindow = contextWindow
+	if usage.Percent == nil && usage.Tokens != nil {
+		percent := (float64(*usage.Tokens) / float64(contextWindow)) * 100
+		usage.Percent = &percent
+	}
+	return usage
+}
+
+func (usage *rawTokenUsage) toContextUsage() *ContextUsage {
+	if usage == nil {
+		return nil
+	}
+	return contextUsageFromTokenCount(usage.Total)
+}
+
+func contextUsageFromTokenCount(tokens int64) *ContextUsage {
+	percent := (float64(tokens) / float64(defaultContextWindow)) * 100
+	return &ContextUsage{
+		Tokens:        &tokens,
+		ContextWindow: defaultContextWindow,
+		Percent:       &percent,
 	}
 }
 
