@@ -411,10 +411,21 @@ func compactStatusFromPiEvent(request *protocol.CompactRequest, event pi.Control
 	}
 }
 
+// pendingFileToolSweepInterval is how often the actor scans pendingFileToolStarts
+// for stale entries. pendingFileToolMaxAge is the TTL beyond which an unmatched
+// start event is dropped. They are independent dials that happen to share a
+// value: pi tool executions are sub-second, so 60 seconds is a generous safety
+// margin against missing-end events (pi crash, abandoned tool call), not a
+// real timeout for any normal write/edit.
+const (
+	pendingFileToolSweepInterval = 60 * time.Second
+	pendingFileToolMaxAge        = 60 * time.Second
+)
+
 // Run is the actor's main loop. It waits for tasks, spawns executors, and
 // handles permission flows. Blocks until ctx is canceled or Stop is called.
 func (a *Actor) Run(ctx context.Context) error {
-	sweepTicker := time.NewTicker(60 * time.Second)
+	sweepTicker := time.NewTicker(pendingFileToolSweepInterval)
 	defer sweepTicker.Stop()
 	for {
 		select {
@@ -423,7 +434,7 @@ func (a *Actor) Run(ctx context.Context) error {
 		case <-a.stopCh:
 			return nil
 		case <-sweepTicker.C:
-			a.sweepStalePendingFileTools(60 * time.Second)
+			a.sweepStalePendingFileTools(pendingFileToolMaxAge)
 		case task := <-a.taskCh:
 			if err := a.executeTask(ctx, task); err != nil {
 				slog.Error("task failed", "taskId", task.TaskID, "sessionId", a.opts.SessionID, "err", err)
