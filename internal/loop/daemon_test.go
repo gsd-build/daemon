@@ -17,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/preview"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
@@ -186,6 +187,69 @@ func TestHandleTaskForcePiSetsEngine(t *testing.T) {
 	}
 	if msg.Engine != "pi" {
 		t.Fatalf("expected forced pi engine, got %q", msg.Engine)
+	}
+}
+
+func TestDaemonHandlesPreviewOpen(t *testing.T) {
+	daemon, relayClient := newTestDaemonWithPreview(t)
+	err := daemon.handleMessage(&protocol.Envelope{
+		Type: protocol.MsgTypePreviewOpen,
+		Payload: &protocol.PreviewOpen{
+			Type:       protocol.MsgTypePreviewOpen,
+			RequestID:  "req_1",
+			PreviewID:  "preview_1",
+			SessionID:  "session_1",
+			ChannelID:  "channel_1",
+			MachineID:  "machine_1",
+			TargetHost: "127.0.0.1",
+			TargetPort: 3000,
+			ExpiresAt:  time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+	env, err := drainQueuedMessage(t, relayClient)
+	if err != nil {
+		t.Fatalf("drain relay message: %v", err)
+	}
+	result, ok := env.Payload.(*protocol.PreviewOpenResult)
+	if !ok {
+		t.Fatalf("payload = %T, want PreviewOpenResult", env.Payload)
+	}
+	if !result.OK {
+		t.Fatalf("OK=false error=%s", result.ErrorCode)
+	}
+}
+
+func TestDaemonRejectsUnsafePreviewOpen(t *testing.T) {
+	daemon, relayClient := newTestDaemonWithPreview(t)
+	if err := daemon.handleMessage(&protocol.Envelope{
+		Type: protocol.MsgTypePreviewOpen,
+		Payload: &protocol.PreviewOpen{
+			Type:       protocol.MsgTypePreviewOpen,
+			RequestID:  "req_1",
+			PreviewID:  "preview_1",
+			SessionID:  "session_1",
+			ChannelID:  "channel_1",
+			MachineID:  "machine_1",
+			TargetHost: "example.com",
+			TargetPort: 3000,
+			ExpiresAt:  time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+	env, err := drainQueuedMessage(t, relayClient)
+	if err != nil {
+		t.Fatalf("drain relay message: %v", err)
+	}
+	result, ok := env.Payload.(*protocol.PreviewOpenResult)
+	if !ok {
+		t.Fatalf("payload = %T, want PreviewOpenResult", env.Payload)
+	}
+	if result.OK || result.ErrorCode != "unsafe_target" {
+		t.Fatalf("result = %#v, want unsafe_target failure", result)
 	}
 }
 
@@ -421,6 +485,22 @@ func relayClientStub(connected bool) *relay.Client {
 	})
 	c.SetConnectedForTest(connected)
 	return c
+}
+
+func newTestDaemonWithPreview(t *testing.T) (*Daemon, *relay.Client) {
+	t.Helper()
+	client := relayClientStub(false)
+	registry := preview.NewRegistry()
+	d := &Daemon{
+		cfg:             &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version:         "test",
+		manager:         &mockManager{},
+		client:          client,
+		previewRegistry: registry,
+		previewHTTP:     &preview.HTTPHandler{Registry: registry, Sender: client},
+		previewWS:       preview.NewWebSocketBridge(registry, client),
+	}
+	return d, client
 }
 
 func drainQueuedMessage(t *testing.T, client *relay.Client) (*protocol.Envelope, error) {

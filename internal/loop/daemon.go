@@ -19,6 +19,7 @@ import (
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pidfile"
+	"github.com/gsd-build/daemon/internal/preview"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
@@ -53,6 +54,11 @@ type Daemon struct {
 	piBinaryPath    string
 	piExtensionPath string
 	forcePi         bool
+	previewRegistry *preview.Registry
+	previewHTTP     *preview.HTTPHandler
+	previewWS       *preview.WebSocketBridge
+	runCtxMu        sync.RWMutex
+	runCtx          context.Context
 }
 
 type terminalRelaySender struct {
@@ -225,6 +231,7 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		PIDDir:          pidDir,
 		Uploader:        uploader,
 	})
+	previewRegistry := preview.NewRegistry()
 
 	d := &Daemon{
 		cfg:             cfg,
@@ -237,6 +244,9 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		piBinaryPath:    piBinaryPath,
 		piExtensionPath: piExtensionPath,
 		forcePi:         forcePi,
+		previewRegistry: previewRegistry,
+		previewHTTP:     &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
+		previewWS:       preview.NewWebSocketBridge(previewRegistry, client),
 	}
 
 	return d, nil
@@ -329,6 +339,15 @@ func (d *Daemon) Sessions() []sockapi.SessionInfo {
 // Run connects to the relay and blocks until ctx is canceled.
 // The client handles reconnection automatically.
 func (d *Daemon) Run(ctx context.Context) error {
+	d.runCtxMu.Lock()
+	d.runCtx = ctx
+	d.runCtxMu.Unlock()
+	defer func() {
+		d.runCtxMu.Lock()
+		d.runCtx = nil
+		d.runCtxMu.Unlock()
+	}()
+
 	d.client.SetHandler(d.handleMessage)
 
 	// Check token expiry at startup.
@@ -417,10 +436,74 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleCompactRequest(msg)
 	case *protocol.ContextStatsRequest:
 		return d.handleContextStatsRequest(msg)
+	case *protocol.PreviewOpen:
+		return d.handlePreviewOpen(msg)
+	case *protocol.PreviewClose:
+		return d.handlePreviewClose(msg)
+	case *protocol.PreviewHTTPRequest:
+		return d.previewHTTP.Handle(d.runtimeContext(), msg)
+	case *protocol.PreviewStreamCancel:
+		d.previewRegistry.CancelStream(msg.StreamID)
+		return nil
+	case *protocol.PreviewWebSocketOpen:
+		return d.previewWS.Open(d.runtimeContext(), msg)
+	case *protocol.PreviewWebSocketData:
+		return d.previewWS.Data(d.runtimeContext(), msg)
+	case *protocol.PreviewWebSocketClose:
+		return d.previewWS.Close(d.runtimeContext(), msg)
 	default:
 		// Ignore other types
 		return nil
 	}
+}
+
+func (d *Daemon) runtimeContext() context.Context {
+	d.runCtxMu.RLock()
+	defer d.runCtxMu.RUnlock()
+	if d.runCtx != nil {
+		return d.runCtx
+	}
+	return context.Background()
+}
+
+func (d *Daemon) handlePreviewOpen(msg *protocol.PreviewOpen) error {
+	target, err := preview.NormalizeTarget(msg.TargetHost, msg.TargetPort)
+	if err != nil {
+		return d.sendPreviewOpenResult(msg, false, "unsafe_target", err.Error())
+	}
+	expiresAt, err := time.Parse(time.RFC3339, msg.ExpiresAt)
+	if err != nil {
+		return d.sendPreviewOpenResult(msg, false, "invalid_request", "invalid preview expiry")
+	}
+	if err := d.previewRegistry.Open(context.Background(), preview.OpenRequest{
+		PreviewID: msg.PreviewID,
+		SessionID: msg.SessionID,
+		ChannelID: msg.ChannelID,
+		MachineID: msg.MachineID,
+		Target:    target,
+		ExpiresAt: expiresAt,
+	}); err != nil {
+		return d.sendPreviewOpenResult(msg, false, "open_failed", err.Error())
+	}
+	return d.sendPreviewOpenResult(msg, true, "", "")
+}
+
+func (d *Daemon) handlePreviewClose(msg *protocol.PreviewClose) error {
+	d.previewRegistry.Close(msg.PreviewID)
+	return nil
+}
+
+func (d *Daemon) sendPreviewOpenResult(msg *protocol.PreviewOpen, ok bool, code string, message string) error {
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, &protocol.PreviewOpenResult{
+		Type:      protocol.MsgTypePreviewOpenResult,
+		RequestID: msg.RequestID,
+		PreviewID: msg.PreviewID,
+		OK:        ok,
+		ErrorCode: code,
+		Message:   message,
+	})
 }
 
 func (d *Daemon) handleTask(msg *protocol.Task) error {
