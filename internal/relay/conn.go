@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/gsd-build/daemon/internal/preview"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -106,8 +107,12 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 		Arch:          arch,
 		ActiveTasks:   activeTasks,
 		Capabilities: &protocol.HelloCapabilities{
-			Stop:     true,
-			Terminal: true,
+			Stop:                      true,
+			Terminal:                  true,
+			PreviewTunnel:             true,
+			PreviewMaxFrameBytes:      preview.DefaultMaxFrameBytes,
+			PreviewChunkBytes:         preview.DefaultChunkBytes,
+			PreviewWebSocketProtocols: true,
 		},
 	}
 	buf, err := json.Marshal(hello)
