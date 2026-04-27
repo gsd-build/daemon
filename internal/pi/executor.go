@@ -497,6 +497,34 @@ func notifyToolExecutionEnd(raw json.RawMessage, notify func(ToolExecutionEnd)) 
 	})
 }
 
+// StreamFromReaderForTest drives the pi NDJSON parsing path from a synthetic
+// reader. It runs the same scanner loop as Run, firing OnToolExecutionStart /
+// OnToolExecutionEnd callbacks and emitting translated claude events. Intended
+// for cross-package integration tests that need to exercise the full
+// daemon emit path (executor → actor → relay) without spawning pi.
+func (e *Executor) StreamFromReaderForTest(
+	ctx context.Context,
+	r io.Reader,
+	onEvent func(claude.Event) error,
+	onUIRequest UIRequestHandler,
+) error {
+	state := &translatorState{}
+	agentEndCh := make(chan struct{}, 1)
+	return streamPiEvents(
+		ctx,
+		r,
+		io.Discard,
+		onEvent,
+		onUIRequest,
+		e.OnToolExecutionStart,
+		e.OnToolExecutionEnd,
+		agentEndCh,
+		true,
+		state,
+		time.Now(),
+	)
+}
+
 func (e *Executor) handlePiEventForTest(ctx context.Context, raw json.RawMessage, onEvent func(claude.Event) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
