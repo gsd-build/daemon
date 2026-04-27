@@ -259,6 +259,12 @@ func (a *Actor) currentTime() time.Time {
 func (a *Actor) handleContextStatsRequest(ctx context.Context, request *protocol.ContextStatsRequest) {
 	result, err := a.runPiControl(ctx, pi.ControlCommand{Type: pi.ControlCommandGetSessionStats}, nil)
 	if err != nil {
+		slog.Warn("Pi context stats request failed",
+			"session", request.SessionID,
+			"channel", request.ChannelID,
+			"request", request.RequestID,
+			"error", err,
+		)
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		_ = a.opts.Relay.Send(sendCtx, &protocol.ContextStats{

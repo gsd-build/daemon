@@ -119,11 +119,22 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 		return ControlResult{}, writeErr
 	}
 
+	stderrDone := make(chan struct{})
+	var stderrBytes []byte
+	var stderrErr error
+	go func() {
+		defer close(stderrDone)
+		stderrBytes, stderrErr = io.ReadAll(stderr)
+	}()
+
 	result, readErr := readControlOutput(stdout, opts.OnEvent)
-	stderrBytes, _ := io.ReadAll(stderr)
+	<-stderrDone
 	waitErr := cmd.Wait()
 	if readErr != nil {
 		return ControlResult{}, readErr
+	}
+	if stderrErr != nil {
+		return ControlResult{}, fmt.Errorf("read pi control stderr: %w", stderrErr)
 	}
 	if waitErr != nil {
 		return ControlResult{}, fmt.Errorf("pi control process failed: %w: %s", waitErr, string(stderrBytes))
