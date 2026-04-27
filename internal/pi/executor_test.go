@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gsd-build/daemon/internal/claude"
 )
 
 func TestTerminateProcessGroupAndWaitEscalates(t *testing.T) {
@@ -95,5 +98,58 @@ func TestExecutorRequiresExistingExtension(t *testing.T) {
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected os.ErrNotExist, got %v", err)
+	}
+}
+
+func TestExecutorReportsToolExecutionStart(t *testing.T) {
+	t.Run("snake case", func(t *testing.T) {
+		var got ToolExecutionStart
+		exec := Executor{
+			OnToolExecutionStart: func(event ToolExecutionStart) {
+				got = event
+			},
+		}
+
+		raw := json.RawMessage(`{"type":"tool_execution_start","tool_call_id":"toolu_123","tool_name":"ask_user_questions","args":{"questions":[{"id":"scope","question":"Pick","options":[{"label":"A"}]}]}}`)
+		if err := exec.handlePiEventForTest(context.Background(), raw, func(_ claude.Event) error { return nil }); err != nil {
+			t.Fatalf("handlePiEventForTest: %v", err)
+		}
+		assertToolExecutionStart(t, got)
+	})
+
+	t.Run("camel case", func(t *testing.T) {
+		var got ToolExecutionStart
+		exec := Executor{
+			OnToolExecutionStart: func(event ToolExecutionStart) {
+				got = event
+			},
+		}
+
+		raw := json.RawMessage(`{"type":"tool_execution_start","toolCallId":"toolu_123","toolName":"ask_user_questions","args":{"questions":[{"id":"scope","question":"Pick","options":[{"label":"A"}]}]}}`)
+		if err := exec.handlePiEventForTest(context.Background(), raw, func(_ claude.Event) error { return nil }); err != nil {
+			t.Fatalf("handlePiEventForTest: %v", err)
+		}
+		assertToolExecutionStart(t, got)
+	})
+}
+
+func assertToolExecutionStart(t *testing.T, got ToolExecutionStart) {
+	t.Helper()
+	if got.ToolCallID != "toolu_123" {
+		t.Fatalf("ToolCallID = %q, want toolu_123", got.ToolCallID)
+	}
+	if got.ToolName != "ask_user_questions" {
+		t.Fatalf("ToolName = %q, want ask_user_questions", got.ToolName)
+	}
+	questions, ok := got.Args["questions"].([]any)
+	if !ok || len(questions) != 1 {
+		t.Fatalf("questions = %#v, want one question", got.Args["questions"])
+	}
+	question, ok := questions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("question = %#v, want object", questions[0])
+	}
+	if question["id"] != "scope" {
+		t.Fatalf("question id = %#v, want scope", question["id"])
 	}
 }

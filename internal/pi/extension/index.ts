@@ -30,6 +30,8 @@ import {
   applyUsageFromSdkMessage,
   ensureNonZeroUsageForAbortedToolTurn,
 } from "./usage-estimator.js";
+import { schemaToZod } from "./schema-to-zod.js";
+import { askUserQuestionsTool } from "./ask-user-questions.js";
 
 const CLAUDE_BUILTINS = [
   "Bash", "BashOutput", "KillShell",
@@ -59,12 +61,7 @@ function piToolToSdkTool(piTool: PiTool, surface: (name: string, args: unknown) 
 
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const [key, schema] of Object.entries<any>(params)) {
-    let z1: z.ZodTypeAny = z.string();
-    if (schema?.type === "number" || schema?.type === "integer") z1 = z.number();
-    else if (schema?.type === "boolean") z1 = z.boolean();
-    else if (schema?.type === "array") z1 = z.array(z.string());
-    else z1 = z.string();
-    if (schema?.description) z1 = z1.describe(schema.description);
+    let z1: z.ZodTypeAny = schemaToZod(schema);
     if (!required.includes(key)) z1 = z1.optional();
     shape[key] = z1;
   }
@@ -325,6 +322,7 @@ function registerAskHumanTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
   registerAskHumanTool(pi);
+  pi.registerTool(askUserQuestionsTool as any);
   pi.registerProvider("claude-cli", {
     baseUrl: "http://localhost/unused",
     apiKey: "CLAUDE_CLI_KEY",

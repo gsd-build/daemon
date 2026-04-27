@@ -61,9 +61,10 @@ type Options struct {
 
 // Executor spawns one `pi -p --mode rpc` process per task.
 type Executor struct {
-	opts       Options
-	OnPIDStart func(pid int)
-	OnPIDExit  func(pid int)
+	opts                 Options
+	OnPIDStart           func(pid int)
+	OnPIDExit            func(pid int)
+	OnToolExecutionStart func(ToolExecutionStart)
 }
 
 // NewExecutor constructs an Executor. Call Run to spawn.
@@ -87,6 +88,12 @@ type UIRequest struct {
 // Implementations typically wait on a questionResponse channel and return
 // when ctx is cancelled.
 type UIRequestHandler func(context.Context, UIRequest) (string, error)
+
+type ToolExecutionStart struct {
+	ToolCallID string
+	ToolName   string
+	Args       map[string]any
+}
 
 // Run spawns pi, sends the prompt over stdin as an RPC `prompt` frame, and
 // streams events to onEvent. Blocks until pi exits or ctx is cancelled.
@@ -229,7 +236,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		model:  e.opts.Model,
 		taskID: e.opts.TaskID,
 	}
-	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, agentEndCh, true, state, startedAt)
+	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, agentEndCh, true, state, startedAt)
 	agentEnded := false
 	select {
 	case <-agentEndCh:
@@ -327,6 +334,7 @@ func streamPiEvents(
 	stdin io.Writer,
 	onEvent func(claude.Event) error,
 	onUIRequest UIRequestHandler,
+	onToolExecutionStart func(ToolExecutionStart),
 	agentEndCh chan<- struct{},
 	translate bool,
 	state *translatorState,
@@ -359,6 +367,8 @@ func streamPiEvents(
 		if peek.Type == "response" {
 			continue
 		}
+
+		notifyToolExecutionStart(raw, onToolExecutionStart)
 
 		// Intercept extension_ui_request before translation; never forwarded.
 		if peek.Type == "extension_ui_request" {
@@ -399,6 +409,57 @@ func streamPiEvents(
 		}
 	}
 	return scanner.Err()
+}
+
+type piToolExecutionStart struct {
+	Type            string         `json:"type"`
+	ToolCallID      string         `json:"tool_call_id"`
+	ToolCallIDCamel string         `json:"toolCallId"`
+	ToolName        string         `json:"tool_name"`
+	ToolNameCamel   string         `json:"toolName"`
+	Args            map[string]any `json:"args"`
+}
+
+func notifyToolExecutionStart(raw json.RawMessage, notify func(ToolExecutionStart)) {
+	if notify == nil {
+		return
+	}
+	var event piToolExecutionStart
+	if err := json.Unmarshal(raw, &event); err != nil || event.Type != "tool_execution_start" {
+		return
+	}
+	toolCallID := event.ToolCallID
+	if toolCallID == "" {
+		toolCallID = event.ToolCallIDCamel
+	}
+	toolName := event.ToolName
+	if toolName == "" {
+		toolName = event.ToolNameCamel
+	}
+	notify(ToolExecutionStart{
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+		Args:       event.Args,
+	})
+}
+
+func (e *Executor) handlePiEventForTest(ctx context.Context, raw json.RawMessage, onEvent func(claude.Event) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	notifyToolExecutionStart(raw, e.OnToolExecutionStart)
+	var peek struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		return err
+	}
+	for _, ev := range translatePiEvent(raw, &translatorState{}) {
+		if err := onEvent(claude.Event{Type: ev.Type, Raw: ev.Raw}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleUIRequest routes a pi extension_ui_request to the caller's handler
