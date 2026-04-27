@@ -413,6 +413,10 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleTerminalResize(msg)
 	case *protocol.TerminalClose:
 		return d.handleTerminalClose(msg)
+	case *protocol.CompactRequest:
+		return d.handleCompactRequest(msg)
+	case *protocol.ContextStatsRequest:
+		return d.handleContextStatsRequest(msg)
 	default:
 		// Ignore other types
 		return nil
@@ -508,6 +512,54 @@ func (d *Daemon) handleTerminalResize(msg *protocol.TerminalResize) error {
 
 func (d *Daemon) handleTerminalClose(msg *protocol.TerminalClose) error {
 	d.terminalManager.Close(msg.TerminalID, terminal.ReasonClosedByUser)
+	return nil
+}
+
+func (d *Daemon) handleCompactRequest(msg *protocol.CompactRequest) error {
+	actor := d.manager.Get(msg.SessionID)
+	if actor == nil {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return d.client.Send(sendCtx, &protocol.CompactStatus{
+			Type:                 protocol.MsgTypeCompactStatus,
+			SessionID:            msg.SessionID,
+			ChannelID:            msg.ChannelID,
+			RequestID:            msg.RequestID,
+			Status:               protocol.CompactStatusFailed,
+			Reason:               protocol.CompactReasonManual,
+			Instructions:         msg.Instructions,
+			ContextWindow:        0,
+			ReserveTokens:        16384,
+			KeepRecentTokens:     20000,
+			AutoThresholdPercent: 0,
+			Error:                "session is not active on this daemon",
+			Source:               "pi",
+			ObservedAt:           time.Now().UTC(),
+		})
+	}
+	go actor.HandleCompactRequest(context.Background(), msg)
+	return nil
+}
+
+func (d *Daemon) handleContextStatsRequest(msg *protocol.ContextStatsRequest) error {
+	actor := d.manager.Get(msg.SessionID)
+	if actor == nil {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return d.client.Send(sendCtx, &protocol.ContextStats{
+			Type:                 protocol.MsgTypeContextStats,
+			SessionID:            msg.SessionID,
+			ChannelID:            msg.ChannelID,
+			RequestID:            msg.RequestID,
+			ContextWindow:        0,
+			ReserveTokens:        16384,
+			KeepRecentTokens:     20000,
+			AutoThresholdPercent: 0,
+			Source:               "pi",
+			ObservedAt:           time.Now().UTC(),
+		})
+	}
+	go actor.HandleContextStatsRequest(context.Background(), msg)
 	return nil
 }
 

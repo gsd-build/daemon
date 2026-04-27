@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 )
 
@@ -207,5 +208,5 @@ func AutoThresholdPercent(contextWindow int64) float64 {
 	if contextWindow <= 0 {
 		return 0
 	}
-	return (float64(contextWindow-defaultReserveTokens) / float64(contextWindow)) * 100
+	return math.Round((float64(contextWindow-defaultReserveTokens)/float64(contextWindow))*100*10000) / 10000
 }
