@@ -106,7 +106,8 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 		Arch:          arch,
 		ActiveTasks:   activeTasks,
 		Capabilities: &protocol.HelloCapabilities{
-			Stop: true,
+			Stop:     true,
+			Terminal: true,
 		},
 	}
 	buf, err := json.Marshal(hello)

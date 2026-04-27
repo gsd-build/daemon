@@ -57,7 +57,7 @@ func TestManagerOpenWriteAndClose(t *testing.T) {
 	if err := m.Open(context.Background(), req); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := m.Input("term-1", []byte("printf gsd-terminal-ok\\nexit\\n")); err != nil {
+	if err := m.Input("term-1", []byte("printf gsd-terminal-ok\nexit\n")); err != nil {
 		t.Fatalf("Input: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
