@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 func TestStructuredQuestionRoundToProtocolQuestions(t *testing.T) {
@@ -125,6 +127,105 @@ func TestFormatStructuredQuestionResponse(t *testing.T) {
 	if payload.Answers["notes"].Answers[0] != "Plain text" {
 		t.Fatalf("notes answer = %#v", payload.Answers["notes"].Answers)
 	}
+}
+
+func TestHandleStructuredQuestionRoundSendsAllQuestionsBeforeWaiting(t *testing.T) {
+	relay := newFakeRelay()
+	actor, err := NewActor(Options{
+		SessionID: "sess-structured-batch",
+		CWD:       t.TempDir(),
+		Relay:     relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	actor.interactionTimeout = time.Second
+
+	round := structuredQuestionRound{
+		ToolCallID: "toolu_structured",
+		Questions: []structuredQuestion{
+			{ID: "component", Header: "Component", Question: "Which component?", Options: []structuredQuestionOption{{Label: "Daemon"}, {Label: "Web"}, {Label: "Tests"}}},
+			{ID: "mode", Header: "Mode", Question: "Which mode?", AllowMultiple: true, Options: []structuredQuestionOption{{Label: "Fast"}, {Label: "Safe"}, {Label: "Thorough"}}},
+			{ID: "next", Header: "Next", Question: "What next?", Options: []structuredQuestionOption{{Label: "Ship"}, {Label: "Wait"}, {Label: "Investigate"}}},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		response string
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		response, err := actor.handleStructuredQuestionRound(ctx, ctx, &taskContext{ChannelID: "ch-structured"}, round)
+		done <- result{response: response, err: err}
+	}()
+
+	if !relay.waitFor(t, time.Second, func(frames []any) bool {
+		count := 0
+		for _, frame := range frames {
+			if _, ok := frame.(*protocol.Question); ok {
+				count++
+			}
+		}
+		return count == 3
+	}) {
+		t.Fatalf("structured round did not send all questions before waiting: got %d", countProtocolQuestions(relay.GetFrames()))
+	}
+
+	var questions []*protocol.Question
+	for _, frame := range relay.GetFrames() {
+		if question, ok := frame.(*protocol.Question); ok {
+			questions = append(questions, question)
+		}
+	}
+
+	for i := len(questions) - 1; i >= 0; i-- {
+		question := questions[i]
+		if err := actor.HandleQuestionResponse(&protocol.QuestionResponse{
+			Type:      protocol.MsgTypeQuestionResponse,
+			SessionID: "sess-structured-batch",
+			ChannelID: "ch-structured",
+			RequestID: question.RequestID,
+			Answer:    `["answer-` + question.RequestID + `"]`,
+		}); err != nil {
+			t.Fatalf("HandleQuestionResponse %s: %v", question.RequestID, err)
+		}
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("handleStructuredQuestionRound: %v", got.err)
+		}
+		var payload struct {
+			Answers map[string]struct {
+				Answers []string `json:"answers"`
+			} `json:"answers"`
+		}
+		if err := json.Unmarshal([]byte(got.response), &payload); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		for _, id := range []string{"component", "mode", "next"} {
+			if len(payload.Answers[id].Answers) != 1 {
+				t.Fatalf("answer %s = %#v, want one answer", id, payload.Answers[id].Answers)
+			}
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for structured question response")
+	}
+}
+
+func countProtocolQuestions(frames []any) int {
+	count := 0
+	for _, frame := range frames {
+		if _, ok := frame.(*protocol.Question); ok {
+			count++
+		}
+	}
+	return count
 }
 
 func TestParseStructuredQuestionRoundFromPlaceholder(t *testing.T) {
