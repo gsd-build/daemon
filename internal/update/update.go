@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -255,6 +256,15 @@ func installPiExtensionArchive(archivePath, installDir string) error {
 		return err
 	}
 
+	// The release tarball ships source + package-lock.json only. Run npm to
+	// resolve the right platform-native binaries on this machine; without
+	// this the @anthropic-ai/claude-agent-sdk import fails and pi exits with
+	// "Cannot find module '@anthropic-ai/claude-agent-sdk'" / "Unknown
+	// provider 'claude-cli'". Mirrors install.sh's install_pi_extension.
+	if err := installExtensionDependencies(tmpDir); err != nil {
+		return err
+	}
+
 	if err := os.RemoveAll(prevDir); err != nil {
 		return fmt.Errorf("update: remove previous pi extension backup: %w", err)
 	}
@@ -271,6 +281,28 @@ func installPiExtensionArchive(archivePath, installDir string) error {
 	}
 	if err := os.RemoveAll(prevDir); err != nil {
 		return fmt.Errorf("update: remove previous pi extension backup: %w", err)
+	}
+	return nil
+}
+
+func installExtensionDependencies(extDir string) error {
+	// Skip if the extracted tarball doesn't carry a package-lock.json. Older
+	// release tarballs bundled node_modules directly; we shouldn't blow up
+	// on those, and tests use minimal fixtures without a lockfile.
+	if _, err := os.Stat(filepath.Join(extDir, "package-lock.json")); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("update: stat extension package-lock.json: %w", err)
+	}
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		return fmt.Errorf("update: npm not found on PATH (required to install pi extension dependencies): %w", err)
+	}
+	cmd := exec.Command(npmPath, "ci", "--omit=dev", "--include=optional", "--no-audit", "--no-fund", "--silent")
+	cmd.Dir = extDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("update: npm ci in %s failed: %w (%s)", extDir, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
