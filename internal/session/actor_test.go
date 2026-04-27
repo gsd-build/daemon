@@ -1296,6 +1296,30 @@ func TestCapturePiToolEnd_PendingMapIsClearedAfterEnd(t *testing.T) {
 	}
 }
 
+func TestPendingFileToolStarts_SweepDropsStaleEntries(t *testing.T) {
+	a := &Actor{opts: Options{SessionID: "s1", CWD: "/wd"}}
+
+	a.pendingFileToolStarts.Store("old", pendingFileTool{
+		toolName:  "write",
+		args:      map[string]any{"path": "a.txt"},
+		startedAt: time.Now().Add(-2 * time.Minute),
+	})
+	a.pendingFileToolStarts.Store("new", pendingFileTool{
+		toolName:  "write",
+		args:      map[string]any{"path": "b.txt"},
+		startedAt: time.Now(),
+	})
+
+	a.sweepStalePendingFileTools(60 * time.Second)
+
+	if _, ok := a.pendingFileToolStarts.Load("old"); ok {
+		t.Fatalf("stale entry should have been swept")
+	}
+	if _, ok := a.pendingFileToolStarts.Load("new"); !ok {
+		t.Fatalf("fresh entry should have been kept")
+	}
+}
+
 func TestActorInfoIdleState(t *testing.T) {
 	relay := newFakeRelay()
 	actor, err := NewActor(Options{

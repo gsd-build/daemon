@@ -414,12 +414,16 @@ func compactStatusFromPiEvent(request *protocol.CompactRequest, event pi.Control
 // Run is the actor's main loop. It waits for tasks, spawns executors, and
 // handles permission flows. Blocks until ctx is canceled or Stop is called.
 func (a *Actor) Run(ctx context.Context) error {
+	sweepTicker := time.NewTicker(60 * time.Second)
+	defer sweepTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-a.stopCh:
 			return nil
+		case <-sweepTicker.C:
+			a.sweepStalePendingFileTools(60 * time.Second)
 		case task := <-a.taskCh:
 			if err := a.executeTask(ctx, task); err != nil {
 				slog.Error("task failed", "taskId", task.TaskID, "sessionId", a.opts.SessionID, "err", err)
@@ -736,6 +740,19 @@ func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
 			slog.Warn("file_activity send failed", "toolCallID", event.ToolCallID, "err", err)
 		}
 	}
+}
+
+// sweepStalePendingFileTools removes pendingFileToolStarts entries older than
+// maxAge. Called periodically to bound memory in case pi sends a write/edit
+// start event with no matching end (crash, abandoned tool call, etc.).
+func (a *Actor) sweepStalePendingFileTools(maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
+	a.pendingFileToolStarts.Range(func(k, v any) bool {
+		if v.(pendingFileTool).startedAt.Before(cutoff) {
+			a.pendingFileToolStarts.Delete(k)
+		}
+		return true
+	})
 }
 
 func normalizePiModel(model string) string {
