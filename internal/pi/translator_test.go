@@ -253,8 +253,8 @@ func TestTranslator_ToolCallStartShape(t *testing.T) {
 	if top.Event.ContentBlock.ID != "toolu_abc" {
 		t.Errorf("content_block.id=%q want toolu_abc", top.Event.ContentBlock.ID)
 	}
-	if top.Event.ContentBlock.Name != "bash" {
-		t.Errorf("content_block.name=%q want bash", top.Event.ContentBlock.Name)
+	if top.Event.ContentBlock.Name != "Bash" {
+		t.Errorf("content_block.name=%q want Bash (post-normalization)", top.Event.ContentBlock.Name)
 	}
 }
 
@@ -356,11 +356,82 @@ func TestTranslator_MessageEndAssistantShape(t *testing.T) {
 		t.Fatalf("text block=%+v", top.Message.Content[0])
 	}
 	tool := top.Message.Content[1]
-	if tool.Type != "tool_use" || tool.ID != "toolu_abc" || tool.Name != "bash" {
-		t.Fatalf("tool block=%+v", tool)
+	if tool.Type != "tool_use" || tool.ID != "toolu_abc" || tool.Name != "Bash" {
+		t.Fatalf("tool block=%+v (expected name=Bash after pi→Anthropic normalization)", tool)
 	}
 	if tool.Input["command"] != "pwd" {
 		t.Fatalf("tool input=%+v", tool.Input)
+	}
+}
+
+func TestPiToAnthropicToolName(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		// pi-coding-agent built-ins whose input shape matches Anthropic.
+		{"bash", "Bash"},
+		{"find", "Glob"},
+		{"grep", "Grep"},
+		// codex --app-server synthetic tool names (spike 078).
+		{"shell", "Bash"},
+		// pi-coding-agent built-ins with divergent input shapes — pass through.
+		{"read", "read"},
+		{"write", "write"},
+		{"edit", "edit"},
+		{"ls", "ls"},
+		// daemon extension tool — pass through (not equivalent to AskUserQuestion).
+		{"ask_human", "ask_human"},
+		// codex synthetic for file mutations — pass through (path-only patch).
+		{"file_change", "file_change"},
+		// custom MCP tools — pass through verbatim.
+		{"mcp__pi-tools__custom", "mcp__pi-tools__custom"},
+		// already-PascalCase claude-p path — passes through (no double-mapping).
+		{"Bash", "Bash"},
+		{"WebSearch", "WebSearch"},
+	}
+	for _, c := range cases {
+		if got := piToAnthropicToolName(c.in); got != c.want {
+			t.Errorf("piToAnthropicToolName(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestTranslator_StreamingToolStartUsesAnthropicName asserts the streaming
+// content_block_start path also normalizes (matters because the relay's DB
+// classifier reads from the assistant message and the live UI reads from
+// stream events; both must agree).
+func TestTranslator_StreamingToolStartUsesAnthropicName(t *testing.T) {
+	state := &translatorState{sessionID: "sess-stream"}
+	piEvent := []byte(`{
+	  "type":"message_update",
+	  "assistantMessageEvent":{
+	    "type":"toolcall_start",
+	    "contentIndex":0,
+	    "partial":{"content":[{"type":"toolCall","id":"toolu_xyz","name":"bash","arguments":{}}]}
+	  }
+	}`)
+
+	out := translatePiEvent(piEvent, state)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(out))
+	}
+
+	var top struct {
+		Type  string `json:"type"`
+		Event struct {
+			Type         string `json:"type"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(out[0].Raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	if top.Event.ContentBlock.Name != "Bash" {
+		t.Fatalf("streaming content_block.name=%q want Bash", top.Event.ContentBlock.Name)
 	}
 }
 
