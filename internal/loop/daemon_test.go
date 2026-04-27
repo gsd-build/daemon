@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
+	"github.com/gsd-build/daemon/internal/terminal"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -228,6 +230,65 @@ func TestHandleTaskSpawnsWithPiSettings(t *testing.T) {
 	}
 	if got.PiExtensionPath != "/opt/gsd/pi-extension/index.ts" {
 		t.Fatalf("expected pi extension path in spawn options, got %q", got.PiExtensionPath)
+	}
+}
+
+func TestHandleTerminalMessagesOpenInputAndExit(t *testing.T) {
+	client := relayClientStub(false)
+	d := &Daemon{
+		cfg:             &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version:         "test",
+		manager:         &mockManager{},
+		client:          client,
+		terminalManager: terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
+	}
+
+	err := d.handleMessage(&protocol.Envelope{Payload: &protocol.TerminalOpen{
+		Type:       protocol.MsgTypeTerminalOpen,
+		RequestID:  "open-1",
+		TerminalID: "term-1",
+		SessionID:  "sess-1",
+		ChannelID:  "chan-1",
+		CWD:        t.TempDir(),
+		Cols:       80,
+		Rows:       24,
+	}})
+	if err != nil {
+		t.Fatalf("terminal open: %v", err)
+	}
+
+	env, err := drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain opened: %v", err)
+	}
+	if opened, ok := env.Payload.(*protocol.TerminalOpened); !ok || opened.TerminalID != "term-1" {
+		t.Fatalf("opened payload = %#v", env.Payload)
+	}
+
+	input := base64.StdEncoding.EncodeToString([]byte("printf gsd-daemon-terminal\nexit\n"))
+	if err := d.handleMessage(&protocol.Envelope{Payload: &protocol.TerminalInput{
+		Type:       protocol.MsgTypeTerminalInput,
+		TerminalID: "term-1",
+		ChannelID:  "chan-1",
+		DataBase64: input,
+	}}); err != nil {
+		t.Fatalf("terminal input: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("terminal exit was not queued")
+		default:
+		}
+		env, err := drainQueuedMessage(t, client)
+		if err != nil {
+			t.Fatalf("drain terminal frame: %v", err)
+		}
+		if exit, ok := env.Payload.(*protocol.TerminalExit); ok && exit.TerminalID == "term-1" {
+			return
+		}
 	}
 }
 

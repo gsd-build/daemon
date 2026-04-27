@@ -4,6 +4,7 @@ package loop
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
+	"github.com/gsd-build/daemon/internal/terminal"
 	"github.com/gsd-build/daemon/internal/update"
 	"github.com/gsd-build/daemon/internal/upload"
 	protocol "github.com/gsd-build/protocol-go"
@@ -43,6 +45,7 @@ type Daemon struct {
 	cfg             *config.Config
 	version         string
 	manager         SessionManager
+	terminalManager *terminal.Manager
 	client          *relay.Client
 	startedAt       time.Time
 	channelRoots    sync.Map
@@ -50,6 +53,81 @@ type Daemon struct {
 	piBinaryPath    string
 	piExtensionPath string
 	forcePi         bool
+}
+
+type terminalRelaySender struct {
+	client interface {
+		Send(context.Context, any) error
+	}
+}
+
+func (s terminalRelaySender) SendTerminalOpened(req terminal.OpenRequest, shell string, cwd string, startedAt time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalOpened{
+		Type:       protocol.MsgTypeTerminalOpened,
+		RequestID:  req.RequestID,
+		TerminalID: req.TerminalID,
+		SessionID:  req.SessionID,
+		ChannelID:  req.ChannelID,
+		Shell:      shell,
+		CWD:        cwd,
+		StartedAt:  startedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (s terminalRelaySender) SendTerminalOutput(terminalID, sessionID, channelID string, seq int64, data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalOutput{
+		Type:       protocol.MsgTypeTerminalOutput,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		Seq:        seq,
+		DataBase64: terminal.Encode(data),
+	})
+}
+
+func (s terminalRelaySender) SendTerminalSnapshot(terminalID, sessionID, channelID string, seq int64, data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalSnapshot{
+		Type:       protocol.MsgTypeTerminalSnapshot,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		Seq:        seq,
+		DataBase64: terminal.Encode(data),
+	})
+}
+
+func (s terminalRelaySender) SendTerminalExit(terminalID, sessionID, channelID, reason string, exitCode int, signal string, endedAt time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalExit{
+		Type:       protocol.MsgTypeTerminalExit,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		ExitCode:   &exitCode,
+		Signal:     signal,
+		Reason:     reason,
+		EndedAt:    endedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (s terminalRelaySender) SendTerminalError(requestID, terminalID, sessionID, channelID, message string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalError{
+		Type:       protocol.MsgTypeTerminalError,
+		RequestID:  requestID,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		Error:      message,
+	})
 }
 
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
@@ -152,6 +230,7 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		cfg:             cfg,
 		version:         version,
 		manager:         manager,
+		terminalManager: terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
 		client:          client,
 		startedAt:       time.Now(),
 		uploader:        uploader,
@@ -326,6 +405,14 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handlePermissionResponse(msg)
 	case *protocol.QuestionResponse:
 		return d.handleQuestionResponse(msg)
+	case *protocol.TerminalOpen:
+		return d.handleTerminalOpen(msg)
+	case *protocol.TerminalInput:
+		return d.handleTerminalInput(msg)
+	case *protocol.TerminalResize:
+		return d.handleTerminalResize(msg)
+	case *protocol.TerminalClose:
+		return d.handleTerminalClose(msg)
 	default:
 		// Ignore other types
 		return nil
@@ -392,6 +479,35 @@ func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	if actor != nil {
 		actor.CancelTask()
 	}
+	return nil
+}
+
+func (d *Daemon) handleTerminalOpen(msg *protocol.TerminalOpen) error {
+	return d.terminalManager.Open(context.Background(), terminal.OpenRequest{
+		RequestID:  msg.RequestID,
+		TerminalID: msg.TerminalID,
+		SessionID:  msg.SessionID,
+		ChannelID:  msg.ChannelID,
+		CWD:        msg.CWD,
+		Cols:       msg.Cols,
+		Rows:       msg.Rows,
+	})
+}
+
+func (d *Daemon) handleTerminalInput(msg *protocol.TerminalInput) error {
+	data, err := base64.StdEncoding.DecodeString(msg.DataBase64)
+	if err != nil {
+		return nil
+	}
+	return d.terminalManager.Input(msg.TerminalID, data)
+}
+
+func (d *Daemon) handleTerminalResize(msg *protocol.TerminalResize) error {
+	return d.terminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows)
+}
+
+func (d *Daemon) handleTerminalClose(msg *protocol.TerminalClose) error {
+	d.terminalManager.Close(msg.TerminalID, terminal.ReasonClosedByUser)
 	return nil
 }
 
