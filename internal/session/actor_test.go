@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gsd-build/daemon/internal/pi"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -1083,6 +1084,215 @@ func TestActorInfoExecutingState(t *testing.T) {
 	}
 	if info.IdleSince != nil {
 		t.Error("expected IdleSince to be nil")
+	}
+}
+
+func decodeFileActivity(t *testing.T, raw json.RawMessage) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal file_activity: %v", err)
+	}
+	return out
+}
+
+func collectFileActivityFrames(frames []any) []*protocol.Stream {
+	var out []*protocol.Stream
+	for _, f := range frames {
+		s, ok := f.(*protocol.Stream)
+		if !ok {
+			continue
+		}
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(s.Event, &probe); err != nil {
+			continue
+		}
+		if probe.Type == "file_activity" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func TestCapturePiToolStart_DoesNotEmitOnFileToolStart(t *testing.T) {
+	relay := newFakeRelay()
+	a := &Actor{opts: Options{SessionID: "sess-x", CWD: "/cwd", Relay: relay}}
+	coord := &structuredQuestionCoordinator{}
+
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-1",
+		ToolName:   "write",
+		Args:       map[string]any{"path": "src/foo.ts"},
+	})
+
+	if got := collectFileActivityFrames(relay.GetFrames()); len(got) != 0 {
+		t.Fatalf("expected no file_activity frames on start, got %d", len(got))
+	}
+	if _, ok := a.pendingFileToolStarts.Load("tc-1"); !ok {
+		t.Fatal("expected pendingFileToolStarts to record write start")
+	}
+}
+
+func TestCapturePiToolEnd_EmitsFileActivityForWrite(t *testing.T) {
+	relay := newFakeRelay()
+	a := &Actor{opts: Options{SessionID: "sess-fa", CWD: "/work/repo", Relay: relay}}
+	coord := &structuredQuestionCoordinator{}
+
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-write",
+		ToolName:   "write",
+		Args:       map[string]any{"path": "src/new.ts"},
+	})
+
+	before := time.Now().UnixMilli()
+	a.capturePiToolEnd("ch-fa")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-write",
+		ToolName:   "write",
+		Result:     map[string]any{},
+		IsError:    false,
+	})
+
+	frames := collectFileActivityFrames(relay.GetFrames())
+	if len(frames) != 1 {
+		t.Fatalf("expected exactly 1 file_activity frame, got %d", len(frames))
+	}
+	frame := frames[0]
+	if frame.SessionID != "sess-fa" {
+		t.Errorf("sessionID = %q", frame.SessionID)
+	}
+	if frame.ChannelID != "ch-fa" {
+		t.Errorf("channelID = %q", frame.ChannelID)
+	}
+	if frame.SequenceNumber <= 0 {
+		t.Errorf("expected positive sequence, got %d", frame.SequenceNumber)
+	}
+
+	payload := decodeFileActivity(t, frame.Event)
+	if payload["type"] != "file_activity" {
+		t.Errorf("type = %v", payload["type"])
+	}
+	if payload["op"] != "write" {
+		t.Errorf("op = %v", payload["op"])
+	}
+	if payload["path"] != "src/new.ts" {
+		t.Errorf("path = %v", payload["path"])
+	}
+	if payload["cwd"] != "/work/repo" {
+		t.Errorf("cwd = %v", payload["cwd"])
+	}
+	if v, _ := payload["firstChangedLine"].(float64); v != 0 {
+		t.Errorf("firstChangedLine = %v, want 0", payload["firstChangedLine"])
+	}
+	if payload["toolCallId"] != "tc-write" {
+		t.Errorf("toolCallId = %v", payload["toolCallId"])
+	}
+	ts, _ := payload["ts"].(float64)
+	if int64(ts) < before {
+		t.Errorf("ts = %v, expected >= %d", payload["ts"], before)
+	}
+}
+
+func TestCapturePiToolEnd_ExtractsFirstChangedLineForEdit(t *testing.T) {
+	relay := newFakeRelay()
+	a := &Actor{opts: Options{SessionID: "sess-edit", CWD: "/work", Relay: relay}}
+	coord := &structuredQuestionCoordinator{}
+
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-edit",
+		ToolName:   "edit",
+		Args:       map[string]any{"path": "src/old.ts"},
+	})
+
+	a.capturePiToolEnd("ch-edit")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-edit",
+		ToolName:   "edit",
+		Result: map[string]any{
+			"details": map[string]any{
+				"firstChangedLine": float64(42),
+			},
+		},
+		IsError: false,
+	})
+
+	frames := collectFileActivityFrames(relay.GetFrames())
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 file_activity frame, got %d", len(frames))
+	}
+	payload := decodeFileActivity(t, frames[0].Event)
+	if payload["op"] != "edit" {
+		t.Errorf("op = %v", payload["op"])
+	}
+	if v, _ := payload["firstChangedLine"].(float64); int(v) != 42 {
+		t.Errorf("firstChangedLine = %v, want 42", payload["firstChangedLine"])
+	}
+}
+
+func TestCapturePiToolEnd_IgnoresErrorAndNonFileTools(t *testing.T) {
+	relay := newFakeRelay()
+	a := &Actor{opts: Options{SessionID: "sess-i", CWD: "/work", Relay: relay}}
+	coord := &structuredQuestionCoordinator{}
+
+	// Bash tool end — never recorded as a file start, never emitted.
+	a.capturePiToolEnd("ch-i")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-bash",
+		ToolName:   "bash",
+		Result:     map[string]any{},
+	})
+
+	// Write start recorded but end is errored — must NOT emit.
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-err",
+		ToolName:   "write",
+		Args:       map[string]any{"path": "src/err.ts"},
+	})
+	a.capturePiToolEnd("ch-i")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-err",
+		ToolName:   "write",
+		Result:     map[string]any{},
+		IsError:    true,
+	})
+
+	// Write start with empty path — must NOT emit.
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-empty",
+		ToolName:   "write",
+		Args:       map[string]any{"path": ""},
+	})
+	a.capturePiToolEnd("ch-i")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-empty",
+		ToolName:   "write",
+		Result:     map[string]any{},
+	})
+
+	if got := collectFileActivityFrames(relay.GetFrames()); len(got) != 0 {
+		t.Fatalf("expected zero file_activity frames, got %d", len(got))
+	}
+}
+
+func TestCapturePiToolEnd_PendingMapIsClearedAfterEnd(t *testing.T) {
+	relay := newFakeRelay()
+	a := &Actor{opts: Options{SessionID: "sess-c", CWD: "/work", Relay: relay}}
+	coord := &structuredQuestionCoordinator{}
+
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-clean",
+		ToolName:   "write",
+		Args:       map[string]any{"path": "src/c.ts"},
+	})
+	if _, ok := a.pendingFileToolStarts.Load("tc-clean"); !ok {
+		t.Fatal("expected pending entry after start")
+	}
+
+	a.capturePiToolEnd("ch-c")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-clean",
+		ToolName:   "write",
+		Result:     map[string]any{},
+	})
+
+	if _, ok := a.pendingFileToolStarts.Load("tc-clean"); ok {
+		t.Fatal("expected pending entry to be cleared after end")
 	}
 }
 
