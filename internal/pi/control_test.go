@@ -76,7 +76,8 @@ func TestRunControlSendsContextStatsRequest(t *testing.T) {
 	stdinPath := filepath.Join(outDir, "stdin.jsonl")
 	fakePi := writeFakePi(t, `
 cat > "`+stdinPath+`"
-printf '%s\n' '{"type":"control_result","ok":true,"contextUsage":{"tokens":270000,"contextWindow":1000000,"percent":27}}'
+printf '%s\n' '{"type":"extension_ui_request","id":"request_1","method":"setWidget","widgetKey":"autoresearch"}'
+printf '%s\n' '{"type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"session.jsonl","sessionId":"session_1","tokens":{"input":100,"output":20,"cacheRead":30,"cacheWrite":0,"total":150}}}'
 `)
 
 	result, err := RunControl(context.Background(), ControlOptions{
@@ -98,9 +99,74 @@ printf '%s\n' '{"type":"control_result","ok":true,"contextUsage":{"tokens":27000
 	if !strings.Contains(string(raw), `"type":"get_session_stats"`) {
 		t.Fatalf("stdin did not contain stats command: %s", string(raw))
 	}
-	if result.ContextUsage == nil || result.ContextUsage.ContextWindow != 1000000 {
+	if result.ContextUsage == nil || result.ContextUsage.ContextWindow != defaultContextWindow {
 		encoded, _ := json.Marshal(result)
 		t.Fatalf("unexpected result: %s", encoded)
+	}
+	if result.ContextUsage.Tokens == nil || *result.ContextUsage.Tokens != 150 {
+		t.Fatalf("tokens = %+v", result.ContextUsage.Tokens)
+	}
+	if result.ContextUsage.Percent == nil || *result.ContextUsage.Percent != 0.075 {
+		t.Fatalf("percent = %+v", result.ContextUsage.Percent)
+	}
+}
+
+func TestRunControlParsesCompactResponseFrame(t *testing.T) {
+	outDir := t.TempDir()
+	stdinPath := filepath.Join(outDir, "stdin.jsonl")
+	fakePi := writeFakePi(t, `
+cat > "`+stdinPath+`"
+printf '%s\n' '{"type":"extension_ui_request","id":"request_1","method":"setWidget","widgetKey":"autoresearch"}'
+printf '%s\n' '{"type":"response","command":"compact","success":true,"data":{"summary":"Kept the auth state and file paths.","firstKeptEntryId":"entry_42","tokensBefore":8951}}'
+`)
+
+	var events []ControlEvent
+	result, err := RunControl(context.Background(), ControlOptions{
+		BinaryPath:  fakePi,
+		CWD:         outDir,
+		SessionFile: filepath.Join(outDir, "session.jsonl"),
+		Command: ControlCommand{
+			Type:               ControlCommandCompact,
+			CustomInstructions: "preserve auth state and exact file paths",
+		},
+		OnEvent: func(event ControlEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunControl returned error: %v", err)
+	}
+
+	raw, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatalf("read stdin capture: %v", err)
+	}
+	if !strings.Contains(string(raw), `"type":"compact"`) {
+		t.Fatalf("stdin did not contain compact command: %s", string(raw))
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 compaction events, got %d", len(events))
+	}
+	if events[0].Type != ControlEventCompactionStart {
+		t.Fatalf("first event type = %q", events[0].Type)
+	}
+	if events[0].ContextUsage == nil || events[0].ContextUsage.Tokens == nil || *events[0].ContextUsage.Tokens != 8951 {
+		t.Fatalf("start context usage = %+v", events[0].ContextUsage)
+	}
+	if events[1].Type != ControlEventCompactionEnd {
+		t.Fatalf("second event type = %q", events[1].Type)
+	}
+	if events[1].Summary != "Kept the auth state and file paths." {
+		t.Fatalf("summary = %q", events[1].Summary)
+	}
+	if events[1].FirstKeptEntryID != "entry_42" {
+		t.Fatalf("first kept entry = %q", events[1].FirstKeptEntryID)
+	}
+	if !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.ContextUsage == nil || result.ContextUsage.Tokens == nil || *result.ContextUsage.Tokens != 8951 {
+		t.Fatalf("unexpected context usage: %+v", result.ContextUsage)
 	}
 }
 
