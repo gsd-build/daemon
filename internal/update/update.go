@@ -301,8 +301,14 @@ func installPiExtensionArchive(archivePath, installDir string) error {
 func EnsureExtensionHealthy(extDir string) error {
 	// Extension not installed at all — fresh user, nothing to repair.
 	// They'll get an error when pi tasks run, which is the right behavior.
+	// Distinguish "doesn't exist" (skip silently) from "stat failed for
+	// another reason" (e.g. permission denied) — the latter should surface
+	// rather than silently masquerade as healthy.
 	if _, err := os.Stat(filepath.Join(extDir, "package.json")); err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("update: stat extension package.json: %w", err)
 	}
 	if extensionHasNativeBinary(extDir) {
 		return nil
