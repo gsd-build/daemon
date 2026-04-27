@@ -164,6 +164,7 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	result := ControlResult{}
+	sawTerminalFrame := false
 
 	for scanner.Scan() {
 		var frame rawControlFrame
@@ -180,6 +181,7 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 				onEvent(frame.toEvent(ControlEventCompactionEnd))
 			}
 		case "control_result", "session_stats":
+			sawTerminalFrame = true
 			result = ControlResult{
 				OK:           frame.OK || frame.Error == "",
 				Error:        frame.Error,
@@ -189,6 +191,9 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 	}
 	if err := scanner.Err(); err != nil {
 		return ControlResult{}, fmt.Errorf("read pi control output: %w", err)
+	}
+	if !sawTerminalFrame {
+		return ControlResult{}, errors.New("pi control output missing terminal result frame")
 	}
 	return result, nil
 }
@@ -216,8 +221,9 @@ func (usage *rawContextUsage) toContextUsage() *ContextUsage {
 }
 
 func AutoThresholdPercent(contextWindow int64) float64 {
-	if contextWindow <= 0 {
+	if contextWindow <= defaultReserveTokens {
 		return 0
 	}
-	return math.Round((float64(contextWindow-defaultReserveTokens)/float64(contextWindow))*100*10000) / 10000
+	percent := (float64(contextWindow-defaultReserveTokens) / float64(contextWindow)) * 100
+	return math.Round(percent*10000) / 10000
 }

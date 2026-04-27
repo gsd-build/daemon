@@ -104,6 +104,37 @@ printf '%s\n' '{"type":"control_result","ok":true,"contextUsage":{"tokens":27000
 	}
 }
 
+func TestRunControlRequiresTerminalResultFrame(t *testing.T) {
+	outDir := t.TempDir()
+	fakePi := writeFakePi(t, `
+printf '%s\n' '{"type":"compaction_start","reason":"manual"}'
+`)
+
+	_, err := RunControl(context.Background(), ControlOptions{
+		BinaryPath:  fakePi,
+		CWD:         outDir,
+		SessionFile: filepath.Join(outDir, "session.jsonl"),
+		Command: ControlCommand{
+			Type: ControlCommandCompact,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected missing terminal frame error")
+	}
+	if !strings.Contains(err.Error(), "missing terminal result frame") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAutoThresholdPercentClampsSmallWindows(t *testing.T) {
+	if got := AutoThresholdPercent(1000); got != 0 {
+		t.Fatalf("threshold = %f", got)
+	}
+	if got := AutoThresholdPercent(1000000); got != 98.3616 {
+		t.Fatalf("threshold = %f", got)
+	}
+}
+
 func TestRunControlTimesOut(t *testing.T) {
 	outDir := t.TempDir()
 	fakePi := writeFakePi(t, `

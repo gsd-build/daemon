@@ -130,3 +130,48 @@ func TestActorHandlesCompactRequestLifecycle(t *testing.T) {
 		t.Fatalf("tokens after = %+v", completed.TokensAfter)
 	}
 }
+
+func TestActorSendsFailedCompactStatusWhenControlResultFailsAfterEndEvent(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	relay := newFakeRelay()
+	actor := &Actor{
+		opts: Options{
+			SessionID: "session_123",
+			CWD:       t.TempDir(),
+			Relay:     relay,
+		},
+	}
+	actor.now = func() time.Time { return now }
+	actor.runPiControl = func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error) {
+		onEvent(pi.ControlEvent{Type: pi.ControlEventCompactionStart})
+		onEvent(pi.ControlEvent{
+			Type:    pi.ControlEventCompactionEnd,
+			Summary: "Kept auth state.",
+		})
+		return pi.ControlResult{}, context.Canceled
+	}
+
+	actor.handleCompactRequest(context.Background(), &protocol.CompactRequest{
+		Type:         protocol.MsgTypeCompactRequest,
+		SessionID:    "session_123",
+		ChannelID:    "channel_123",
+		RequestID:    "compact_123",
+		Instructions: "preserve auth state",
+	})
+
+	frames := relay.GetFrames()
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 frames, got %d", len(frames))
+	}
+	started := frames[0].(*protocol.CompactStatus)
+	if started.Status != protocol.CompactStatusStarted {
+		t.Fatalf("started status = %q", started.Status)
+	}
+	failed := frames[1].(*protocol.CompactStatus)
+	if failed.Status != protocol.CompactStatusFailed {
+		t.Fatalf("failed status = %q", failed.Status)
+	}
+	if failed.Error == "" {
+		t.Fatal("expected failure error")
+	}
+}

@@ -312,13 +312,19 @@ func contextStatsFromPi(sessionID string, channelID string, requestID string, us
 }
 
 func (a *Actor) handleCompactRequest(ctx context.Context, request *protocol.CompactRequest) {
+	var completed *protocol.CompactStatus
 	_, err := a.runPiControl(ctx, pi.ControlCommand{
 		Type:               pi.ControlCommandCompact,
 		CustomInstructions: request.Instructions,
 	}, func(event pi.ControlEvent) {
+		status := compactStatusFromPiEvent(request, event, a.currentTime().UTC())
+		if status.Status == protocol.CompactStatusCompleted {
+			completed = status
+			return
+		}
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		_ = a.opts.Relay.Send(sendCtx, compactStatusFromPiEvent(request, event, a.currentTime().UTC()))
+		_ = a.opts.Relay.Send(sendCtx, status)
 	})
 	if err != nil {
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -339,6 +345,12 @@ func (a *Actor) handleCompactRequest(ctx context.Context, request *protocol.Comp
 			Source:               "pi",
 			ObservedAt:           a.currentTime().UTC(),
 		})
+		return
+	}
+	if completed != nil {
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		_ = a.opts.Relay.Send(sendCtx, completed)
 	}
 }
 
@@ -347,12 +359,17 @@ func compactStatusFromPiEvent(request *protocol.CompactRequest, event pi.Control
 	var tokensBefore *int64
 	var tokensAfter *int64
 	contextWindow := int64(0)
+	switch event.Type {
+	case pi.ControlEventCompactionStart:
+		status = protocol.CompactStatusStarted
+	case pi.ControlEventCompactionEnd:
+		status = protocol.CompactStatusCompleted
+	}
 	if event.ContextUsage != nil {
 		contextWindow = event.ContextUsage.ContextWindow
 		switch event.Type {
 		case pi.ControlEventCompactionStart:
 			tokensBefore = event.ContextUsage.Tokens
-			status = protocol.CompactStatusStarted
 		case pi.ControlEventCompactionEnd:
 			tokensAfter = event.ContextUsage.Tokens
 		}
