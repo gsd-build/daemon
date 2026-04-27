@@ -75,14 +75,23 @@ func defaultPiExtensionPath() string {
 	if override := os.Getenv("GSD_PI_EXTENSION_PATH"); override != "" {
 		return override
 	}
+	var installedPath string
 	exe, err := os.Executable()
 	if err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), "pi-extension", "index.ts")
 		if _, statErr := os.Stat(candidate); statErr == nil {
 			return candidate
 		}
+		installedPath = candidate
 	}
-	return filepath.Join("internal", "pi", "extension", "index.ts")
+	repoPath := filepath.Join("internal", "pi", "extension", "index.ts")
+	if _, statErr := os.Stat(repoPath); statErr == nil {
+		return repoPath
+	}
+	if installedPath != "" {
+		return installedPath
+	}
+	return repoPath
 }
 
 // NewWithBinaryPath constructs a Daemon that spawns the given binary instead

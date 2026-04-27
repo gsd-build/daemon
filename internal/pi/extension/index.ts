@@ -331,6 +331,15 @@ export default function (pi: ExtensionAPI) {
     api: "anthropic-messages" as any,
     models: [
       {
+        id: "claude-opus-4-6",
+        name: "Claude Opus 4.6 (via SDK)",
+        reasoning: false,
+        input: ["text", "image"],
+        cost: { input: 15.0, output: 75.0, cacheRead: 1.50, cacheWrite: 18.75 },
+        contextWindow: 200_000,
+        maxTokens: 8_192,
+      },
+      {
         id: "claude-sonnet-4-6",
         name: "Claude Sonnet 4.6 (via SDK)",
         reasoning: false,

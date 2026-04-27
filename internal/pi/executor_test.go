@@ -1,8 +1,12 @@
 package pi
 
 import (
+	"context"
+	"errors"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -26,5 +30,25 @@ func TestTerminateProcessGroupAndWaitEscalates(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("terminate took %s", elapsed)
+	}
+}
+
+func TestExecutorRequiresExistingExtension(t *testing.T) {
+	exec := NewExecutor(Options{
+		BinaryPath:    "definitely-not-a-real-pi-binary",
+		CWD:           t.TempDir(),
+		ExtensionPath: t.TempDir() + "/missing/index.ts",
+		Prompt:        "hello",
+	})
+
+	err := exec.Run(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("expected missing extension error")
+	}
+	if !strings.Contains(err.Error(), "pi extension not found") {
+		t.Fatalf("expected missing extension error, got %v", err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist, got %v", err)
 	}
 }

@@ -422,6 +422,7 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 	if model == "" {
 		model = a.opts.Model
 	}
+	model = normalizePiModel(model)
 	binaryPath := a.opts.PiBinaryPath
 	if binaryPath == "" {
 		binaryPath = "pi"
@@ -448,6 +449,28 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 	}
 
 	return a.handleResult(ctx, tc, resultRaw)
+}
+
+func normalizePiModel(model string) string {
+	model = strings.TrimSpace(model)
+	if i := strings.LastIndex(model, "["); i > 0 && strings.HasSuffix(model, "]") {
+		suffix := model[i+1 : len(model)-1]
+		hasDigit := false
+		for _, r := range suffix {
+			if r >= '0' && r <= '9' {
+				hasDigit = true
+				continue
+			}
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				continue
+			}
+			return model
+		}
+		if hasDigit {
+			return strings.TrimSpace(model[:i])
+		}
+	}
+	return model
 }
 
 func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {

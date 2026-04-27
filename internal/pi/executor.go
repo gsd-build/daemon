@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -73,6 +74,13 @@ type UIRequestHandler func(context.Context, UIRequest) (string, error)
 // onEvent receives claude.Event in the claude stream-json shape (translated
 // from pi NDJSON). The existing relay forwarding path consumes this unmodified.
 func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, onUIRequest UIRequestHandler) error {
+	if e.opts.ExtensionPath == "" {
+		return fmt.Errorf("pi extension path is required")
+	}
+	if _, err := os.Stat(e.opts.ExtensionPath); err != nil {
+		return fmt.Errorf("pi extension not found at %s: %w", e.opts.ExtensionPath, err)
+	}
+
 	args := []string{
 		"-p",
 		"--mode", "rpc",
