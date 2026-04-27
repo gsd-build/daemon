@@ -44,6 +44,49 @@ func readArgsFile(t *testing.T, path string) []string {
 	return argv
 }
 
+func writeFakePi(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "fake-pi")
+	script := `#!/bin/sh
+: "${FAKE_PI_ARGS_FILE:?}"
+: > "$FAKE_PI_ARGS_FILE"
+for arg in "$@"; do
+  printf '%s\000' "$arg" >> "$FAKE_PI_ARGS_FILE"
+done
+IFS= read -r _prompt || true
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"remember this"}]},{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+sleep 5
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	return path
+}
+
+func readNulArgsFile(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read nul args file: %v", err)
+	}
+	parts := strings.Split(string(data), "\x00")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
+}
+
+func argIndex(args []string, want string) int {
+	for i, arg := range args {
+		if arg == want {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestNormalizePiModelStripsBracketSuffix(t *testing.T) {
 	tests := map[string]string{
 		"claude-opus-4-6[1m]":      "claude-opus-4-6",
@@ -57,6 +100,75 @@ func TestNormalizePiModelStripsBracketSuffix(t *testing.T) {
 		if got := normalizePiModel(input); got != want {
 			t.Fatalf("normalizePiModel(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestPiSessionFileForSessionUsesGSDSessionID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := piSessionFileForSession("sess-persist-pi")
+	if err != nil {
+		t.Fatalf("piSessionFileForSession: %v", err)
+	}
+
+	want := filepath.Join(home, ".gsd-cloud", "pi-sessions", "sess-persist-pi.jsonl")
+	if got != want {
+		t.Fatalf("piSessionFileForSession = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Dir(got)); err != nil {
+		t.Fatalf("expected pi session directory: %v", err)
+	}
+}
+
+func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write fake extension: %v", err)
+	}
+
+	actor, err := NewActor(Options{
+		SessionID:       "sess-persist-pi",
+		CWD:             t.TempDir(),
+		Relay:           newFakeRelay(),
+		Model:           "claude-sonnet-4-6",
+		PiBinaryPath:    writeFakePi(t),
+		PiExtensionPath: extensionPath,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), &taskContext{
+		TaskID:    "task-persist-pi",
+		ChannelID: "ch-persist-pi",
+		Engine:    "pi",
+	}, "remember this")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	if argIndex(args, "--no-session") >= 0 {
+		t.Fatalf("pi args include --no-session: %v", args)
+	}
+	sessionFlag := argIndex(args, "--session")
+	if sessionFlag < 0 {
+		t.Fatalf("pi args missing --session: %v", args)
+	}
+	if sessionFlag+1 >= len(args) {
+		t.Fatalf("pi args missing --session value: %v", args)
+	}
+
+	wantSessionFile := filepath.Join(home, ".gsd-cloud", "pi-sessions", "sess-persist-pi.jsonl")
+	if args[sessionFlag+1] != wantSessionFile {
+		t.Fatalf("pi session file = %q, want %q", args[sessionFlag+1], wantSessionFile)
 	}
 }
 

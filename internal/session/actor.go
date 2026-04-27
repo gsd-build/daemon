@@ -427,11 +427,16 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 	if binaryPath == "" {
 		binaryPath = "pi"
 	}
+	sessionFile, err := piSessionFileForSession(a.opts.SessionID)
+	if err != nil {
+		return err
+	}
 
 	exec := pi.NewExecutor(pi.Options{
 		BinaryPath:    binaryPath,
 		CWD:           a.opts.CWD,
 		Model:         model,
+		ResumeSession: sessionFile,
 		TaskID:        tc.TaskID,
 		Prompt:        prompt,
 		ExtensionPath: a.opts.PiExtensionPath,
