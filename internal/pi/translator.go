@@ -74,6 +74,28 @@ type piPartialAssistant struct {
 	} `json:"content"`
 }
 
+// piToAnthropicToolName maps pi's tool vocabulary onto the Anthropic
+// PascalCase names the web UI is built around. The mapping is name-only:
+// it covers tools whose pi input shape already matches the Anthropic
+// renderer's expected fields. Tools with divergent input shapes
+// (read/write/edit, ls, ask_human, file_change) pass through unchanged so
+// the UI can render them under their pi names with pi-shaped inputs.
+//
+// Includes codex --app-server synthetic tools (shell, file_change) so the
+// same web UI works across providers without a second normalization layer.
+func piToAnthropicToolName(name string) string {
+	switch name {
+	case "bash", "shell":
+		return "Bash"
+	case "find":
+		return "Glob"
+	case "grep":
+		return "Grep"
+	default:
+		return name
+	}
+}
+
 // translatePiEvent returns 0+ claude-shape Event values for one pi event.
 // sessionID and modelID are threaded through so we can stamp them on
 // emitted stream_event / assistant frames the browser may use.
@@ -260,7 +282,7 @@ func translateMessageUpdate(mu *piMessageUpdate, state *translatorState) []rawEv
 				"content_block": map[string]any{
 					"type": "tool_use",
 					"id":   blk.ID,
-					"name": blk.Name,
+					"name": piToAnthropicToolName(blk.Name),
 				},
 			},
 			"session_id": state.sessionID,
@@ -335,7 +357,7 @@ func makeAssistantMessage(state *translatorState, me *piMessageEnd) rawEvent {
 			content = append(content, map[string]any{
 				"type":  "tool_use",
 				"id":    block.ID,
-				"name":  block.Name,
+				"name":  piToAnthropicToolName(block.Name),
 				"input": block.Arguments,
 			})
 		}
