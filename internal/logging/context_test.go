@@ -37,4 +37,10 @@ func TestTaskAttrsIncludesCorrelationFields(t *testing.T) {
 			t.Fatalf("expected %s=%q, got %q", key, want, got[key])
 		}
 	}
+
+	for _, removed := range []string{"taskOrigin", "scheduledTaskId", "scheduledRunId"} {
+		if _, exists := got[removed]; exists {
+			t.Fatalf("did not expect %s in attrs, got %q", removed, got[removed])
+		}
+	}
 }

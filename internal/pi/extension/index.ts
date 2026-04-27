@@ -37,7 +37,7 @@ const CLAUDE_BUILTINS = [
   "Glob", "Grep", "WebFetch", "WebSearch",
   "Task", "Agent", "TodoWrite", "ExitPlanMode", "EnterPlanMode",
   "ListMcpResourcesTool", "ReadMcpResourceTool",
-  "AskUserQuestion", "Monitor", "Skill", "ToolSearch",
+  "AskUserQuestion", "PushNotification", "ScheduleWakeup", "Monitor", "Skill", "ToolSearch",
   "TeamCreate", "TeamDelete", "SendMessage",
   "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
   "EnterWorktree", "ExitWorktree",
