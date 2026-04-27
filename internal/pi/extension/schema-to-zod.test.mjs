@@ -48,4 +48,7 @@ const parsed = schemaToZod(schema).parse({
 assert.equal(parsed.questions[0].options[0].label, "Daemon bridge");
 assert.throws(() => schemaToZod(schema).parse({ questions: [] }), z.ZodError);
 assert.throws(() => schemaToZod(schema).parse({ questions: [{ id: "", question: "", options: [] }] }), z.ZodError);
+assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(1), 1);
+assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(false), false);
+assert.throws(() => schemaToZod({ enum: [1, "two", false, null] }).parse("1"), z.ZodError);
 console.log("schema-to-zod tests passed");

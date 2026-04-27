@@ -46,10 +46,15 @@ func parseStructuredQuestionRound(toolCallID string, args map[string]any) (struc
 	if len(payload.Questions) == 0 {
 		return structuredQuestionRound{}, fmt.Errorf("structured question round has no questions")
 	}
+	seenIDs := make(map[string]struct{}, len(payload.Questions))
 	for index, question := range payload.Questions {
 		if strings.TrimSpace(question.ID) == "" {
 			return structuredQuestionRound{}, fmt.Errorf("question %d has empty id", index)
 		}
+		if _, exists := seenIDs[question.ID]; exists {
+			return structuredQuestionRound{}, fmt.Errorf("duplicate question id: %s", question.ID)
+		}
+		seenIDs[question.ID] = struct{}{}
 		if strings.TrimSpace(question.Question) == "" {
 			return structuredQuestionRound{}, fmt.Errorf("question %s has empty question", question.ID)
 		}
@@ -97,7 +102,7 @@ func (round structuredQuestionRound) toProtocolQuestions() []protocol.Question {
 			})
 		}
 		header := question.Header
-		if header == "" {
+		if strings.TrimSpace(header) == "" {
 			header = question.Question
 		}
 		questions = append(questions, protocol.Question{
@@ -173,6 +178,11 @@ func (c *structuredQuestionCoordinator) wait(ctx context.Context) (structuredQue
 	case round := <-waiter:
 		return round, true
 	case <-ctx.Done():
+		select {
+		case round := <-waiter:
+			return round, true
+		default:
+		}
 		c.mu.Lock()
 		for i, candidate := range c.waiters {
 			if candidate == waiter {

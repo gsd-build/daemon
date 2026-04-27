@@ -17,14 +17,17 @@ export function schemaToZod(schema) {
   }
 
   if (Array.isArray(schema.enum)) {
-    const values = schema.enum.map(String);
+    const values = schema.enum;
     if (values.length === 0) {
       return z.never();
     }
     if (values.length === 1) {
       return z.literal(values[0]);
     }
-    return z.enum(values);
+    if (values.every((value) => typeof value === "string")) {
+      return z.enum(values);
+    }
+    return z.union(values.map((value) => z.literal(value)));
   }
 
   switch (schema.type) {

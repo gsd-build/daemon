@@ -66,8 +66,6 @@ type Actor struct {
 	questionMu sync.Mutex
 	questionCh map[string]chan string // requestId → answer channel
 
-	structuredQuestions *structuredQuestionCoordinator
-
 	stopCh chan struct{}
 
 	taskMu        sync.Mutex
@@ -125,15 +123,14 @@ const defaultInteractionTimeout = 10 * time.Minute
 // NewActor creates a new Actor for the given session.
 func NewActor(opts Options) (*Actor, error) {
 	return &Actor{
-		opts:                opts,
-		claudeSessionID:     opts.ResumeSession,
-		taskCh:              make(chan protocol.Task, 1),
-		permCh:              make(chan permResponse, 1),
-		questionCh:          make(map[string]chan string),
-		structuredQuestions: &structuredQuestionCoordinator{},
-		stopCh:              make(chan struct{}),
-		lastActiveAt:        time.Now(),
-		interactionTimeout:  defaultInteractionTimeout,
+		opts:               opts,
+		claudeSessionID:    opts.ResumeSession,
+		taskCh:             make(chan protocol.Task, 1),
+		permCh:             make(chan permResponse, 1),
+		questionCh:         make(map[string]chan string),
+		stopCh:             make(chan struct{}),
+		lastActiveAt:       time.Now(),
+		interactionTimeout: defaultInteractionTimeout,
 	}, nil
 }
 
@@ -446,11 +443,12 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 		Provider:      "claude-cli",
 	})
 
+	coordinator := &structuredQuestionCoordinator{}
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
-	exec.OnToolExecutionStart = a.capturePiToolStart()
+	exec.OnToolExecutionStart = a.capturePiToolStart(coordinator)
 
 	resultRaw, err := a.forwardExecutorEvents(ctx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
-		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc))
+		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
 	})
 	if err != nil {
 		return err
@@ -459,7 +457,7 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 	return a.handleResult(ctx, tc, resultRaw)
 }
 
-func (a *Actor) capturePiToolStart() func(pi.ToolExecutionStart) {
+func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {
 	return func(event pi.ToolExecutionStart) {
 		if event.ToolName != "ask_user_questions" {
 			return
@@ -469,10 +467,7 @@ func (a *Actor) capturePiToolStart() func(pi.ToolExecutionStart) {
 			slog.Warn("invalid structured ask_user_questions payload", "toolCallID", event.ToolCallID, "err", err)
 			return
 		}
-		if a.structuredQuestions == nil {
-			a.structuredQuestions = &structuredQuestionCoordinator{}
-		}
-		a.structuredQuestions.put(round)
+		coordinator.put(round)
 	}
 }
 
@@ -514,12 +509,12 @@ func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {
 	}
 }
 
-func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext) pi.UIRequestHandler {
+func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext, coordinator *structuredQuestionCoordinator) pi.UIRequestHandler {
 	return func(handlerCtx context.Context, req pi.UIRequest) (string, error) {
-		if strings.HasPrefix(req.Title, "Structured question round ready") && a.structuredQuestions != nil {
+		if strings.HasPrefix(req.Title, "Structured question round ready") {
 			waitCtx, cancel := context.WithTimeout(handlerCtx, 2*time.Second)
 			defer cancel()
-			if round, ok := a.structuredQuestions.wait(waitCtx); ok {
+			if round, ok := coordinator.wait(waitCtx); ok {
 				return a.handleStructuredQuestionRound(ctx, handlerCtx, tc, round)
 			}
 			if round, ok := parseStructuredQuestionRoundFromPlaceholder(req.ID, req.Placeholder); ok {

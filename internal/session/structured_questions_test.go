@@ -58,6 +58,12 @@ func TestStructuredQuestionRoundRejectsInvalidPayloads(t *testing.T) {
 				map[string]any{"id": "scope", "question": "Pick", "options": []any{}},
 			},
 		},
+		"duplicate ids": {
+			"questions": []any{
+				map[string]any{"id": "dup", "question": "Pick one", "options": []any{map[string]any{"label": "A"}}},
+				map[string]any{"id": "dup", "question": "Pick two", "options": []any{map[string]any{"label": "B"}}},
+			},
+		},
 	}
 
 	for name, args := range tests {
@@ -66,6 +72,28 @@ func TestStructuredQuestionRoundRejectsInvalidPayloads(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestStructuredQuestionRoundUsesQuestionForBlankHeader(t *testing.T) {
+	args := map[string]any{
+		"questions": []any{
+			map[string]any{
+				"id":       "scope",
+				"header":   "   ",
+				"question": "Pick one",
+				"options":  []any{map[string]any{"label": "A"}},
+			},
+		},
+	}
+
+	round, err := parseStructuredQuestionRound("toolu_123", args)
+	if err != nil {
+		t.Fatalf("parseStructuredQuestionRound: %v", err)
+	}
+	questions := round.toProtocolQuestions()
+	if questions[0].Header != "Pick one" {
+		t.Fatalf("Header = %q, want Pick one", questions[0].Header)
 	}
 }
 

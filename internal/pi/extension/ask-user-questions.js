@@ -32,6 +32,7 @@ export const askUserQuestionsTool = {
     const questions = params.questions.map(normalizeQuestion);
     const signature = JSON.stringify(questions);
     const now = Date.now();
+    pruneRecentSignatures(now);
 
     if (recentSignatures.has(signature) && now - recentSignatures.get(signature) < DEDUPE_WINDOW_MS) {
       return {
@@ -80,6 +81,15 @@ function normalizeQuestion(question) {
 
 function encodeStructuredQuestionPlaceholder(questions) {
   return `${STRUCTURED_QUESTION_PLACEHOLDER_PREFIX}${Buffer.from(JSON.stringify({ questions }), "utf8").toString("base64")}`;
+}
+
+function pruneRecentSignatures(now) {
+  const cutoff = now - DEDUPE_WINDOW_MS;
+  for (const [signature, timestamp] of recentSignatures) {
+    if (timestamp < cutoff) {
+      recentSignatures.delete(signature);
+    }
+  }
 }
 
 function formatForLLM(response) {
