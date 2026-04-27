@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -206,5 +207,34 @@ func TestNotifyToolExecutionEnd_IgnoresWrongType(t *testing.T) {
 	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { called = true })
 	if called {
 		t.Fatalf("callback should not fire on wrong type")
+	}
+}
+
+func TestStreamPiEvents_FiresOnToolExecutionEnd(t *testing.T) {
+	stream := strings.NewReader(`{"type":"tool_execution_end","toolCallId":"c1","toolName":"edit","result":{"details":{"firstChangedLine":7}},"isError":false}` + "\n")
+
+	var got *ToolExecutionEnd
+	state := &translatorState{}
+	err := streamPiEvents(
+		context.Background(),
+		stream,
+		io.Discard,
+		func(_ claude.Event) error { return nil },
+		nil,
+		nil,
+		func(ev ToolExecutionEnd) { got = &ev },
+		make(chan struct{}, 1),
+		false,
+		state,
+		time.Now(),
+	)
+	if err != nil && err != io.EOF {
+		t.Fatalf("streamPiEvents error: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("OnToolExecutionEnd callback never fired")
+	}
+	if got.ToolCallID != "c1" || got.ToolName != "edit" {
+		t.Fatalf("unexpected payload: %+v", got)
 	}
 }

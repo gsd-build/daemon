@@ -244,7 +244,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		model:  e.opts.Model,
 		taskID: e.opts.TaskID,
 	}
-	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, agentEndCh, true, state, startedAt)
+	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, e.OnToolExecutionEnd, agentEndCh, true, state, startedAt)
 	agentEnded := false
 	select {
 	case <-agentEndCh:
@@ -343,6 +343,7 @@ func streamPiEvents(
 	onEvent func(claude.Event) error,
 	onUIRequest UIRequestHandler,
 	onToolExecutionStart func(ToolExecutionStart),
+	onToolExecutionEnd func(ToolExecutionEnd),
 	agentEndCh chan<- struct{},
 	translate bool,
 	state *translatorState,
@@ -377,6 +378,7 @@ func streamPiEvents(
 		}
 
 		notifyToolExecutionStart(raw, onToolExecutionStart)
+		notifyToolExecutionEnd(raw, onToolExecutionEnd)
 
 		// Intercept extension_ui_request before translation; never forwarded.
 		if peek.Type == "extension_ui_request" {
