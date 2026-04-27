@@ -432,7 +432,6 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 		BinaryPath:    binaryPath,
 		CWD:           a.opts.CWD,
 		Model:         model,
-		ResumeSession: a.claudeSessionID,
 		TaskID:        tc.TaskID,
 		Prompt:        prompt,
 		ExtensionPath: a.opts.PiExtensionPath,
@@ -627,7 +626,12 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 		return fmt.Errorf("parse final result payload: %w", err)
 	}
 
-	if payload.SessionID != "" {
+	resultSessionID := payload.SessionID
+	if tc.Engine == "pi" {
+		resultSessionID = ""
+	}
+
+	if resultSessionID != "" {
 		a.claudeSessionID = payload.SessionID
 	}
 
@@ -645,7 +649,7 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 		TaskID:          tc.TaskID,
 		SessionID:       a.opts.SessionID,
 		ChannelID:       tc.ChannelID,
-		ClaudeSessionID: payload.SessionID,
+		ClaudeSessionID: resultSessionID,
 		InputTokens: int64(
 			payload.Usage.InputTokens +
 				payload.Usage.CacheReadInput +

@@ -60,6 +60,48 @@ func TestNormalizePiModelStripsBracketSuffix(t *testing.T) {
 	}
 }
 
+func TestHandleResultDoesNotPersistPiSyntheticSession(t *testing.T) {
+	relay := newFakeRelay()
+	actor := &Actor{
+		opts: Options{
+			SessionID: "sess-pi-result",
+			Relay:     relay,
+		},
+	}
+
+	err := actor.handleResult(context.Background(), &taskContext{
+		TaskID:    "task-pi-result",
+		ChannelID: "ch-pi-result",
+		Engine:    "pi",
+	}, json.RawMessage(`{
+		"session_id": "pi-rpc-task-pi-result",
+		"total_cost_usd": 0,
+		"duration_ms": 12,
+		"usage": {"input_tokens": 1, "output_tokens": 2}
+	}`))
+	if err != nil {
+		t.Fatalf("handleResult: %v", err)
+	}
+	if got := actor.GetClaudeSessionID(); got != "" {
+		t.Fatalf("expected no persisted Claude session for pi result, got %q", got)
+	}
+
+	frames := relay.GetFrames()
+	var complete *protocol.TaskComplete
+	for _, frame := range frames {
+		if tc, ok := frame.(*protocol.TaskComplete); ok {
+			complete = tc
+			break
+		}
+	}
+	if complete == nil {
+		t.Fatal("expected TaskComplete")
+	}
+	if complete.ClaudeSessionID != "" {
+		t.Fatalf("expected empty ClaudeSessionID for pi result, got %q", complete.ClaudeSessionID)
+	}
+}
+
 type fakeRelay struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
