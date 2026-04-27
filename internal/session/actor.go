@@ -89,6 +89,9 @@ type Actor struct {
 
 	// pidDir is the directory for PID files. Empty disables PID tracking.
 	pidDir string
+
+	runPiControl func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error)
+	now          func() time.Time
 }
 
 type taskContext struct {
@@ -119,10 +122,12 @@ type permResponse struct {
 }
 
 const defaultInteractionTimeout = 10 * time.Minute
+const piReserveTokens int64 = 16384
+const piKeepRecentTokens int64 = 20000
 
 // NewActor creates a new Actor for the given session.
 func NewActor(opts Options) (*Actor, error) {
-	return &Actor{
+	actor := &Actor{
 		opts:               opts,
 		claudeSessionID:    opts.ResumeSession,
 		taskCh:             make(chan protocol.Task, 1),
@@ -131,7 +136,26 @@ func NewActor(opts Options) (*Actor, error) {
 		stopCh:             make(chan struct{}),
 		lastActiveAt:       time.Now(),
 		interactionTimeout: defaultInteractionTimeout,
-	}, nil
+		now:                time.Now,
+	}
+	actor.runPiControl = func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error) {
+		sessionFile, err := piSessionFileForSession(actor.opts.SessionID)
+		if err != nil {
+			return pi.ControlResult{}, err
+		}
+		binaryPath := actor.opts.PiBinaryPath
+		if binaryPath == "" {
+			binaryPath = "pi"
+		}
+		return pi.RunControl(ctx, pi.ControlOptions{
+			BinaryPath:  binaryPath,
+			CWD:         actor.opts.CWD,
+			SessionFile: sessionFile,
+			Command:     command,
+			OnEvent:     onEvent,
+		})
+	}
+	return actor, nil
 }
 
 // LastActiveAt returns the time of the actor's last task completion or creation.
@@ -210,11 +234,166 @@ func (a *Actor) HasTaskID(taskID string) bool {
 	return taskID != "" && (a.taskID == taskID || a.pendingTaskID == taskID)
 }
 
+func (a *Actor) HandleContextStatsRequest(ctx context.Context, request *protocol.ContextStatsRequest) {
+	a.handleContextStatsRequest(ctx, request)
+}
+
+func (a *Actor) HandleCompactRequest(ctx context.Context, request *protocol.CompactRequest) {
+	a.handleCompactRequest(ctx, request)
+}
+
 func (a *Actor) effectiveInteractionTimeout() time.Duration {
 	if a.interactionTimeout > 0 {
 		return a.interactionTimeout
 	}
 	return defaultInteractionTimeout
+}
+
+func (a *Actor) currentTime() time.Time {
+	if a.now == nil {
+		return time.Now()
+	}
+	return a.now()
+}
+
+func (a *Actor) handleContextStatsRequest(ctx context.Context, request *protocol.ContextStatsRequest) {
+	result, err := a.runPiControl(ctx, pi.ControlCommand{Type: pi.ControlCommandGetSessionStats}, nil)
+	if err != nil {
+		slog.Warn("Pi context stats request failed",
+			"session", request.SessionID,
+			"channel", request.ChannelID,
+			"request", request.RequestID,
+			"error", err,
+		)
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		_ = a.opts.Relay.Send(sendCtx, &protocol.ContextStats{
+			Type:                 protocol.MsgTypeContextStats,
+			SessionID:            request.SessionID,
+			ChannelID:            request.ChannelID,
+			RequestID:            request.RequestID,
+			ContextWindow:        0,
+			ReserveTokens:        piReserveTokens,
+			KeepRecentTokens:     piKeepRecentTokens,
+			AutoThresholdPercent: 0,
+			Source:               "pi",
+			ObservedAt:           a.currentTime().UTC(),
+		})
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	_ = a.opts.Relay.Send(sendCtx, contextStatsFromPi(request.SessionID, request.ChannelID, request.RequestID, result.ContextUsage, a.currentTime().UTC()))
+}
+
+func contextStatsFromPi(sessionID string, channelID string, requestID string, usage *pi.ContextUsage, observedAt time.Time) *protocol.ContextStats {
+	contextWindow := int64(0)
+	var tokens *int64
+	var percent *float64
+	if usage != nil {
+		contextWindow = usage.ContextWindow
+		tokens = usage.Tokens
+		percent = usage.Percent
+	}
+	return &protocol.ContextStats{
+		Type:                 protocol.MsgTypeContextStats,
+		SessionID:            sessionID,
+		ChannelID:            channelID,
+		RequestID:            requestID,
+		Tokens:               tokens,
+		ContextWindow:        contextWindow,
+		Percent:              percent,
+		ReserveTokens:        piReserveTokens,
+		KeepRecentTokens:     piKeepRecentTokens,
+		AutoThresholdPercent: pi.AutoThresholdPercent(contextWindow),
+		Source:               "pi",
+		ObservedAt:           observedAt,
+	}
+}
+
+func (a *Actor) handleCompactRequest(ctx context.Context, request *protocol.CompactRequest) {
+	var completed *protocol.CompactStatus
+	_, err := a.runPiControl(ctx, pi.ControlCommand{
+		Type:               pi.ControlCommandCompact,
+		CustomInstructions: request.Instructions,
+	}, func(event pi.ControlEvent) {
+		status := compactStatusFromPiEvent(request, event, a.currentTime().UTC())
+		if status.Status == protocol.CompactStatusCompleted {
+			completed = status
+			return
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		_ = a.opts.Relay.Send(sendCtx, status)
+	})
+	if err != nil {
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		_ = a.opts.Relay.Send(sendCtx, &protocol.CompactStatus{
+			Type:                 protocol.MsgTypeCompactStatus,
+			SessionID:            request.SessionID,
+			ChannelID:            request.ChannelID,
+			RequestID:            request.RequestID,
+			Status:               protocol.CompactStatusFailed,
+			Reason:               protocol.CompactReasonManual,
+			Instructions:         request.Instructions,
+			ContextWindow:        0,
+			ReserveTokens:        piReserveTokens,
+			KeepRecentTokens:     piKeepRecentTokens,
+			AutoThresholdPercent: 0,
+			Error:                err.Error(),
+			Source:               "pi",
+			ObservedAt:           a.currentTime().UTC(),
+		})
+		return
+	}
+	if completed != nil {
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		_ = a.opts.Relay.Send(sendCtx, completed)
+	}
+}
+
+func compactStatusFromPiEvent(request *protocol.CompactRequest, event pi.ControlEvent, observedAt time.Time) *protocol.CompactStatus {
+	status := protocol.CompactStatusCompleted
+	var tokensBefore *int64
+	var tokensAfter *int64
+	contextWindow := int64(0)
+	switch event.Type {
+	case pi.ControlEventCompactionStart:
+		status = protocol.CompactStatusStarted
+	case pi.ControlEventCompactionEnd:
+		status = protocol.CompactStatusCompleted
+	}
+	if event.ContextUsage != nil {
+		contextWindow = event.ContextUsage.ContextWindow
+		switch event.Type {
+		case pi.ControlEventCompactionStart:
+			tokensBefore = event.ContextUsage.Tokens
+		case pi.ControlEventCompactionEnd:
+			tokensAfter = event.ContextUsage.Tokens
+		}
+	}
+
+	return &protocol.CompactStatus{
+		Type:                 protocol.MsgTypeCompactStatus,
+		SessionID:            request.SessionID,
+		ChannelID:            request.ChannelID,
+		RequestID:            request.RequestID,
+		Status:               status,
+		Reason:               pi.NormalizeCompactReason(event.Reason),
+		Instructions:         request.Instructions,
+		TokensBefore:         tokensBefore,
+		TokensAfter:          tokensAfter,
+		ContextWindow:        contextWindow,
+		ReserveTokens:        piReserveTokens,
+		KeepRecentTokens:     piKeepRecentTokens,
+		AutoThresholdPercent: pi.AutoThresholdPercent(contextWindow),
+		Summary:              event.Summary,
+		FirstKeptEntryID:     event.FirstKeptEntryID,
+		Source:               "pi",
+		ObservedAt:           observedAt,
+	}
 }
 
 // Run is the actor's main loop. It waits for tasks, spawns executors, and
