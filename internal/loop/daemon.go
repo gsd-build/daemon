@@ -16,7 +16,6 @@ import (
 
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/config"
-	"github.com/gsd-build/daemon/internal/crons"
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/relay"
@@ -46,9 +45,6 @@ type Daemon struct {
 	client          *relay.Client
 	startedAt       time.Time
 	channelRoots    sync.Map
-	cronStore       *crons.Store
-	cronRuntime     *crons.Runtime
-	cronSchedule    *crons.Scheduler
 	uploader        *upload.Client
 	piBinaryPath    string
 	piExtensionPath string
@@ -130,38 +126,17 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		Uploader:        uploader,
 	})
 
-	cronDir, err := crons.DefaultDir()
-	if err != nil {
-		return nil, fmt.Errorf("cron dir: %w", err)
-	}
-	cronStore := crons.NewStore(cronDir)
-
 	d := &Daemon{
 		cfg:             cfg,
 		version:         version,
 		manager:         manager,
 		client:          client,
 		startedAt:       time.Now(),
-		cronStore:       cronStore,
 		uploader:        uploader,
 		piBinaryPath:    piBinaryPath,
 		piExtensionPath: piExtensionPath,
 		forcePi:         forcePi,
 	}
-	d.cronRuntime = crons.NewRuntime(
-		cfg.MachineID,
-		func() string { return d.cfg.AuthToken },
-		api.NewClient(cfg.ServerURL),
-		cronStore,
-		func(task *protocol.Task) error { return d.handleTask(task) },
-		slog.Default(),
-	)
-	d.cronSchedule = crons.NewScheduler(
-		cronStore,
-		d.handleCronDue,
-		30*time.Second,
-		slog.Default(),
-	)
 
 	return d, nil
 }
@@ -273,9 +248,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.runTokenRefreshCheck(ctx)
 	go d.runHeartbeat(ctx)
-	if d.cronSchedule != nil && localCronSchedulingEnabled() {
-		go d.cronSchedule.Run(ctx)
-	}
 	d.manager.StartReaper(ctx, 5*time.Minute, 30*time.Minute)
 	defer d.gracefulShutdown(ctx)
 
@@ -286,10 +258,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
 	return err
-}
-
-func localCronSchedulingEnabled() bool {
-	return os.Getenv("GSD_DAEMON_LOCAL_CRON_SCHEDULER") == "1"
 }
 
 // getActiveTasks returns the list of currently executing task IDs.
@@ -332,8 +300,6 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleMkDir(msg)
 	case *protocol.ReadFile:
 		return d.handleRead(msg)
-	case *protocol.SyncCrons:
-		return d.handleSyncCrons(msg)
 	case *protocol.PermissionResponse:
 		return d.handlePermissionResponse(msg)
 	case *protocol.QuestionResponse:
@@ -399,20 +365,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	return nil
 }
 
-func (d *Daemon) handleSyncCrons(msg *protocol.SyncCrons) error {
-	if d.cronStore == nil {
-		return nil
-	}
-	sentAt, err := time.Parse(time.RFC3339Nano, msg.SentAt)
-	if err != nil {
-		sentAt = time.Now().UTC()
-	}
-	if err := d.cronStore.Sync(msg.Jobs, sentAt); err != nil {
-		return err
-	}
-	return d.sendCronInventory()
-}
-
 func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
@@ -470,34 +422,6 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return d.client.Send(sendCtx, result)
-}
-
-func (d *Daemon) handleCronDue(spec protocol.CronSpec, scheduledFor time.Time) error {
-	if d.cronRuntime == nil {
-		return nil
-	}
-	if err := d.cronRuntime.HandleDue(spec, scheduledFor); err != nil {
-		return err
-	}
-	return d.sendCronInventory()
-}
-
-func (d *Daemon) sendCronInventory() error {
-	if d.cronStore == nil {
-		return nil
-	}
-	locals, err := d.cronStore.List()
-	if err != nil {
-		return err
-	}
-	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return d.client.Send(sendCtx, &protocol.CronInventory{
-		Type:      protocol.MsgTypeCronInventory,
-		MachineID: d.cfg.MachineID,
-		Items:     crons.BuildInventory(locals, time.Now().UTC()),
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-	})
 }
 
 func (d *Daemon) scopeRootForChannel(channelID string) string {
