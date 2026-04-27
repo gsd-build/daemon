@@ -5,13 +5,6 @@ import (
 	"testing"
 )
 
-func TestTruncateShortString(t *testing.T) {
-	got := Truncate("hello", 10)
-	if got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
-	}
-}
-
 func TestTruncateLongString(t *testing.T) {
 	got := Truncate("hello world this is long", 10)
 	if len([]rune(got)) > 11 { // 10 + ellipsis

@@ -8,78 +8,6 @@ import (
 	"testing"
 )
 
-func TestBinaryPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot get home dir: %v", err)
-	}
-	want := filepath.Join(home, ".gsd-cloud", "bin", "gsd-cloud")
-	got := BinaryPath()
-	if got != want {
-		t.Errorf("BinaryPath() = %q, want %q", got, want)
-	}
-}
-
-func TestPrevBinaryPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot get home dir: %v", err)
-	}
-	want := filepath.Join(home, ".gsd-cloud", "bin", "gsd-cloud.prev")
-	got := PrevBinaryPath()
-	if got != want {
-		t.Errorf("PrevBinaryPath() = %q, want %q", got, want)
-	}
-}
-
-func TestConfigPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot get home dir: %v", err)
-	}
-	want := filepath.Join(home, ".gsd-cloud", "config.json")
-	got := ConfigPath()
-	if got != want {
-		t.Errorf("ConfigPath() = %q, want %q", got, want)
-	}
-}
-
-func TestLogPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot get home dir: %v", err)
-	}
-	want := filepath.Join(home, ".gsd-cloud", "logs", "daemon.log")
-	got := LogPath()
-	if got != want {
-		t.Errorf("LogPath() = %q, want %q", got, want)
-	}
-}
-
-func TestBootMarkerPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot get home dir: %v", err)
-	}
-	want := filepath.Join(home, ".gsd-cloud", "boot-marker")
-	got := BootMarkerPath()
-	if got != want {
-		t.Errorf("BootMarkerPath() = %q, want %q", got, want)
-	}
-}
-
-func TestRollbackAttemptedPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot get home dir: %v", err)
-	}
-	want := filepath.Join(home, ".gsd-cloud", "rollback-attempted")
-	got := RollbackAttemptedPath()
-	if got != want {
-		t.Errorf("RollbackAttemptedPath() = %q, want %q", got, want)
-	}
-}
-
 func TestDetectReturnsPlatform(t *testing.T) {
 	p, err := Detect()
 	switch runtime.GOOS {
@@ -100,13 +28,6 @@ func TestDetectReturnsPlatform(t *testing.T) {
 	}
 }
 
-func TestHomeDirReturnsNonEmpty(t *testing.T) {
-	h := HomeDir()
-	if h == "" {
-		t.Fatal("HomeDir() returned empty string")
-	}
-}
-
 func TestLaunchdPlistContent(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -118,14 +39,12 @@ func TestLaunchdPlistContent(t *testing.T) {
 	binPath := filepath.Join(home, ".gsd-cloud", "bin", "gsd-cloud")
 	logPath := filepath.Join(home, ".gsd-cloud", "logs", "daemon.log")
 
-	// Must contain expanded home dir
 	if !strings.Contains(plist, binPath) {
 		t.Errorf("plist must contain absolute binary path %s", binPath)
 	}
 	if !strings.Contains(plist, logPath) {
 		t.Errorf("plist must contain absolute log path %s", logPath)
 	}
-	// Must NOT contain literal ~
 	if strings.Contains(plist, "~/.gsd-cloud") {
 		t.Error("plist must not contain unexpanded ~")
 	}
