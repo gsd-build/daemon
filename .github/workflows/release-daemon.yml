@@ -141,7 +141,7 @@ jobs:
             --numeric-owner \
             --dereference \
             -czf "$GITHUB_WORKSPACE/dist/gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz" \
-            package.json package-lock.json index.ts usage-estimator.js
+            package.json package-lock.json index.ts ask-user-questions.js schema-to-zod.js usage-estimator.js
           cd "$GITHUB_WORKSPACE/dist"
           sha256sum "gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz" > "gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz.sha256"
 
