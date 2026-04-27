@@ -171,6 +171,16 @@ install_pi_extension() {
         err "failed to extract pi extension"
     fi
 
+    # Install dependencies on the user's machine so they receive the right
+    # native binaries for their platform (the @anthropic-ai/claude-agent-sdk
+    # package selects its platform-specific binary via optionalDependencies,
+    # which only resolves correctly when npm runs on the target machine).
+    say "  installing pi extension dependencies (this may take a moment)..."
+    if ! ( cd "$new_dir" && npm ci --omit=dev --include=optional --no-audit --no-fund --silent ); then
+        rm -rf "$new_dir"
+        err "failed to install pi extension dependencies"
+    fi
+
     if [ -d "$final_dir" ]; then
         mv "$final_dir" "$prev_dir"
     fi
@@ -228,6 +238,7 @@ main() {
     need_cmd mktemp
     need_cmd openssl
     need_cmd tar
+    need_cmd npm
 
     OS=$(detect_os)
     ARCH=$(detect_arch)
@@ -283,9 +294,14 @@ main() {
 
     say ""
     say "${bold}Next steps:${reset}"
-    say "  1. Open https://app.gsd.build to get your pairing code"
-    say "  2. Run: ${bold}gsd-cloud login${reset}"
-    say "  3. Run: ${bold}gsd-cloud start${reset}"
+    say "  1. Claude Code is required. If you don't have it yet:"
+    say "       curl -fsSL https://claude.ai/install.sh | bash"
+    say "       claude    (follow browser login)"
+    say "  2. Open https://app.gsd.build to get your pairing code"
+    say "  3. Run: ${bold}gsd-cloud login <CODE>${reset}"
+    say "  4. Run: ${bold}gsd-cloud start${reset}"
+    say ""
+    say "  Diagnose with: ${bold}gsd-cloud doctor${reset}"
     say ""
 }
 

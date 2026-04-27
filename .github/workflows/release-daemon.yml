@@ -128,9 +128,11 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Package pi extension
+        # Ship source + lockfile only; npm install runs on the user's machine
+        # at install time so they get the right native binaries for their
+        # platform via @anthropic-ai/claude-agent-sdk's optionalDependencies.
         run: |
           cd internal/pi/extension
-          npm ci --omit=dev
           tar \
             --sort=name \
             --mtime="UTC 2020-01-01" \
@@ -139,7 +141,7 @@ jobs:
             --numeric-owner \
             --dereference \
             -czf "$GITHUB_WORKSPACE/dist/gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz" \
-            package.json package-lock.json index.ts usage-estimator.js node_modules
+            package.json package-lock.json index.ts usage-estimator.js
           cd "$GITHUB_WORKSPACE/dist"
           sha256sum "gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz" > "gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz.sha256"
 
