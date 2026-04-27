@@ -443,16 +443,32 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 		Provider:      "claude-cli",
 	})
 
+	coordinator := &structuredQuestionCoordinator{}
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
+	exec.OnToolExecutionStart = a.capturePiToolStart(coordinator)
 
 	resultRaw, err := a.forwardExecutorEvents(ctx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
-		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc))
+		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
 	})
 	if err != nil {
 		return err
 	}
 
 	return a.handleResult(ctx, tc, resultRaw)
+}
+
+func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {
+	return func(event pi.ToolExecutionStart) {
+		if event.ToolName != "ask_user_questions" {
+			return
+		}
+		round, err := parseStructuredQuestionRound(event.ToolCallID, event.Args)
+		if err != nil {
+			slog.Warn("invalid structured ask_user_questions payload", "toolCallID", event.ToolCallID, "err", err)
+			return
+		}
+		coordinator.put(round)
+	}
 }
 
 func normalizePiModel(model string) string {
@@ -493,8 +509,19 @@ func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {
 	}
 }
 
-func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext) pi.UIRequestHandler {
+func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext, coordinator *structuredQuestionCoordinator) pi.UIRequestHandler {
 	return func(handlerCtx context.Context, req pi.UIRequest) (string, error) {
+		if strings.HasPrefix(req.Title, "Structured question round ready") {
+			waitCtx, cancel := context.WithTimeout(handlerCtx, 2*time.Second)
+			defer cancel()
+			if round, ok := coordinator.wait(waitCtx); ok {
+				return a.handleStructuredQuestionRound(ctx, handlerCtx, tc, round)
+			}
+			if round, ok := parseStructuredQuestionRoundFromPlaceholder(req.ID, req.Placeholder); ok {
+				return a.handleStructuredQuestionRound(ctx, handlerCtx, tc, round)
+			}
+		}
+
 		question := req.Title
 		if question == "" {
 			question = "The agent is asking for input."
@@ -540,6 +567,55 @@ func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext) pi.UIReque
 			return answer, nil
 		}
 	}
+}
+
+func (a *Actor) handleStructuredQuestionRound(ctx context.Context, handlerCtx context.Context, tc *taskContext, round structuredQuestionRound) (string, error) {
+	answers := make(map[string]string, len(round.Questions))
+	timeout := time.NewTimer(a.effectiveInteractionTimeout())
+	defer timeout.Stop()
+
+	for _, question := range round.toProtocolQuestions() {
+		respCh := make(chan string, 1)
+		a.questionMu.Lock()
+		a.questionCh[question.RequestID] = respCh
+		a.questionMu.Unlock()
+
+		defer func(requestID string) {
+			a.questionMu.Lock()
+			delete(a.questionCh, requestID)
+			a.questionMu.Unlock()
+		}(question.RequestID)
+
+		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := a.opts.Relay.Send(sendCtx, &protocol.Question{
+			Type:        protocol.MsgTypeQuestion,
+			SessionID:   a.opts.SessionID,
+			ChannelID:   tc.ChannelID,
+			RequestID:   question.RequestID,
+			Question:    question.Question,
+			Header:      question.Header,
+			MultiSelect: question.MultiSelect,
+			Options:     question.Options,
+		}); err != nil {
+			sendCancel()
+			return "", err
+		}
+		sendCancel()
+
+		select {
+		case answer := <-respCh:
+			answers[question.RequestID] = answer
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-handlerCtx.Done():
+			return "", handlerCtx.Err()
+		case <-a.stopCh:
+			return "", fmt.Errorf("actor stopped while waiting for structured question response")
+		case <-timeout.C:
+			return "", fmt.Errorf("timed out waiting for structured question response after %s", a.effectiveInteractionTimeout())
+		}
+	}
+	return formatStructuredQuestionResponse(round, answers), nil
 }
 
 func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run executorRunner) (json.RawMessage, error) {
