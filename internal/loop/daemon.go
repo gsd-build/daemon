@@ -21,6 +21,7 @@ import (
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
+	"github.com/gsd-build/daemon/internal/update"
 	"github.com/gsd-build/daemon/internal/upload"
 	protocol "github.com/gsd-build/protocol-go"
 )
@@ -123,6 +124,18 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		piBinaryPath = "pi"
 	}
 	piExtensionPath := defaultPiExtensionPath()
+	// Self-heal pi extension dependencies if missing. Covers daemons that
+	// auto-updated through v0.2.31, whose updater shipped source-only
+	// tarballs but didn't run npm ci on them. Idempotent: no-op when the
+	// extension is already healthy or not installed at all.
+	if extDir := filepath.Dir(piExtensionPath); extDir != "" && extDir != "." {
+		if err := update.EnsureExtensionHealthy(extDir); err != nil {
+			slog.Warn("pi extension self-heal failed; pi-routed tasks will fail until repaired",
+				"err", err,
+				"hint", "run `gsd-cloud doctor` for diagnostics, or reinstall: curl -fsSL https://install.gsd.build | sh",
+			)
+		}
+	}
 	forcePi := os.Getenv("GSD_FORCE_PI") == "1"
 
 	manager := session.NewManager(session.ManagerOptions{

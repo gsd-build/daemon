@@ -285,6 +285,55 @@ func installPiExtensionArchive(archivePath, installDir string) error {
 	return nil
 }
 
+// EnsureExtensionHealthy verifies the pi extension at extDir has its
+// dependencies installed (specifically the @anthropic-ai/claude-agent-sdk
+// package and its platform-native binary), and runs `npm ci` to install
+// them if missing. Idempotent and safe to call on every daemon startup.
+//
+// Returns nil if the extension is already healthy or was successfully
+// repaired. Returns an error only if repair was needed but failed — the
+// caller should log this and continue starting (claude-p tasks still work
+// even with a broken pi extension; only pi-routed tasks fail).
+//
+// This covers users on v0.2.31 whose auto-update produced a broken
+// extension (PR #50 fixed the updater, but daemons running v0.2.31 ran
+// the broken updater code at update time).
+func EnsureExtensionHealthy(extDir string) error {
+	// Extension not installed at all — fresh user, nothing to repair.
+	// They'll get an error when pi tasks run, which is the right behavior.
+	if _, err := os.Stat(filepath.Join(extDir, "package.json")); err != nil {
+		return nil
+	}
+	if extensionHasNativeBinary(extDir) {
+		return nil
+	}
+	return installExtensionDependencies(extDir)
+}
+
+// extensionHasNativeBinary returns true when node_modules contains a
+// platform-specific @anthropic-ai/claude-agent-sdk-* package with the
+// `claude` binary inside. That's the canonical "extension is installed
+// and runnable" check.
+func extensionHasNativeBinary(extDir string) bool {
+	sdkBaseDir := filepath.Join(extDir, "node_modules", "@anthropic-ai")
+	entries, err := os.ReadDir(sdkBaseDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "claude-agent-sdk-") {
+			continue
+		}
+		if e.Name() == "claude-agent-sdk" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(sdkBaseDir, e.Name(), "claude")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func installExtensionDependencies(extDir string) error {
 	// Skip if the extracted tarball doesn't carry a package-lock.json. Older
 	// release tarballs bundled node_modules directly; we shouldn't blow up

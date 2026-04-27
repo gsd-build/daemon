@@ -104,6 +104,17 @@ func (s *systemdPlatform) Stop() error {
 	return nil
 }
 
+func (s *systemdPlatform) Restart() error {
+	// `systemctl restart` works whether the unit is currently active or not
+	// — starts it if stopped, restarts it if running. Atomic from systemd's
+	// perspective so we don't race with auto-restart on failure.
+	out, err := exec.Command("systemctl", "--user", "restart", systemdServiceName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl restart: %w: %s", err, out)
+	}
+	return nil
+}
+
 func (s *systemdPlatform) IsInstalled() bool {
 	_, err := os.Stat(s.unitPath())
 	return err == nil
