@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	releasesURL = "https://api.github.com/repos/gsd-build/daemon/releases"
-	tagPrefix   = "daemon/v"
+	releasesURL      = "https://api.github.com/repos/gsd-build/daemon/releases"
+	latestReleaseURL = releasesURL + "/latest"
+	tagPrefix        = "daemon/v"
 )
 
 // Path function vars — overridden in tests for isolation.
@@ -36,6 +37,7 @@ var (
 	binaryPathFunc            = service.BinaryPath
 	prevBinaryPathFunc        = service.PrevBinaryPath
 	rollbackAttemptedPathFunc = service.RollbackAttemptedPath
+	httpClient                = http.DefaultClient
 )
 
 // Release represents a GitHub release.
@@ -66,52 +68,77 @@ func parseSemver(v string) [3]int {
 // IsNewer returns true if latest is a higher semver than current.
 // Both strings should be bare versions without a "v" prefix (e.g. "0.1.13").
 func IsNewer(current, latest string) bool {
-	c := parseSemver(current)
-	l := parseSemver(latest)
-	for i := 0; i < 3; i++ {
-		if l[i] > c[i] {
-			return true
-		}
-		if l[i] < c[i] {
-			return false
-		}
-	}
-	return false
+	return compareSemver(latest, current) > 0
 }
 
-// FetchLatest queries the GitHub Releases API and returns the first release
-// whose tag starts with "daemon/v".
+func compareSemver(left, right string) int {
+	l := parseSemver(left)
+	r := parseSemver(right)
+	for i := 0; i < 3; i++ {
+		if l[i] > r[i] {
+			return 1
+		}
+		if l[i] < r[i] {
+			return -1
+		}
+	}
+	return 0
+}
+
+// FetchLatest queries GitHub Releases and returns the latest daemon release.
 func FetchLatest() (*Release, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesURL+"?per_page=20", nil)
+	var latest Release
+	if err := fetchJSON(ctx, latestReleaseURL, &latest); err == nil {
+		if strings.HasPrefix(latest.TagName, tagPrefix) {
+			return &latest, nil
+		}
+	}
+
+	var releases []Release
+	if err := fetchJSON(ctx, releasesURL+"?per_page=20", &releases); err != nil {
+		return nil, err
+	}
+
+	var best *Release
+	for i := range releases {
+		if !strings.HasPrefix(releases[i].TagName, tagPrefix) {
+			continue
+		}
+		if best == nil || compareSemver(VersionFromTag(releases[i].TagName), VersionFromTag(best.TagName)) > 0 {
+			release := releases[i]
+			best = &release
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("update: no release found with tag prefix %q", tagPrefix)
+	}
+	return best, nil
+}
+
+func fetchJSON(ctx context.Context, url string, target any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("update: create request: %w", err)
+		return fmt.Errorf("update: create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("update: fetch releases: %w", err)
+		return fmt.Errorf("update: fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("update: GitHub API returned %d", resp.StatusCode)
+		return fmt.Errorf("update: GitHub API returned %d", resp.StatusCode)
 	}
 
-	var releases []Release
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return nil, fmt.Errorf("update: decode releases: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("update: decode releases: %w", err)
 	}
-
-	for i := range releases {
-		if strings.HasPrefix(releases[i].TagName, tagPrefix) {
-			return &releases[i], nil
-		}
-	}
-	return nil, fmt.Errorf("update: no release found with tag prefix %q", tagPrefix)
+	return nil
 }
 
 // VersionFromTag strips the "daemon/v" prefix from a release tag.

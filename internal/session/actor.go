@@ -570,22 +570,29 @@ func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext, coordinato
 }
 
 func (a *Actor) handleStructuredQuestionRound(ctx context.Context, handlerCtx context.Context, tc *taskContext, round structuredQuestionRound) (string, error) {
-	answers := make(map[string]string, len(round.Questions))
+	questions := round.toProtocolQuestions()
+	answers := make(map[string]string, len(questions))
+	channels := make(map[string]chan string, len(questions))
 	timeout := time.NewTimer(a.effectiveInteractionTimeout())
 	defer timeout.Stop()
 
-	for _, question := range round.toProtocolQuestions() {
-		respCh := make(chan string, 1)
+	a.questionMu.Lock()
+	for _, question := range questions {
+		ch := make(chan string, 1)
+		channels[question.RequestID] = ch
+		a.questionCh[question.RequestID] = ch
+	}
+	a.questionMu.Unlock()
+
+	defer func() {
 		a.questionMu.Lock()
-		a.questionCh[question.RequestID] = respCh
-		a.questionMu.Unlock()
+		defer a.questionMu.Unlock()
+		for _, question := range questions {
+			delete(a.questionCh, question.RequestID)
+		}
+	}()
 
-		defer func(requestID string) {
-			a.questionMu.Lock()
-			delete(a.questionCh, requestID)
-			a.questionMu.Unlock()
-		}(question.RequestID)
-
+	for _, question := range questions {
 		sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 		if err := a.opts.Relay.Send(sendCtx, &protocol.Question{
 			Type:        protocol.MsgTypeQuestion,
@@ -601,9 +608,11 @@ func (a *Actor) handleStructuredQuestionRound(ctx context.Context, handlerCtx co
 			return "", err
 		}
 		sendCancel()
+	}
 
+	for _, question := range questions {
 		select {
-		case answer := <-respCh:
+		case answer := <-channels[question.RequestID]:
 			answers[question.RequestID] = answer
 		case <-ctx.Done():
 			return "", ctx.Err()

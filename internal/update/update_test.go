@@ -1,6 +1,10 @@
 package update
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -56,6 +60,58 @@ func TestVersionFromTag(t *testing.T) {
 	want := "0.1.13"
 	if got != want {
 		t.Errorf("VersionFromTag(\"daemon/v0.1.13\") = %q, want %q", got, want)
+	}
+}
+
+func TestFetchLatestUsesLatestReleaseEndpoint(t *testing.T) {
+	origClient := httpClient
+	t.Cleanup(func() { httpClient = origClient })
+
+	var requested []string
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requested = append(requested, req.URL.String())
+		return jsonResponse(http.StatusOK, Release{TagName: "daemon/v0.2.37"}), nil
+	})}
+
+	release, err := FetchLatest()
+	if err != nil {
+		t.Fatalf("FetchLatest: %v", err)
+	}
+	if release.TagName != "daemon/v0.2.37" {
+		t.Fatalf("TagName = %q, want daemon/v0.2.37", release.TagName)
+	}
+	if len(requested) != 1 || requested[0] != latestReleaseURL {
+		t.Fatalf("requested URLs = %#v, want only %s", requested, latestReleaseURL)
+	}
+}
+
+func TestFetchLatestFallbackChoosesHighestDaemonSemver(t *testing.T) {
+	origClient := httpClient
+	t.Cleanup(func() { httpClient = origClient })
+
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case latestReleaseURL:
+			return jsonResponse(http.StatusNotFound, map[string]string{"message": "not found"}), nil
+		case releasesURL + "?per_page=20":
+			return jsonResponse(http.StatusOK, []Release{
+				{TagName: "daemon/v0.2.35"},
+				{TagName: "daemon/v0.2.37"},
+				{TagName: "other/v9.9.9"},
+				{TagName: "daemon/v0.2.36"},
+			}), nil
+		default:
+			t.Fatalf("unexpected URL %s", req.URL.String())
+			return nil, nil
+		}
+	})}
+
+	release, err := FetchLatest()
+	if err != nil {
+		t.Fatalf("FetchLatest: %v", err)
+	}
+	if release.TagName != "daemon/v0.2.37" {
+		t.Fatalf("TagName = %q, want daemon/v0.2.37", release.TagName)
 	}
 }
 
@@ -209,4 +265,19 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonResponse(status int, payload any) *http.Response {
+	raw, _ := json.Marshal(payload)
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(bytes.NewReader(raw)),
+		Header:     make(http.Header),
+	}
 }
