@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,30 @@ func TestBrowseDirDoesNotResolveChildSymlinks(t *testing.T) {
 	}
 	if entries[0].IsDirectory {
 		t.Fatal("expected symlink entry to remain non-directory")
+	}
+}
+
+func TestBrowseDirCapsLargeResults(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < browseDirEntryLimit+25; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("file-%03d.txt", i))
+		if err := os.WriteFile(name, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := BrowseDir(dir, dir)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if len(entries) != browseDirEntryLimit {
+		t.Fatalf("expected %d entries, got %d", browseDirEntryLimit, len(entries))
+	}
+	if entries[0].Name != "file-000.txt" {
+		t.Fatalf("first entry = %q", entries[0].Name)
+	}
+	if entries[len(entries)-1].Name != "file-199.txt" {
+		t.Fatalf("last entry = %q", entries[len(entries)-1].Name)
 	}
 }
 

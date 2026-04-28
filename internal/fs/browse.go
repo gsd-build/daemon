@@ -13,6 +13,8 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
+const browseDirEntryLimit = 200
+
 // BrowseDir lists entries in the given absolute path.
 func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
@@ -56,5 +58,8 @@ func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 		}
 		return result[i].Name < result[j].Name
 	})
+	if len(result) > browseDirEntryLimit {
+		result = result[:browseDirEntryLimit]
+	}
 	return result, nil
 }
