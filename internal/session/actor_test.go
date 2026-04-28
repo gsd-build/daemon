@@ -195,6 +195,38 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 	}
 }
 
+func TestActorPiExecutorPassesCustomInstructions(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-custom-instructions",
+		Relay:     newFakeRelay(),
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:             "task-custom-instructions",
+		ChannelID:          "ch-custom-instructions",
+		Engine:             "pi",
+		CustomInstructions: "Always talk like a pirate.",
+	}, "remember this")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	flag := argIndex(args, "--append-system-prompt")
+	if flag < 0 || flag+1 >= len(args) {
+		t.Fatalf("pi args missing --append-system-prompt value: %v", args)
+	}
+	if args[flag+1] != "Always talk like a pirate." {
+		t.Fatalf("append system prompt = %q", args[flag+1])
+	}
+}
+
 func TestActorPiExecutorPassesClaudeSkillPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

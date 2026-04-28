@@ -49,15 +49,16 @@ func piExitError(code int, stderr string) error {
 
 // Options configures a pi process.
 type Options struct {
-	BinaryPath    string // pi binary; defaults to "pi"
-	CWD           string
-	Model         string // forwarded as --model
-	ResumeSession string // forwarded as --session <path>; empty = --no-session
-	TaskID        string
-	Prompt        string
-	ExtensionPath string // forwarded as -e <path>
-	Provider      string // forwarded as --provider <name>
-	SkillPaths    []string
+	BinaryPath         string // pi binary; defaults to "pi"
+	CWD                string
+	Model              string // forwarded as --model
+	ResumeSession      string // forwarded as --session <path>; empty = --no-session
+	TaskID             string
+	Prompt             string
+	CustomInstructions string
+	ExtensionPath      string // forwarded as -e <path>
+	Provider           string // forwarded as --provider <name>
+	SkillPaths         []string
 }
 
 // Executor spawns one `pi -p --mode rpc` process per task.
@@ -140,6 +141,9 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	if e.opts.Model != "" {
 		args = append(args, "--model", e.opts.Model)
 	}
+	if customInstructions := strings.TrimSpace(e.opts.CustomInstructions); customInstructions != "" {
+		args = append(args, "--append-system-prompt", customInstructions)
+	}
 	for _, path := range e.opts.SkillPaths {
 		if path != "" {
 			args = append(args, "--skill", path)
@@ -154,6 +158,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"extension", e.opts.ExtensionPath,
 		"skillCount", len(e.opts.SkillPaths),
 		"promptLen", len(e.opts.Prompt),
+		"customInstructionsLen", len(strings.TrimSpace(e.opts.CustomInstructions)),
 	)
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)

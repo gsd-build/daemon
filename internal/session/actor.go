@@ -113,20 +113,21 @@ type pendingFileTool struct {
 }
 
 type taskContext struct {
-	TaskID          string
-	ChannelID       string
-	ActorContext    context.Context
-	StartedAt       time.Time
-	OriginalPrompt  string
-	ExecutionPrompt string
-	Engine          string
-	Model           string
-	Effort          string
-	PermissionMode  string
-	RequestID       string
-	Traceparent     string
-	ImageURLs       []string
-	ContextRefs     []protocol.ContextRef
+	TaskID             string
+	ChannelID          string
+	ActorContext       context.Context
+	StartedAt          time.Time
+	OriginalPrompt     string
+	ExecutionPrompt    string
+	Engine             string
+	Model              string
+	Effort             string
+	PermissionMode     string
+	RequestID          string
+	Traceparent        string
+	ImageURLs          []string
+	ContextRefs        []protocol.ContextRef
+	CustomInstructions string
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -495,20 +496,21 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	contextBlock := daemonfs.BuildContextRefBlock(task.CWD, task.ContextRefs, daemonfs.DefaultContextRefLimits())
 	executionPrompt := contextBlock + task.Prompt
 	tc := &taskContext{
-		TaskID:          task.TaskID,
-		ChannelID:       task.ChannelID,
-		ActorContext:    ctx,
-		StartedAt:       time.Now(),
-		OriginalPrompt:  task.Prompt,
-		ExecutionPrompt: executionPrompt,
-		Engine:          task.Engine,
-		Model:           task.Model,
-		Effort:          task.Effort,
-		PermissionMode:  task.PermissionMode,
-		RequestID:       task.RequestID,
-		Traceparent:     task.Traceparent,
-		ImageURLs:       task.ImageURLs,
-		ContextRefs:     task.ContextRefs,
+		TaskID:             task.TaskID,
+		ChannelID:          task.ChannelID,
+		ActorContext:       ctx,
+		StartedAt:          time.Now(),
+		OriginalPrompt:     task.Prompt,
+		ExecutionPrompt:    executionPrompt,
+		Engine:             task.Engine,
+		Model:              task.Model,
+		Effort:             task.Effort,
+		PermissionMode:     task.PermissionMode,
+		RequestID:          task.RequestID,
+		Traceparent:        task.Traceparent,
+		ImageURLs:          task.ImageURLs,
+		ContextRefs:        task.ContextRefs,
+		CustomInstructions: task.CustomInstructions,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -614,15 +616,16 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	exec := pi.NewExecutor(pi.Options{
-		BinaryPath:    binaryPath,
-		CWD:           a.opts.CWD,
-		Model:         model,
-		ResumeSession: sessionFile,
-		TaskID:        tc.TaskID,
-		Prompt:        prompt,
-		ExtensionPath: a.opts.PiExtensionPath,
-		Provider:      "claude-cli",
-		SkillPaths:    skillPaths,
+		BinaryPath:         binaryPath,
+		CWD:                a.opts.CWD,
+		Model:              model,
+		ResumeSession:      sessionFile,
+		TaskID:             tc.TaskID,
+		Prompt:             prompt,
+		CustomInstructions: tc.CustomInstructions,
+		ExtensionPath:      a.opts.PiExtensionPath,
+		Provider:           "claude-cli",
+		SkillPaths:         skillPaths,
 	})
 
 	coordinator := &structuredQuestionCoordinator{}
