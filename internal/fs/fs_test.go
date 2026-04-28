@@ -115,8 +115,12 @@ func TestBrowseDirRejectsOversizedResults(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected oversized browse error")
 	}
-	if err.Error() != "directory contains 225 entries; paginated browsing is required" {
-		t.Fatalf("error = %q", err.Error())
+	expectedErr := fmt.Sprintf(
+		"directory contains %d entries; paginated browsing is required",
+		browseDirEntryLimit+25,
+	)
+	if err.Error() != expectedErr {
+		t.Fatalf("error = %q, expected %q", err.Error(), expectedErr)
 	}
 }
 
