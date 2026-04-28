@@ -179,6 +179,15 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 	if args[modelFlag+1] != "claude-opus-4-6" {
 		t.Fatalf("pi model = %q, want claude-opus-4-6", args[modelFlag+1])
 	}
+	if argIndex(args, "--no-skills") >= 0 {
+		t.Fatalf("pi args disable skills: %v", args)
+	}
+	if argIndex(args, "--no-extensions") < 0 {
+		t.Fatalf("pi args missing --no-extensions: %v", args)
+	}
+	if argIndex(args, "--no-prompt-templates") < 0 {
+		t.Fatalf("pi args missing --no-prompt-templates: %v", args)
+	}
 	if got := actor.currentPiModel(); got != "claude-opus-4-6" {
 		t.Fatalf("current pi model = %q", got)
 	}
