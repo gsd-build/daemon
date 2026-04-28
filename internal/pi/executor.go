@@ -59,6 +59,9 @@ type Options struct {
 	ExtensionPath      string // forwarded as -e <path>
 	Provider           string // forwarded as --provider <name>
 	SkillPaths         []string
+	BrowserGrantID     string
+	BrowserID          string
+	BrowserSessionID   string
 }
 
 // Executor spawns one `pi -p --mode rpc` process per task.
@@ -162,6 +165,13 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	)
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
+	if e.opts.BrowserGrantID != "" && e.opts.BrowserID != "" && e.opts.BrowserSessionID != "" {
+		cmd.Env = append(os.Environ(),
+			"GSD_BROWSER_GRANT_ID="+e.opts.BrowserGrantID,
+			"GSD_BROWSER_ID="+e.opts.BrowserID,
+			"GSD_BROWSER_SESSION_ID="+e.opts.BrowserSessionID,
+		)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()

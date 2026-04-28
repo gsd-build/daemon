@@ -7,6 +7,9 @@
  * tool calls to pi for execution.
  */
 
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import {
   createSdkMcpServer,
   query,
@@ -32,6 +35,7 @@ import {
 } from "./usage-estimator.js";
 import { schemaToZod } from "./schema-to-zod.js";
 import { askUserQuestionsTool } from "./ask-user-questions.js";
+import { Type } from "@sinclair/typebox";
 
 const CLAUDE_BUILTINS = [
   "Bash", "BashOutput", "KillShell",
@@ -47,6 +51,72 @@ const CLAUDE_BUILTINS = [
 ];
 
 const MCP_PREFIX = "mcp__pi-tools__";
+
+const BrowserToolParams = Type.Object({
+  method: Type.String({ description: "Browser operation to execute." }),
+  params: Type.Optional(Type.Record(Type.String(), Type.Any())),
+});
+
+function browserToolDefinition() {
+  return {
+    name: "gsd_browser",
+    label: "GSD Browser",
+    description: "Use the task-scoped GSD shared browser session.",
+    parameters: BrowserToolParams,
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        method: { type: "string" },
+        params: { type: "object", additionalProperties: true },
+      },
+      required: ["method", "params"],
+    },
+  };
+}
+
+export function buildClaudeCliToolsForTest(context: { browserGrant?: { grantId: string; browserId: string; sessionId: string } }) {
+  return context.browserGrant ? [browserToolDefinition()] : [];
+}
+
+function browserGrantFromEnv() {
+  const grantId = process.env.GSD_BROWSER_GRANT_ID;
+  const browserId = process.env.GSD_BROWSER_ID;
+  const sessionId = process.env.GSD_BROWSER_SESSION_ID;
+  if (!grantId || !browserId || !sessionId) return undefined;
+  return { grantId, browserId, sessionId };
+}
+
+async function browserRpc(browserId: string, method: string, params: unknown) {
+  const socketPath = path.join(os.homedir(), ".gsd-browser", "sessions", browserId, "daemon.sock");
+  const payload = Buffer.from(JSON.stringify({
+    jsonrpc: "2.0",
+    id: Date.now(),
+    method: "cloud_tool",
+    params: { method, params: params ?? {} },
+  }));
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(payload.length, 0);
+
+  return await new Promise<unknown>((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    const chunks: Buffer[] = [];
+    let expected = 0;
+    socket.on("connect", () => socket.write(Buffer.concat([header, payload])));
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      const all = Buffer.concat(chunks);
+      if (expected === 0 && all.length >= 4) expected = all.readUInt32BE(0);
+      if (expected > 0 && all.length >= expected + 4) {
+        socket.end();
+        const response = JSON.parse(all.subarray(4, expected + 4).toString("utf8"));
+        if (response.error) reject(new Error(response.error.message ?? "browser tool failed"));
+        else resolve(response.result ?? {});
+      }
+    });
+    socket.on("error", reject);
+  });
+}
 
 class PiToolCallSurfacing extends Error {
   constructor(public toolName: string, public args: unknown) {
@@ -162,7 +232,9 @@ function streamClaudeSdk(
     let activeTextIndex: number | null = null;
     let activeToolCall: { idx: number; id: string; name: string; jsonAcc: string } | null = null;
 
-    const piTools = (context.tools as PiTool[] | undefined) ?? [];
+    const browserGrant = browserGrantFromEnv();
+    const browserTools = buildClaudeCliToolsForTest({ browserGrant }) as unknown as PiTool[];
+    const piTools = [...((context.tools as PiTool[] | undefined) ?? []), ...browserTools];
     const sdkTools = piTools.map((t) =>
       piToolToSdkTool(t, (name, args) => {
         surfaced = new PiToolCallSurfacing(name, args);
@@ -287,7 +359,6 @@ function streamClaudeSdk(
 // In the GSD daemon path, this surfaces as an extension_ui_request[method=input]
 // that the daemon's pi.Executor intercepts and translates into protocol.Question.
 // -----------------------------------------------------------------
-import { Type } from "@sinclair/typebox";
 
 const AskHumanParams = Type.Object({
   question: Type.String({ description: "The question to ask the human." }),
@@ -320,8 +391,43 @@ function registerAskHumanTool(pi: ExtensionAPI) {
   });
 }
 
+function registerBrowserTool(pi: ExtensionAPI) {
+  const definition = browserToolDefinition();
+  pi.registerTool({
+    name: definition.name,
+    label: definition.label,
+    description: definition.description,
+    parameters: definition.parameters,
+    async execute(_toolCallId, params, _signal) {
+      const browserGrant = browserGrantFromEnv();
+      if (!browserGrant) {
+        return {
+          content: [{ type: "text", text: "No task-scoped browser grant is active." }],
+          isError: true,
+          details: {},
+        };
+      }
+      try {
+        const result = await browserRpc(browserGrant.browserId, params.method, params.params ?? {});
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          isError: false,
+          details: { browserId: browserGrant.browserId, grantId: browserGrant.grantId },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+          isError: true,
+          details: { browserId: browserGrant.browserId, grantId: browserGrant.grantId },
+        };
+      }
+    },
+  });
+}
+
 export default function (pi: ExtensionAPI) {
   registerAskHumanTool(pi);
+  registerBrowserTool(pi);
   pi.registerTool(askUserQuestionsTool as any);
   pi.registerProvider("claude-cli", {
     baseUrl: "http://localhost/unused",
