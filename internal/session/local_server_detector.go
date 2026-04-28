@@ -226,6 +226,7 @@ func (a *Actor) verifyAndReportLocalServer(ctx context.Context, tc *taskContext,
 	})
 	if err != nil {
 		slog.Warn("local server detection send failed", "sessionId", a.opts.SessionID, "port", candidate.port, "err", err)
+		a.localServerDetections.Delete(localServerKey(tc.ChannelID, candidate.port))
 	}
 }
 
