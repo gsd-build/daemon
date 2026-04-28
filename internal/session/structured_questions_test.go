@@ -281,3 +281,35 @@ func TestStructuredQuestionCoordinatorPairsBothEventOrders(t *testing.T) {
 		}
 	})
 }
+
+func TestStructuredQuestionCoordinatorSkipsPlaceholderHandledRound(t *testing.T) {
+	var c structuredQuestionCoordinator
+
+	handled := structuredQuestionRound{
+		ToolCallID: "ui_1",
+		Questions: []structuredQuestion{
+			{ID: "scope", Question: "Pick one", Options: []structuredQuestionOption{{Label: "Daemon"}}},
+		},
+	}
+	next := structuredQuestionRound{
+		ToolCallID: "toolu_2",
+		Questions: []structuredQuestion{
+			{ID: "texture", Question: "Pick texture", Options: []structuredQuestionOption{{Label: "Analog"}}},
+		},
+	}
+
+	c.discardNextMatching(handled)
+	c.put(structuredQuestionRound{
+		ToolCallID: "toolu_1",
+		Questions:  handled.Questions,
+	})
+	c.put(next)
+
+	round, ok := c.wait(context.Background())
+	if !ok {
+		t.Fatal("wait returned false")
+	}
+	if round.ToolCallID != "toolu_2" {
+		t.Fatalf("ToolCallID = %q, want toolu_2", round.ToolCallID)
+	}
+}

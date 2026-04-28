@@ -815,6 +815,7 @@ func (a *Actor) makePiUIHandler(ctx context.Context, tc *taskContext, coordinato
 				return a.handleStructuredQuestionRound(ctx, handlerCtx, tc, round)
 			}
 			if round, ok := parseStructuredQuestionRoundFromPlaceholder(req.ID, req.Placeholder); ok {
+				coordinator.discardNextMatching(round)
 				return a.handleStructuredQuestionRound(ctx, handlerCtx, tc, round)
 			}
 		}
