@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -18,6 +19,8 @@ const (
 	maxDiscoveredSkills = 500
 	maxSkillReadBytes   = 16 * 1024
 )
+
+var skillRefPattern = regexp.MustCompile(`(?:^|\s)/(?:skill:([A-Za-z0-9:_-]+)|(namespace:[A-Za-z0-9:_-]+))`)
 
 type root struct {
 	path  string
@@ -64,6 +67,43 @@ func DiscoverClaudeSkills(cwd string) ([]protocol.Skill, error) {
 		return out[i].Name < out[j].Name
 	})
 	return out, nil
+}
+
+func PromptHasClaudeSkillReference(prompt string) bool {
+	return skillRefPattern.MatchString(prompt)
+}
+
+func SelectClaudeSkillsForPrompt(prompt string, available []protocol.Skill) []protocol.Skill {
+	matches := skillRefPattern.FindAllStringSubmatch(prompt, -1)
+	if len(matches) == 0 || len(available) == 0 {
+		return nil
+	}
+
+	wanted := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		for _, value := range match[1:] {
+			if value != "" {
+				wanted[value] = struct{}{}
+			}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+
+	selected := make([]protocol.Skill, 0, len(wanted))
+	seenPaths := make(map[string]struct{})
+	for _, skill := range available {
+		if _, ok := wanted[skill.Name]; !ok {
+			continue
+		}
+		if _, ok := seenPaths[skill.Path]; ok {
+			continue
+		}
+		seenPaths[skill.Path] = struct{}{}
+		selected = append(selected, skill)
+	}
+	return selected
 }
 
 func claudeSkillRoots(cwd string) ([]root, error) {

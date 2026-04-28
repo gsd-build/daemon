@@ -90,6 +90,16 @@ func argIndex(args []string, want string) int {
 	return -1
 }
 
+func argValues(args []string, flag string) []string {
+	values := make([]string, 0)
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			values = append(values, args[i+1])
+		}
+	}
+	return values
+}
+
 func TestNormalizePiModelStripsBracketSuffix(t *testing.T) {
 	tests := map[string]string{
 		"claude-opus-4-6[1m]":      "claude-opus-4-6",
@@ -227,7 +237,7 @@ func TestActorPiExecutorPassesCustomInstructions(t *testing.T) {
 	}
 }
 
-func TestActorPiExecutorPassesClaudeSkillPaths(t *testing.T) {
+func TestActorPiExecutorPassesReferencedClaudeSkillPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -240,6 +250,12 @@ func TestActorPiExecutorPassesClaudeSkillPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(skillPath, []byte("---\nname: project-skill\ndescription: Project skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "skills", "home-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "skills", "home-skill", "SKILL.md"), []byte("---\nname: home-skill\ndescription: Home skill\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -263,21 +279,62 @@ func TestActorPiExecutorPassesClaudeSkillPaths(t *testing.T) {
 	}
 
 	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
-		TaskID:    "task-pi-skills",
-		ChannelID: "ch-pi-skills",
-		Engine:    "pi",
-	}, "use the project skill")
+		TaskID:         "task-pi-skills",
+		ChannelID:      "ch-pi-skills",
+		Engine:         "pi",
+		OriginalPrompt: "/skill:project-skill use the project skill",
+	}, "/skill:project-skill use the project skill")
 	if err != nil {
 		t.Fatalf("runPiExecutor: %v", err)
 	}
 
 	args := readNulArgsFile(t, argsFile)
-	skillFlag := argIndex(args, "--skill")
-	if skillFlag < 0 || skillFlag+1 >= len(args) {
-		t.Fatalf("pi args missing --skill value: %v", args)
+	skillPaths := argValues(args, "--skill")
+	if len(skillPaths) != 1 || skillPaths[0] != skillPath {
+		t.Fatalf("pi skill paths = %+v, want only %q", skillPaths, skillPath)
 	}
-	if args[skillFlag+1] != skillPath {
-		t.Fatalf("pi skill path = %q, want %q", args[skillFlag+1], skillPath)
+}
+
+func TestActorPiExecutorSkipsSkillsWithoutPromptReference(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projectDir := filepath.Join(home, "repo", "app")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "skills", "home-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "skills", "home-skill", "SKILL.md"), []byte("---\nname: home-skill\ndescription: Home skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-pi-no-skills",
+		CWD:       projectDir,
+		Relay:     newFakeRelay(),
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:         "task-pi-no-skills",
+		ChannelID:      "ch-pi-no-skills",
+		Engine:         "pi",
+		OriginalPrompt: "hello",
+	}, "<context>\n/skill:home-skill appears in injected context\n</context>\nhello")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	if skillPaths := argValues(args, "--skill"); len(skillPaths) != 0 {
+		t.Fatalf("pi skill paths = %+v, want none", skillPaths)
 	}
 }
 

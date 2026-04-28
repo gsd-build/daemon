@@ -606,13 +606,21 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	if err != nil {
 		return err
 	}
-	availableSkills, err := skills.DiscoverClaudeSkills(a.opts.CWD)
-	if err != nil {
-		slog.Warn("discover claude skills failed", "cwd", a.opts.CWD, "err", err)
+	skillPrompt := tc.OriginalPrompt
+	if skillPrompt == "" {
+		skillPrompt = prompt
 	}
-	skillPaths := make([]string, 0, len(availableSkills))
-	for _, skill := range availableSkills {
-		skillPaths = append(skillPaths, skill.Path)
+	skillPaths := []string(nil)
+	if skills.PromptHasClaudeSkillReference(skillPrompt) {
+		availableSkills, err := skills.DiscoverClaudeSkills(a.opts.CWD)
+		if err != nil {
+			slog.Warn("discover claude skills failed", "cwd", a.opts.CWD, "err", err)
+		}
+		selectedSkills := skills.SelectClaudeSkillsForPrompt(skillPrompt, availableSkills)
+		skillPaths = make([]string, 0, len(selectedSkills))
+		for _, skill := range selectedSkills {
+			skillPaths = append(skillPaths, skill.Path)
+		}
 	}
 
 	exec := pi.NewExecutor(pi.Options{

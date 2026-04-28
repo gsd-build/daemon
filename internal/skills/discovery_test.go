@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 func writeSkill(t *testing.T, root string, dir string, body string) string {
@@ -96,5 +98,53 @@ func TestDiscoverClaudeSkillsUsesDirectoryNameFallback(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Name != "fallback" {
 		t.Fatalf("unexpected fallback skill: %+v", got)
+	}
+}
+
+func TestSelectClaudeSkillsForPromptRequiresExplicitReference(t *testing.T) {
+	available := []protocol.Skill{
+		{Name: "project-skill", Path: "/skills/project/SKILL.md"},
+		{Name: "home-skill", Path: "/skills/home/SKILL.md"},
+	}
+
+	got := SelectClaudeSkillsForPrompt("use the project skill", available)
+	if len(got) != 0 {
+		t.Fatalf("expected no implicit skills, got %+v", got)
+	}
+}
+
+func TestSelectClaudeSkillsForPromptIgnoresPathLikeTokens(t *testing.T) {
+	available := []protocol.Skill{
+		{Name: "project-skill", Path: "/skills/project/SKILL.md"},
+		{Name: "tmp", Path: "/skills/tmp/SKILL.md"},
+		{Name: "foo:bar", Path: "/skills/foo-bar/SKILL.md"},
+	}
+
+	if PromptHasClaudeSkillReference("open /tmp/notes.md") {
+		t.Fatal("expected no skill reference for a filesystem path")
+	}
+	if PromptHasClaudeSkillReference("use /foo:bar") {
+		t.Fatal("expected no skill reference for a non-directive namespace token")
+	}
+
+	got := SelectClaudeSkillsForPrompt("open /tmp/notes.md then run /skill:project-skill and ignore /foo:bar", available)
+	if len(got) != 1 || got[0].Path != "/skills/project/SKILL.md" {
+		t.Fatalf("unexpected selected skills: %+v", got)
+	}
+}
+
+func TestSelectClaudeSkillsForPromptMatchesSkillTokens(t *testing.T) {
+	available := []protocol.Skill{
+		{Name: "project-skill", Path: "/skills/project/SKILL.md"},
+		{Name: "home-skill", Path: "/skills/home/SKILL.md"},
+		{Name: "namespace:skill_name", Path: "/skills/namespaced/SKILL.md"},
+	}
+
+	got := SelectClaudeSkillsForPrompt("run /skill:project-skill and /namespace:skill_name", available)
+	if len(got) != 2 {
+		t.Fatalf("expected two selected skills, got %+v", got)
+	}
+	if got[0].Path != "/skills/project/SKILL.md" || got[1].Path != "/skills/namespaced/SKILL.md" {
+		t.Fatalf("unexpected selected skills: %+v", got)
 	}
 }
