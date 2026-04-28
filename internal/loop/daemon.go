@@ -244,6 +244,13 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	if homeErr != nil || homeDir == "" {
 		homeDir = os.TempDir()
 	}
+	if !filepath.IsAbs(homeDir) {
+		if absHome, err := filepath.Abs(homeDir); err == nil {
+			homeDir = absHome
+		} else {
+			homeDir = os.TempDir()
+		}
+	}
 	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
 	if absDir, err := filepath.Abs(browserStateDir); err == nil {
 		browserStateDir = absDir
@@ -623,16 +630,16 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		slog.Info("duplicate task ignored", "session", msg.SessionID, "taskId", msg.TaskID)
 		return nil
 	}
+	browserGrantID := ""
+	browserID := ""
+	if d.browserManager != nil {
+		if browserGrant, ok := d.browserManager.GrantForTask(msg.TaskID); ok {
+			browserGrantID = browserGrant.GrantID
+			browserID = browserGrant.BrowserID
+		}
+	}
 	if actor == nil {
 		var err error
-		browserGrantID := ""
-		browserID := ""
-		if d.browserManager != nil {
-			if browserGrant, ok := d.browserManager.GrantForTask(msg.TaskID); ok {
-				browserGrantID = browserGrant.GrantID
-				browserID = browserGrant.BrowserID
-			}
-		}
 		actor, err = d.manager.Spawn(ctx, session.Options{
 			SessionID:       msg.SessionID,
 			CWD:             msg.CWD,
@@ -656,6 +663,8 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 				Error:     err.Error(),
 			})
 		}
+	} else {
+		actor.SetBrowserContext(browserGrantID, browserID)
 	}
 
 	// Task execution errors (e.g. claude binary not found, executor not ready)

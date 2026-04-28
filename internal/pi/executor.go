@@ -165,13 +165,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	)
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
-	if e.opts.BrowserGrantID != "" && e.opts.BrowserID != "" && e.opts.BrowserSessionID != "" {
-		cmd.Env = append(os.Environ(),
-			"GSD_BROWSER_GRANT_ID="+e.opts.BrowserGrantID,
-			"GSD_BROWSER_ID="+e.opts.BrowserID,
-			"GSD_BROWSER_SESSION_ID="+e.opts.BrowserSessionID,
-		)
-	}
+	cmd.Env = browserEnv(os.Environ(), e.opts.BrowserGrantID, e.opts.BrowserID, e.opts.BrowserSessionID)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()
@@ -320,6 +314,24 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		return parseErr
 	}
 	return nil
+}
+
+func browserEnv(base []string, grantID string, browserID string, sessionID string) []string {
+	env := make([]string, 0, len(base)+3)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GSD_BROWSER_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	if grantID != "" && browserID != "" && sessionID != "" {
+		env = append(env,
+			"GSD_BROWSER_GRANT_ID="+grantID,
+			"GSD_BROWSER_ID="+browserID,
+			"GSD_BROWSER_SESSION_ID="+sessionID,
+		)
+	}
+	return env
 }
 
 func terminateProcessGroupAndWait(cmd *exec.Cmd, pid int, stdin io.Closer, timeout time.Duration) error {

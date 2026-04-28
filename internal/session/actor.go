@@ -240,6 +240,14 @@ func (a *Actor) AllowedTools() []string {
 	return out
 }
 
+// SetBrowserContext sets the task-scoped browser grant used by the next task.
+func (a *Actor) SetBrowserContext(grantID string, browserID string) {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	a.opts.BrowserGrantID = grantID
+	a.opts.BrowserID = browserID
+}
+
 // SendTask queues a task for execution. Non-blocking if the channel has capacity.
 func (a *Actor) SendTask(task protocol.Task) error {
 	select {

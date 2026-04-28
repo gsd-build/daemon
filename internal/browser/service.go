@@ -157,11 +157,31 @@ func (s LocalService) rpc(ctx context.Context, grantID string, method string, pa
 		return err
 	}
 	defer conn.Close()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(30 * time.Second)
+	}
+	_ = conn.SetDeadline(deadline)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	if err := writeFrame(conn, data); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	}
 	buf, err := readFrame(conn)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	}
 	var resp struct {
@@ -185,11 +205,24 @@ func (s LocalService) rpc(ctx context.Context, grantID string, method string, pa
 func writeFrame(w io.Writer, data []byte) error {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeFull(w, header[:]); err != nil {
 		return err
 	}
-	_, err := w.Write(data)
-	return err
+	return writeFull(w, data)
+}
+
+func writeFull(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 func readFrame(r io.Reader) ([]byte, error) {

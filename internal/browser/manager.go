@@ -126,8 +126,26 @@ func (m *Manager) frameLoop(ctx context.Context, browserID string) {
 func (m *Manager) sendFrame(ctx context.Context, browserID string) {
 	m.mu.Lock()
 	state, ok := m.byID[browserID]
-	if !ok || time.Now().After(state.expiresAt) {
+	if !ok {
 		m.mu.Unlock()
+		return
+	}
+	if time.Now().After(state.expiresAt) {
+		req := state.openRequest
+		m.removeStateLocked(state)
+		m.mu.Unlock()
+
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = m.service.Close(closeCtx, state.browserID)
+		_ = m.sender.Send(closeCtx, &protocol.BrowserSessionClosed{
+			Type:      protocol.MsgTypeBrowserSessionClosed,
+			BrowserID: state.browserID,
+			SessionID: req.SessionID,
+			ChannelID: req.ChannelID,
+			Reason:    "expired",
+			ClosedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		})
 		return
 	}
 	req := state.openRequest
@@ -213,6 +231,10 @@ func (m *Manager) UserInput(ctx context.Context, msg *protocol.BrowserUserInput)
 		m.mu.Unlock()
 		return fmt.Errorf("browser session not found")
 	}
+	if time.Now().After(state.expiresAt) {
+		m.mu.Unlock()
+		return fmt.Errorf("browser grant expired")
+	}
 	if state.owner != OwnerLex {
 		m.mu.Unlock()
 		return fmt.Errorf("browser control belongs to %s", state.owner)
@@ -237,13 +259,7 @@ func (m *Manager) Close(ctx context.Context, msg *protocol.BrowserSessionClose) 
 		m.mu.Unlock()
 		return nil
 	}
-	delete(m.byID, state.browserID)
-	if state.openRequest.TaskID != "" {
-		delete(m.byTask, state.openRequest.TaskID)
-	}
-	if state.frameCancel != nil {
-		state.frameCancel()
-	}
+	m.removeStateLocked(state)
 	m.mu.Unlock()
 
 	_ = m.service.Close(ctx, state.browserID)
@@ -255,6 +271,17 @@ func (m *Manager) Close(ctx context.Context, msg *protocol.BrowserSessionClose) 
 		Reason:    msg.Reason,
 		ClosedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	})
+}
+
+func (m *Manager) removeStateLocked(state *sessionState) {
+	delete(m.byID, state.browserID)
+	if state.openRequest.TaskID != "" {
+		delete(m.byTask, state.openRequest.TaskID)
+	}
+	if state.frameCancel != nil {
+		state.frameCancel()
+		state.frameCancel = nil
+	}
 }
 
 func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error {

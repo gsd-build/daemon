@@ -97,3 +97,89 @@ func TestManagerPausesToolCallsWhileLexControlsBrowser(t *testing.T) {
 		t.Fatal("expected tool call to wait or fail while Lex controls browser")
 	}
 }
+
+func TestManagerTearsDownExpiredSessionOnFrame(t *testing.T) {
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+
+	if err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		TaskID:    "task_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	m.mu.Lock()
+	m.byID["browser_1"].expiresAt = time.Now().Add(-time.Second)
+	m.mu.Unlock()
+
+	m.sendFrame(context.Background(), "browser_1")
+
+	m.mu.Lock()
+	_, hasBrowser := m.byID["browser_1"]
+	_, hasTask := m.byTask["task_1"]
+	m.mu.Unlock()
+	if hasBrowser || hasTask {
+		t.Fatal("expected expired browser session to be removed")
+	}
+	if !hasCall(svc.calls, "close:browser_1") {
+		t.Fatalf("expected browser close call, got %v", svc.calls)
+	}
+}
+
+func TestManagerRejectsExpiredUserInput(t *testing.T) {
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+
+	if err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		TaskID:    "task_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := m.Claim(context.Background(), &protocol.BrowserControlClaim{
+		Type:      protocol.MsgTypeBrowserControlClaim,
+		BrowserID: "browser_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Owner:     "lex",
+	}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	m.mu.Lock()
+	m.byID["browser_1"].expiresAt = time.Now().Add(-time.Second)
+	m.mu.Unlock()
+
+	err := m.UserInput(context.Background(), &protocol.BrowserUserInput{
+		Type:      protocol.MsgTypeBrowserUserInput,
+		BrowserID: "browser_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Kind:      "click",
+	})
+	if err == nil {
+		t.Fatal("expected expired user input to fail")
+	}
+}
+
+func hasCall(calls []string, want string) bool {
+	for _, call := range calls {
+		if call == want {
+			return true
+		}
+	}
+	return false
+}

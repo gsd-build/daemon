@@ -13,4 +13,9 @@ describe("browser tool registration", () => {
     });
     assert.equal(tools.some((tool) => tool.name === "gsd_browser"), true);
   });
+
+  it("does not surface gsd_browser without a browser grant", () => {
+    const tools = buildClaudeCliToolsForTest({});
+    assert.equal(tools.some((tool) => tool.name === "gsd_browser"), false);
+  });
 });

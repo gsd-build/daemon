@@ -70,7 +70,7 @@ function browserToolDefinition() {
         method: { type: "string" },
         params: { type: "object", additionalProperties: true },
       },
-      required: ["method", "params"],
+      required: ["method"],
     },
   };
 }
@@ -87,7 +87,7 @@ function browserGrantFromEnv() {
   return { grantId, browserId, sessionId };
 }
 
-async function browserRpc(browserId: string, method: string, params: unknown) {
+async function browserRpc(browserId: string, method: string, params: unknown, signal?: AbortSignal) {
   const socketPath = path.join(os.homedir(), ".gsd-browser", "sessions", browserId, "daemon.sock");
   const payload = Buffer.from(JSON.stringify({
     jsonrpc: "2.0",
@@ -102,19 +102,64 @@ async function browserRpc(browserId: string, method: string, params: unknown) {
     const socket = net.createConnection(socketPath);
     const chunks: Buffer[] = [];
     let expected = 0;
-    socket.on("connect", () => socket.write(Buffer.concat([header, payload])));
+    let settled = false;
+
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+      socket.removeAllListeners("timeout");
+    };
+    const rejectOnce = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      reject(err);
+    };
+    const resolveOnce = (value: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.end();
+      resolve(value);
+    };
+    const onAbort = () => rejectOnce(new Error("browser tool aborted"));
+
+    if (signal?.aborted) {
+      rejectOnce(new Error("browser tool aborted"));
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    socket.setTimeout(30_000, () => rejectOnce(new Error("browser tool timed out")));
+    socket.on("connect", () => {
+      socket.write(Buffer.concat([header, payload]), (err) => {
+        if (err) rejectOnce(err);
+      });
+    });
     socket.on("data", (chunk) => {
       chunks.push(chunk);
       const all = Buffer.concat(chunks);
       if (expected === 0 && all.length >= 4) expected = all.readUInt32BE(0);
+      if (expected > 16 * 1024 * 1024) {
+        rejectOnce(new Error(`browser rpc frame too large: ${expected}`));
+        return;
+      }
       if (expected > 0 && all.length >= expected + 4) {
-        socket.end();
-        const response = JSON.parse(all.subarray(4, expected + 4).toString("utf8"));
-        if (response.error) reject(new Error(response.error.message ?? "browser tool failed"));
-        else resolve(response.result ?? {});
+        try {
+          const response = JSON.parse(all.subarray(4, expected + 4).toString("utf8"));
+          if (response.error) rejectOnce(new Error(response.error.message ?? "browser tool failed"));
+          else resolveOnce(response.result ?? {});
+        } catch (err) {
+          rejectOnce(err instanceof Error ? err : new Error(String(err)));
+        }
       }
     });
-    socket.on("error", reject);
+    socket.on("end", () => rejectOnce(new Error("browser rpc ended before response")));
+    socket.on("close", (hadError) => {
+      if (!settled) {
+        rejectOnce(new Error(hadError ? "browser rpc socket closed after error" : "browser rpc socket closed before response"));
+      }
+    });
+    socket.on("error", (err) => rejectOnce(err));
   });
 }
 
@@ -398,7 +443,7 @@ function registerBrowserTool(pi: ExtensionAPI) {
     label: definition.label,
     description: definition.description,
     parameters: definition.parameters,
-    async execute(_toolCallId, params, _signal) {
+    async execute(_toolCallId, params, signal) {
       const browserGrant = browserGrantFromEnv();
       if (!browserGrant) {
         return {
@@ -408,7 +453,7 @@ function registerBrowserTool(pi: ExtensionAPI) {
         };
       }
       try {
-        const result = await browserRpc(browserGrant.browserId, params.method, params.params ?? {});
+        const result = await browserRpc(browserGrant.browserId, params.method, params.params ?? {}, signal);
         return {
           content: [{ type: "text", text: JSON.stringify(result) }],
           isError: false,
