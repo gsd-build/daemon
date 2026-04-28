@@ -4,11 +4,17 @@
   "private": true,
   "type": "module",
   "main": "index.ts",
+  "scripts": {
+    "test": "tsx --test"
+  },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.2.119",
     "@mariozechner/pi-ai": "0.70.2",
     "@mariozechner/pi-coding-agent": "0.70.2",
     "@sinclair/typebox": "0.34.49",
     "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
   }
 }

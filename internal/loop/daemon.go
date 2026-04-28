@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/api"
+	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pidfile"
@@ -61,6 +62,7 @@ type Daemon struct {
 	previewWS            *preview.WebSocketBridge
 	previewWork          chan struct{}
 	generateSessionTitle sessionTitleGenerator
+	browserManager       *browser.Manager
 	runCtxMu             sync.RWMutex
 	runCtx               context.Context
 }
@@ -238,6 +240,21 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		Uploader:        uploader,
 	})
 	previewRegistry := preview.NewRegistry()
+	homeDir, homeErr := os.UserHomeDir()
+	if homeErr != nil || homeDir == "" {
+		homeDir = os.TempDir()
+	}
+	if !filepath.IsAbs(homeDir) {
+		if absHome, err := filepath.Abs(homeDir); err == nil {
+			homeDir = absHome
+		} else {
+			homeDir = os.TempDir()
+		}
+	}
+	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
+	if absDir, err := filepath.Abs(browserStateDir); err == nil {
+		browserStateDir = absDir
+	}
 
 	d := &Daemon{
 		cfg:                  cfg,
@@ -255,6 +272,10 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		previewWS:            preview.NewWebSocketBridge(previewRegistry, client),
 		previewWork:          make(chan struct{}, preview.DefaultMaxActiveStreams),
 		generateSessionTitle: defaultSessionTitleGenerator,
+		browserManager: browser.NewManager(browser.ManagerOptions{
+			Service: browser.LocalService{BinaryPath: "gsd-browser", StateDir: browserStateDir},
+			Sender:  client,
+		}),
 	}
 
 	return d, nil
@@ -448,6 +469,18 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleContextStatsRequest(msg)
 	case *protocol.SessionTitleRequest:
 		return d.handleSessionTitleRequest(msg)
+	case *protocol.BrowserSessionOpen:
+		return d.browserManager.Open(d.runtimeContext(), msg)
+	case *protocol.BrowserSessionClose:
+		return d.browserManager.Close(d.runtimeContext(), msg)
+	case *protocol.BrowserControlClaim:
+		return d.browserManager.Claim(d.runtimeContext(), msg)
+	case *protocol.BrowserControlRelease:
+		return d.browserManager.Release(d.runtimeContext(), msg)
+	case *protocol.BrowserUserInput:
+		return d.browserManager.UserInput(d.runtimeContext(), msg)
+	case *protocol.BrowserToolCall:
+		return d.browserManager.Tool(d.runtimeContext(), msg)
 	case *protocol.PreviewOpen:
 		return d.handlePreviewOpen(msg)
 	case *protocol.PreviewClose:
@@ -597,6 +630,14 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		slog.Info("duplicate task ignored", "session", msg.SessionID, "taskId", msg.TaskID)
 		return nil
 	}
+	browserGrantID := ""
+	browserID := ""
+	if d.browserManager != nil {
+		if browserGrant, ok := d.browserManager.GrantForTask(msg.TaskID); ok {
+			browserGrantID = browserGrant.GrantID
+			browserID = browserGrant.BrowserID
+		}
+	}
 	if actor == nil {
 		var err error
 		actor, err = d.manager.Spawn(ctx, session.Options{
@@ -608,6 +649,8 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			ResumeSession:   msg.ClaudeSessionID,
 			PiBinaryPath:    d.piBinaryPath,
 			PiExtensionPath: d.piExtensionPath,
+			BrowserGrantID:  browserGrantID,
+			BrowserID:       browserID,
 		})
 		if err != nil {
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -620,6 +663,8 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 				Error:     err.Error(),
 			})
 		}
+	} else {
+		actor.SetBrowserContext(browserGrantID, browserID)
 	}
 
 	// Task execution errors (e.g. claude binary not found, executor not ready)

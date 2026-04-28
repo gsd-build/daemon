@@ -46,6 +46,8 @@ type Options struct {
 	PiBinaryPath    string
 	PiExtensionPath string
 	Uploader        ImageUploader // nil = image upload disabled
+	BrowserGrantID  string
+	BrowserID       string
 }
 
 // Actor drives a single agent session using spawn-per-task execution.
@@ -128,6 +130,8 @@ type taskContext struct {
 	ImageURLs          []string
 	ContextRefs        []protocol.ContextRef
 	CustomInstructions string
+	BrowserGrantID     string
+	BrowserID          string
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -234,6 +238,14 @@ func (a *Actor) AllowedTools() []string {
 	out := make([]string, len(a.allowedTools))
 	copy(out, a.allowedTools)
 	return out
+}
+
+// SetBrowserContext sets the task-scoped browser grant used by the next task.
+func (a *Actor) SetBrowserContext(grantID string, browserID string) {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	a.opts.BrowserGrantID = grantID
+	a.opts.BrowserID = browserID
 }
 
 // SendTask queues a task for execution. Non-blocking if the channel has capacity.
@@ -511,6 +523,8 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		ImageURLs:          task.ImageURLs,
 		ContextRefs:        task.ContextRefs,
 		CustomInstructions: task.CustomInstructions,
+		BrowserGrantID:     a.opts.BrowserGrantID,
+		BrowserID:          a.opts.BrowserID,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -634,6 +648,9 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		ExtensionPath:      a.opts.PiExtensionPath,
 		Provider:           "claude-cli",
 		SkillPaths:         skillPaths,
+		BrowserGrantID:     tc.BrowserGrantID,
+		BrowserID:          tc.BrowserID,
+		BrowserSessionID:   a.opts.SessionID,
 	})
 
 	coordinator := &structuredQuestionCoordinator{}
