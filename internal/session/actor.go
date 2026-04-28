@@ -75,6 +75,7 @@ type Actor struct {
 
 	taskStartedAt *time.Time // when current task started; nil when idle
 	idleSince     *time.Time // when actor became idle; nil when executing
+	piModel       string     // Pi model used for context-window fallbacks
 
 	// taskTimeout is the per-task deadline. Zero means no timeout.
 	// Set by the Manager from config before calling Run.
@@ -166,6 +167,7 @@ func NewActor(opts Options) (*Actor, error) {
 			BinaryPath:  binaryPath,
 			CWD:         actor.opts.CWD,
 			SessionFile: sessionFile,
+			Model:       actor.currentPiModel(),
 			Command:     command,
 			OnEvent:     onEvent,
 		})
@@ -632,6 +634,7 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 		model = a.opts.Model
 	}
 	model = normalizePiModel(model)
+	a.setPiModel(model)
 	binaryPath := a.opts.PiBinaryPath
 	if binaryPath == "" {
 		binaryPath = "pi"
@@ -786,6 +789,24 @@ func normalizePiModel(model string) string {
 		}
 	}
 	return model
+}
+
+func (a *Actor) setPiModel(model string) {
+	if model == "" {
+		return
+	}
+	a.taskMu.Lock()
+	a.piModel = model
+	a.taskMu.Unlock()
+}
+
+func (a *Actor) currentPiModel() string {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	if a.piModel != "" {
+		return a.piModel
+	}
+	return normalizePiModel(a.opts.Model)
 }
 
 func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {

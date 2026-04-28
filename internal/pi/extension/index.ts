@@ -334,7 +334,7 @@ export default function (pi: ExtensionAPI) {
         reasoning: false,
         input: ["text", "image"],
         cost: { input: 15.0, output: 75.0, cacheRead: 1.50, cacheWrite: 18.75 },
-        contextWindow: 200_000,
+        contextWindow: 1_000_000,
         maxTokens: 8_192,
       },
       {
@@ -344,7 +344,7 @@ export default function (pi: ExtensionAPI) {
         input: ["text", "image"],
         // Anthropic Sonnet 4.x list pricing per 1M tokens (as of 2025-08, public docs).
         cost: { input: 3.0, output: 15.0, cacheRead: 0.30, cacheWrite: 3.75 },
-        contextWindow: 200_000,
+        contextWindow: 1_000_000,
         maxTokens: 8_192,
       },
     ],
