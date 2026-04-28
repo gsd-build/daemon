@@ -21,6 +21,13 @@ func ResolveShell() string {
 }
 
 func ValidateCWD(cwd string) (string, error) {
+	if cwd == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		cwd = home
+	}
 	if !filepath.IsAbs(cwd) {
 		return "", fmt.Errorf("cwd must be absolute")
 	}

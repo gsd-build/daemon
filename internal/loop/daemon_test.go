@@ -319,6 +319,7 @@ func TestHandleTaskSpawnsWithPiSettings(t *testing.T) {
 }
 
 func TestHandleTerminalMessagesOpenInputAndExit(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
 	client := relayClientStub(false)
 	d := &Daemon{
 		cfg:             &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
