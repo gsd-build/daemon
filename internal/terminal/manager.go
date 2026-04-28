@@ -35,6 +35,7 @@ type Session struct {
 	closeOnce   sync.Once
 	reasonMu    sync.Mutex
 	closeReason string
+	timerMu     sync.Mutex
 	idleTimer   *time.Timer
 	maxTimer    *time.Timer
 }
@@ -101,9 +102,9 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) error {
 	m.sessions[req.TerminalID] = s
 	m.mu.Unlock()
 	_ = m.events.SendTerminalOpened(req, shell, cwd, time.Now().UTC())
-	m.startTimers(s)
 	go m.readLoop(s)
 	go m.waitLoop(s)
+	m.startTimers(s)
 	return nil
 }
 
@@ -247,6 +248,9 @@ func Encode(data []byte) string {
 }
 
 func (m *Manager) startTimers(s *Session) {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+
 	idleTimeout := s.req.IdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = m.limits.IdleTimeout
@@ -272,12 +276,16 @@ func (m *Manager) touch(s *Session) {
 	if idleTimeout <= 0 {
 		idleTimeout = m.limits.IdleTimeout
 	}
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
 	if s.idleTimer != nil && idleTimeout > 0 {
 		s.idleTimer.Reset(idleTimeout)
 	}
 }
 
 func (m *Manager) stopTimers(s *Session) {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 	}

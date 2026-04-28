@@ -196,10 +196,11 @@ func TestManagerEnforcesMaxSessions(t *testing.T) {
 func TestManagerClosesIdleTerminal(t *testing.T) {
 	events := &captureEvents{}
 	m := NewManager(events, Limits{
-		ScrollbackBytes: 1024,
-		IdleTimeout:     50 * time.Millisecond,
-		MaxLifetime:     time.Second,
-		OutputChunkSize: 1024,
+		ScrollbackBytes:        1024,
+		IdleTimeout:            50 * time.Millisecond,
+		MaxLifetime:            time.Second,
+		OutputChunkSize:        1024,
+		TerminationGracePeriod: 50 * time.Millisecond,
 	})
 
 	req := OpenRequest{
