@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,28 @@ func TestBrowseDirDoesNotResolveChildSymlinks(t *testing.T) {
 	}
 	if entries[0].IsDirectory {
 		t.Fatal("expected symlink entry to remain non-directory")
+	}
+}
+
+func TestBrowseDirRejectsOversizedResults(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < browseDirEntryLimit+25; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("file-%03d.txt", i))
+		if err := os.WriteFile(name, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := BrowseDir(dir, dir)
+	if err == nil {
+		t.Fatal("expected oversized browse error")
+	}
+	expectedErr := fmt.Sprintf(
+		"directory contains %d entries; paginated browsing is required",
+		browseDirEntryLimit+25,
+	)
+	if err.Error() != expectedErr {
+		t.Fatalf("error = %q, expected %q", err.Error(), expectedErr)
 	}
 }
 
