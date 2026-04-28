@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -99,6 +100,58 @@ func TestExecutorRequiresExistingExtension(t *testing.T) {
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected os.ErrNotExist, got %v", err)
+	}
+}
+
+func TestExecutorPassesCustomInstructionsAsAppendSystemPrompt(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	fakePi := writeFakePi(t, `
+: > "`+argsFile+`"
+for arg in "$@"; do
+  printf '%s\000' "$arg" >> "`+argsFile+`"
+done
+IFS= read -r prompt_frame || true
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`)
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write extension: %v", err)
+	}
+
+	exec := NewExecutor(Options{
+		BinaryPath:         fakePi,
+		CWD:                t.TempDir(),
+		ExtensionPath:      extensionPath,
+		Provider:           "claude-cli",
+		Prompt:             "hello",
+		CustomInstructions: "  Always talk like a pirate.  ",
+	})
+
+	if err := exec.Run(context.Background(), func(claude.Event) error { return nil }, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	args := strings.Split(string(data), "\x00")
+	if len(args) > 0 && args[len(args)-1] == "" {
+		args = args[:len(args)-1]
+	}
+	flag := -1
+	for i, arg := range args {
+		if arg == "--append-system-prompt" {
+			flag = i
+			break
+		}
+	}
+	if flag < 0 || flag+1 >= len(args) {
+		t.Fatalf("pi args missing --append-system-prompt value: %v", args)
+	}
+	if args[flag+1] != "Always talk like a pirate." {
+		t.Fatalf("append system prompt = %q", args[flag+1])
 	}
 }
 
