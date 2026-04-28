@@ -3,6 +3,8 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +68,25 @@ func (c *captureEvents) outputString() string {
 	return c.output.String()
 }
 
+func (c *captureEvents) hasExitReason(reason string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, got := range c.exits {
+		if got == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *captureEvents) exitReasons() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]string(nil), c.exits...)
+}
+
 func TestManagerOpenWriteAndClose(t *testing.T) {
 	events := &captureEvents{}
 	m := NewManager(events, Limits{
@@ -100,4 +121,46 @@ func TestManagerOpenWriteAndClose(t *testing.T) {
 		}
 	}
 	m.Close("term-1", ReasonClosedByUser)
+}
+
+func TestManagerCloseAllStopsStubbornShell(t *testing.T) {
+	shellPath := filepath.Join(t.TempDir(), "stubborn-shell")
+	script := "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(shellPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write shell: %v", err)
+	}
+	t.Setenv("SHELL", shellPath)
+
+	events := &captureEvents{}
+	m := NewManager(events, Limits{
+		ScrollbackBytes:        1024,
+		OutputChunkSize:        1024,
+		TerminationGracePeriod: 50 * time.Millisecond,
+	})
+	req := OpenRequest{
+		RequestID:  "open-1",
+		TerminalID: "term-1",
+		SessionID:  "sess-1",
+		ChannelID:  "chan-1",
+		CWD:        t.TempDir(),
+		Cols:       80,
+		Rows:       24,
+	}
+	if err := m.Open(context.Background(), req); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	m.CloseAll(ctx, ReasonDaemonShutdown)
+	if elapsed := time.Since(start); elapsed > 750*time.Millisecond {
+		t.Fatalf("CloseAll took %s, want bounded shutdown", elapsed)
+	}
+	if _, ok := m.get(req.TerminalID); ok {
+		t.Fatal("terminal session still registered after CloseAll")
+	}
+	if !events.hasExitReason(ReasonDaemonShutdown) {
+		t.Fatalf("exit reasons = %v, want %q", events.exitReasons(), ReasonDaemonShutdown)
+	}
 }

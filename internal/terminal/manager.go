@@ -24,21 +24,21 @@ type Manager struct {
 }
 
 type Session struct {
-	req       OpenRequest
-	cmd       *exec.Cmd
-	ptmx      *os.File
-	shell     string
-	cwd       string
-	ring      *ScrollbackRing
-	seq       int64
-	done      chan struct{}
-	closeOnce sync.Once
+	req         OpenRequest
+	cmd         *exec.Cmd
+	ptmx        *os.File
+	shell       string
+	cwd         string
+	ring        *ScrollbackRing
+	seq         int64
+	done        chan struct{}
+	closeOnce   sync.Once
+	reasonMu    sync.Mutex
+	closeReason string
 }
 
 func NewManager(events EventSender, limits Limits) *Manager {
-	if limits.ScrollbackBytes == 0 {
-		limits = DefaultLimits()
-	}
+	limits = normalizeLimits(limits)
 	return &Manager{
 		sessions: make(map[string]*Session),
 		events:   events,
@@ -115,10 +115,36 @@ func (m *Manager) Close(terminalID string, reason string) {
 	if !ok {
 		return
 	}
+	m.closeSession(s, reason)
+}
+
+func (m *Manager) CloseAll(ctx context.Context, reason string) {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+
+	for _, s := range sessions {
+		m.closeSession(s, reason)
+	}
+	for _, s := range sessions {
+		select {
+		case <-s.done:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (m *Manager) closeSession(s *Session, reason string) {
 	s.closeOnce.Do(func() {
+		s.setCloseReason(reason)
+		_ = s.ptmx.Close()
 		if s.cmd.Process != nil {
 			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM)
-			time.AfterFunc(2*time.Second, func() {
+			time.AfterFunc(m.limits.TerminationGracePeriod, func() {
 				select {
 				case <-s.done:
 				default:
@@ -150,7 +176,6 @@ func (m *Manager) readLoop(s *Session) {
 
 func (m *Manager) waitLoop(s *Session) {
 	err := s.cmd.Wait()
-	close(s.done)
 	_ = s.ptmx.Close()
 	m.mu.Lock()
 	delete(m.sessions, s.req.TerminalID)
@@ -161,7 +186,8 @@ func (m *Manager) waitLoop(s *Session) {
 			exitCode = ee.ExitCode()
 		}
 	}
-	_ = m.events.SendTerminalExit(s.req.TerminalID, s.req.SessionID, s.req.ChannelID, ReasonProcessExit, exitCode, "", time.Now().UTC())
+	_ = m.events.SendTerminalExit(s.req.TerminalID, s.req.SessionID, s.req.ChannelID, s.exitReason(), exitCode, "", time.Now().UTC())
+	close(s.done)
 }
 
 func (m *Manager) get(terminalID string) (*Session, bool) {
@@ -189,4 +215,42 @@ func clamp(v, min, max int) int {
 
 func Encode(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
+}
+
+func (s *Session) setCloseReason(reason string) {
+	s.reasonMu.Lock()
+	defer s.reasonMu.Unlock()
+	s.closeReason = reason
+}
+
+func (s *Session) exitReason() string {
+	s.reasonMu.Lock()
+	defer s.reasonMu.Unlock()
+	if s.closeReason != "" {
+		return s.closeReason
+	}
+	return ReasonProcessExit
+}
+
+func normalizeLimits(limits Limits) Limits {
+	defaults := DefaultLimits()
+	if limits.ScrollbackBytes == 0 {
+		limits.ScrollbackBytes = defaults.ScrollbackBytes
+	}
+	if limits.IdleTimeout == 0 {
+		limits.IdleTimeout = defaults.IdleTimeout
+	}
+	if limits.MaxLifetime == 0 {
+		limits.MaxLifetime = defaults.MaxLifetime
+	}
+	if limits.OutputChunkSize == 0 {
+		limits.OutputChunkSize = defaults.OutputChunkSize
+	}
+	if limits.OutputFlush == 0 {
+		limits.OutputFlush = defaults.OutputFlush
+	}
+	if limits.TerminationGracePeriod == 0 {
+		limits.TerminationGracePeriod = defaults.TerminationGracePeriod
+	}
+	return limits
 }

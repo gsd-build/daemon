@@ -790,6 +790,12 @@ func (d *Daemon) gracefulShutdown(ctx context.Context) {
 		d.manager.StopAll()
 	}
 
+	if d.terminalManager != nil {
+		terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.terminalManager.CloseAll(terminalCtx, terminal.ReasonDaemonShutdown)
+		terminalCancel()
+	}
+
 	// Close WebSocket cleanly.
 	if d.client != nil {
 		d.client.Close()
