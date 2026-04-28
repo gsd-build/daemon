@@ -11,12 +11,11 @@ GSD Daemon — a local Go binary that connects user machines to the GSD cloud re
 ```
 main.go                 # Entry point → cmd.Execute() (Cobra CLI)
 cmd/                    # CLI commands (start, stop, login, status, version, logs, update, rollback, etc.)
-cmd/fake-claude/        # Fake Claude Code binary for e2e tests
 internal/
 ├── relay/              # WebSocket connection to cloud relay
 ├── session/            # Session state management
 ├── loop/               # Main event loop (relay ↔ claude)
-├── claude/             # Claude Code subprocess management
+├── claude/             # Normalized Claude stream-json event parser
 ├── config/             # Config loading (~/.gsd-cloud/)
 ├── logging/            # slog with mode switching (foreground=human-readable, service=JSON)
 ├── service/            # Platform-agnostic service manager (macOS/Linux/Windows)
@@ -26,7 +25,7 @@ internal/
 ├── pidfile/            # PID file management
 ├── display/            # Terminal display
 ├── update/             # Binary self-update with rollback safety
-tests/e2e/              # Integration tests (stub relay + fake-claude subprocess)
+tests/e2e/              # Integration tests (stub relay + fake Pi subprocess)
 scripts/                # install.sh (user-facing installer), install.test.sh
 ```
 
@@ -53,7 +52,7 @@ go test -short ./...           # Skip integration tests
 
 **Update safety.** The updater writes a boot marker before swapping binaries. If the new binary crashes within 30s, the previous version is restored via `gsd-cloud rollback`.
 
-**E2E test architecture.** Tests spin up a real daemon process + stub relay server + fake-claude subprocess (built from `cmd/fake-claude/main.go`). This tests the full message flow without hitting real cloud services.
+**E2E test architecture.** Tests spin up a real daemon process, a stub relay server, and a fake Pi subprocess. This tests the full message flow without hitting real cloud services.
 
 **Signal handling.** Graceful shutdown via context cancellation on SIGINT/SIGTERM.
 

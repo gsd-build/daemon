@@ -1,4 +1,4 @@
-// Package session ties the Claude executor and relay together
+// Package session ties task execution and relay forwarding together
 // into one "session actor" per user session.
 package session
 
@@ -36,7 +36,6 @@ type ImageUploader interface {
 // Options configures a new Actor.
 type Options struct {
 	SessionID       string
-	BinaryPath      string
 	CWD             string
 	Relay           RelaySender
 	Model           string
@@ -56,7 +55,7 @@ type Actor struct {
 
 	seq int64 // monotonic sequence counter, advanced via atomic ops
 
-	claudeSessionID string   // set from result events, used for --resume
+	claudeSessionID string   // normalized result session id used in protocol responses
 	allowedTools    []string // accumulates as user grants permissions
 
 	taskCh chan protocol.Task // SendTask writes here, Run reads
@@ -582,66 +581,10 @@ func taskActorContext(tc *taskContext, fallback context.Context) context.Context
 
 func (a *Actor) runExecutor(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string) error {
 	switch tc.Engine {
-	case "", "claude":
-		return a.runClaudeExecutor(actorCtx, taskCtx, tc, prompt)
-	case "pi":
+	case "", "pi":
 		return a.runPiExecutor(actorCtx, taskCtx, tc, prompt)
 	default:
 		return fmt.Errorf("unsupported task engine %q", tc.Engine)
-	}
-}
-
-func (a *Actor) runClaudeExecutor(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string) error {
-	// Use per-task model/effort/permissionMode if provided, otherwise fall back
-	// to the actor's creation-time defaults.
-	model := tc.Model
-	if model == "" {
-		model = a.opts.Model
-	}
-	effort := tc.Effort
-	if effort == "" {
-		effort = a.opts.Effort
-	}
-	permMode := tc.PermissionMode
-	if permMode == "" {
-		permMode = a.opts.PermissionMode
-	}
-
-	exec := claude.NewExecutor(claude.Options{
-		BinaryPath:     a.opts.BinaryPath,
-		CWD:            a.opts.CWD,
-		Model:          model,
-		Effort:         effort,
-		PermissionMode: permMode,
-		ResumeSession:  a.claudeSessionID,
-		AllowedTools:   a.allowedTools,
-		Prompt:         prompt,
-		ImageURLs:      tc.ImageURLs,
-	})
-
-	a.attachClaudePIDCallbacks(exec, tc.TaskID)
-
-	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, exec.Run)
-	if err != nil {
-		return err
-	}
-
-	return a.handleResult(taskCtx, tc, resultRaw)
-}
-
-func (a *Actor) attachClaudePIDCallbacks(exec *claude.Executor, taskID string) {
-	if a.pidDir == "" {
-		return
-	}
-	exec.OnPIDStart = func(pid int) {
-		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
-		if err := pidfile.Write(path, pid); err != nil {
-			slog.Warn("write pid file failed", "taskId", taskID, "path", path, "err", err)
-		}
-	}
-	exec.OnPIDExit = func(pid int) {
-		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
-		pidfile.Remove(path)
 	}
 }
 
@@ -1052,7 +995,7 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 	}
 
 	resultSessionID := payload.SessionID
-	if tc.Engine == "pi" {
+	if tc.Engine == "" || tc.Engine == "pi" {
 		resultSessionID = ""
 	}
 

@@ -1,9 +1,6 @@
 //go:build windows
 
-// Package claude does not support Windows. The executor relies on a
-// POSIX pseudo-terminal to work around Node.js's block-buffered pipe
-// stdout behavior in the claude CLI, and there is no equivalent in the
-// current implementation. Supported platforms are Linux and macOS.
+// Package claude does not support Windows. Supported platforms are Linux and macOS.
 //
 // This file is the only file in the package that compiles on Windows.
 // It contains a deliberate compile error so builds fail loudly and point

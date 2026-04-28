@@ -2,43 +2,45 @@ package e2e
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/gsd-build/daemon/internal/config"
 )
 
-// buildFakeClaude builds the fake-claude binary from the daemon's
-// cmd/fake-claude package into the given directory. Returns the absolute
-// path to the built binary.
-func buildFakeClaude(t *testing.T, destDir string) string {
+func writeFakePi(t *testing.T, destDir string) string {
 	t.Helper()
-
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("buildFakeClaude: cannot determine caller location")
+	destPath := filepath.Join(destDir, "fake-pi")
+	script := `#!/bin/sh
+IFS= read -r _prompt || true
+printf '%s\n' '{"type":"agent_start"}'
+if [ "$FAKE_PI_ASK_HUMAN" = "1" ]; then
+  printf '%s\n' '{"type":"extension_ui_request","id":"request_1","method":"input","title":"Which path should I take?","placeholder":"Type your answer..."}'
+  IFS= read -r response_frame || true
+  if [ -n "$FAKE_PI_RESPONSE_FILE" ]; then
+    printf '%s\n' "$response_frame" > "$FAKE_PI_RESPONSE_FILE"
+  fi
+fi
+printf '%s\n' '{"type":"message_start","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"claude-cli","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}}}}'
+printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ok"},"message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"anthropic-messages","provider":"claude-cli","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}}}}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":2,"output":3,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`
+	if err := os.WriteFile(destPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake pi: %v", err)
 	}
-	repoRoot, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	if err != nil {
-		t.Fatalf("buildFakeClaude: abs path: %v", err)
-	}
-
-	binName := "fake-claude"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	destPath := filepath.Join(destDir, binName)
-
-	cmd := exec.Command("go", "build", "-o", destPath, "./cmd/fake-claude")
-	cmd.Dir = repoRoot
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("buildFakeClaude: go build failed: %v\n%s", err, output)
-	}
-
 	return destPath
+}
+
+func writeFakePiExtension(t *testing.T, destDir string) string {
+	t.Helper()
+	path := filepath.Join(destDir, "pi-extension", "index.ts")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir fake pi extension: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write fake pi extension: %v", err)
+	}
+	return path
 }
 
 // makeTestHome creates a temp directory to use as the daemon's home and
@@ -54,8 +56,6 @@ func makeTestHome(t *testing.T) string {
 }
 
 // makeTestConfig returns a daemon Config pointing at the given relay URL.
-// The fake-claude binary path is not part of config.Config; tests pass it
-// directly to the session manager via session.Options.BinaryPath.
 func makeTestConfig(relayURL, machineID, authToken string) *config.Config {
 	return &config.Config{
 		MachineID: machineID,

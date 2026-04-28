@@ -17,12 +17,10 @@ type nullRelay struct{}
 func (nullRelay) Send(ctx context.Context, msg any) error { return nil }
 
 func TestManagerSpawnAndGet(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	cfg := &config.Config{MaxConcurrentTasks: 10}
 	m := NewManager(ManagerOptions{
-		BinaryPath: binPath,
-		Relay:      nullRelay{},
-		Config:     cfg,
+		Relay:  nullRelay{},
+		Config: cfg,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -59,7 +57,6 @@ func TestManagerSpawnAndGet(t *testing.T) {
 func TestManagerSpawnUsesPiDefaults(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 10}
 	m := NewManager(ManagerOptions{
-		BinaryPath:      "fake",
 		PiBinaryPath:    "/opt/gsd/pi",
 		PiExtensionPath: "/opt/gsd/pi-extension/index.ts",
 		Relay:           nullRelay{},
@@ -91,9 +88,8 @@ func TestManagerRejectAtCapacity(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 1}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: "fake",
-		Relay:      relay,
-		Config:     cfg,
+		Relay:  relay,
+		Config: cfg,
 	})
 
 	ctx := context.Background()
@@ -130,9 +126,8 @@ func TestManagerReturnsExistingActor(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 2}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: "fake",
-		Relay:      relay,
-		Config:     cfg,
+		Relay:  relay,
+		Config: cfg,
 	})
 
 	ctx := context.Background()
@@ -165,9 +160,8 @@ func TestManagerInFlightCount(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 10}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: "fake",
-		Relay:      relay,
-		Config:     cfg,
+		Relay:  relay,
+		Config: cfg,
 	})
 
 	ctx := context.Background()
@@ -201,9 +195,8 @@ func TestReaperRemovesIdleActors(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 10}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: "fake",
-		Relay:      relay,
-		Config:     cfg,
+		Relay:  relay,
+		Config: cfg,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -237,9 +230,8 @@ func TestReaperSkipsActorsWithInFlightTasks(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 10}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: "fake",
-		Relay:      relay,
-		Config:     cfg,
+		Relay:  relay,
+		Config: cfg,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,9 +261,8 @@ func TestStartReaper(t *testing.T) {
 	cfg := &config.Config{MaxConcurrentTasks: 10}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: "fake",
-		Relay:      relay,
-		Config:     cfg,
+		Relay:  relay,
+		Config: cfg,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -298,16 +289,16 @@ func TestIntegrationConcurrencyAndTimeout(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 	pidDir := t.TempDir()
 	cfg := &config.Config{MaxConcurrentTasks: 2}
 
 	mgr := NewManager(ManagerOptions{
-		BinaryPath: binPath,
-		Relay:      relay,
-		Config:     cfg,
-		PIDDir:     pidDir,
+		PiBinaryPath:    writeFakePi(t),
+		PiExtensionPath: writeFakePiExtension(t),
+		Relay:           relay,
+		Config:          cfg,
+		PIDDir:          pidDir,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

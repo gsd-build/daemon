@@ -1,14 +1,10 @@
 // Package e2e contains end-to-end integration tests for the daemon.
 // These tests assemble the real daemon wired to an in-process stub relay
-// and a fake-claude subprocess, then drive it through scripted scenarios.
+// and a fake Pi subprocess, then drive it through scripted scenarios.
 package e2e
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -36,19 +32,15 @@ func TestE2EHappyPath(t *testing.T) {
 	home := makeTestHome(t)
 	t.Setenv("HOME", home)
 
-	// 3. Build fake-claude.
-	fakeClaude := buildFakeClaude(t, home)
+	fakePi := writeFakePi(t, home)
+	t.Setenv("GSD_PI_EXTENSION_PATH", writeFakePiExtension(t, home))
 
-	// 4. Test config pointed at the stub relay.
 	cfg := makeTestConfig(relay.URL(), machineID, authToken)
-
-	// 5. CWD for spawned fake-claude — must exist.
 	cwd := t.TempDir()
 
-	// 6. Build the daemon with fake-claude as the spawned binary.
-	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude)
+	daemon, err := loop.NewWithPiBinaryPath(cfg, "test-version", fakePi)
 	if err != nil {
-		t.Fatalf("loop.NewWithBinaryPath: %v", err)
+		t.Fatalf("loop.NewWithPiBinaryPath: %v", err)
 	}
 
 	// 7. Run the daemon in a goroutine.
@@ -116,8 +108,8 @@ func TestE2EHappyPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("TaskComplete payload type: got %T", completeEnv.Payload)
 	}
-	if complete.ClaudeSessionID != "fake-session-123" {
-		t.Fatalf("TaskComplete.ClaudeSessionID: got %q want %q", complete.ClaudeSessionID, "fake-session-123")
+	if complete.ClaudeSessionID != "" {
+		t.Fatalf("TaskComplete.ClaudeSessionID: got %q want empty", complete.ClaudeSessionID)
 	}
 	if complete.InputTokens <= 0 {
 		t.Fatalf("TaskComplete.InputTokens: got %d, want > 0", complete.InputTokens)
@@ -143,7 +135,7 @@ func TestE2EHappyPath(t *testing.T) {
 	}
 }
 
-func TestE2EPermissionFlow(t *testing.T) {
+func TestE2EQuestionFlow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e integration test in short mode")
 	}
@@ -161,21 +153,16 @@ func TestE2EPermissionFlow(t *testing.T) {
 	home := makeTestHome(t)
 	t.Setenv("HOME", home)
 
-	fakeClaude := buildFakeClaude(t, home)
-
-	// fake-claude reads these env vars; the daemon's executor inherits the
-	// parent process environment when Options.Env is nil, so t.Setenv reaches
-	// the spawned subprocess.
-	argsFile := filepath.Join(home, "fake-claude-args.json")
-	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
-	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
+	fakePi := writeFakePi(t, home)
+	t.Setenv("GSD_PI_EXTENSION_PATH", writeFakePiExtension(t, home))
+	t.Setenv("FAKE_PI_ASK_HUMAN", "1")
 
 	cfg := makeTestConfig(relay.URL(), machineID, authToken)
 	cwd := t.TempDir()
 
-	daemon, err := loop.NewWithBinaryPath(cfg, "test-version", fakeClaude)
+	daemon, err := loop.NewWithPiBinaryPath(cfg, "test-version", fakePi)
 	if err != nil {
-		t.Fatalf("loop.NewWithBinaryPath: %v", err)
+		t.Fatalf("loop.NewWithPiBinaryPath: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,60 +198,34 @@ func TestE2EPermissionFlow(t *testing.T) {
 		t.Fatalf("send Task: %v", err)
 	}
 
-	// Daemon should forward the permission_denial as a PermissionRequest.
-	permEnv, err := relay.WaitForFrame(protocol.MsgTypePermissionRequest, 10*time.Second)
+	questionEnv, err := relay.WaitForFrame(protocol.MsgTypeQuestion, 10*time.Second)
 	if err != nil {
-		t.Fatalf("waiting for PermissionRequest: %v", err)
+		t.Fatalf("waiting for Question: %v", err)
 	}
-	permReq, ok := permEnv.Payload.(*protocol.PermissionRequest)
+	question, ok := questionEnv.Payload.(*protocol.Question)
 	if !ok {
-		t.Fatalf("PermissionRequest payload type: got %T", permEnv.Payload)
+		t.Fatalf("Question payload type: got %T", questionEnv.Payload)
 	}
-	if permReq.ToolName != "Write" {
-		t.Fatalf("PermissionRequest.ToolName: got %q want %q", permReq.ToolName, "Write")
+	if question.Question != "Which path should I take?" {
+		t.Fatalf("Question.Question: got %q", question.Question)
 	}
 
-	// Approve the permission.
-	if err := relay.Send(&protocol.PermissionResponse{
-		Type:      protocol.MsgTypePermissionResponse,
+	if err := relay.Send(&protocol.QuestionResponse{
+		Type:      protocol.MsgTypeQuestionResponse,
 		ChannelID: channelID,
 		SessionID: sessionID,
-		RequestID: permReq.RequestID,
-		Approved:  true,
+		RequestID: question.RequestID,
+		Answer:    "Use Pi.",
 	}); err != nil {
-		t.Fatalf("send PermissionResponse: %v", err)
+		t.Fatalf("send QuestionResponse: %v", err)
 	}
 
-	// After approval, the daemon should re-spawn fake-claude with --allowedTools
-	// and ultimately emit TaskComplete.
 	completeEnv, err := relay.WaitForFrame(protocol.MsgTypeTaskComplete, 15*time.Second)
 	if err != nil {
-		t.Fatalf("waiting for TaskComplete after approval: %v", err)
+		t.Fatalf("waiting for TaskComplete after answer: %v", err)
 	}
 	if _, ok := completeEnv.Payload.(*protocol.TaskComplete); !ok {
 		t.Fatalf("TaskComplete payload type: got %T", completeEnv.Payload)
-	}
-
-	// Verify the second fake-claude invocation included --allowedTools Write.
-	// FAKE_CLAUDE_ARGS_FILE is overwritten on each invocation, so the file
-	// reflects the most recent (post-approval) call.
-	argsData, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatalf("read fake-claude args file: %v", err)
-	}
-	var args []string
-	if err := json.Unmarshal(argsData, &args); err != nil {
-		t.Fatalf("unmarshal fake-claude args: %v", err)
-	}
-	foundAllowed := false
-	for i, a := range args {
-		if a == "--allowedTools" && i+1 < len(args) && strings.Contains(args[i+1], "Write") {
-			foundAllowed = true
-			break
-		}
-	}
-	if !foundAllowed {
-		t.Fatalf("expected post-approval fake-claude invocation to include --allowedTools Write, got args: %v", args)
 	}
 
 	cancel()

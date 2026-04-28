@@ -1,4 +1,4 @@
-// Package claude handles spawning and communicating with `claude -p`.
+// Package claude defines the normalized Claude stream-json event shape.
 package claude
 
 import (
