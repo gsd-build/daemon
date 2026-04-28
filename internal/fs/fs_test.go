@@ -118,6 +118,29 @@ func TestReadFile(t *testing.T) {
 	}
 }
 
+func TestReadFileUsesHomeFallbackWithoutScopeRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "project", "hello.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("hello from home"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	content, truncated, err := ReadFile(path, "", 1024)
+	if err != nil {
+		t.Fatalf("ReadFile with empty scope root: %v", err)
+	}
+	if truncated {
+		t.Fatal("expected untruncated file")
+	}
+	if content != "hello from home" {
+		t.Fatalf("content = %q", content)
+	}
+}
+
 func TestReadFileTruncates(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.txt")
