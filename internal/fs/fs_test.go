@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -102,25 +103,53 @@ func TestBrowseDirDoesNotResolveChildSymlinks(t *testing.T) {
 	}
 }
 
-func TestBrowseDirRejectsOversizedResults(t *testing.T) {
+func TestBrowseDirPageAtPaginatesLargeResults(t *testing.T) {
 	dir := t.TempDir()
-	for i := 0; i < browseDirEntryLimit+25; i++ {
+	for i := 0; i < defaultBrowseDirLimit+25; i++ {
 		name := filepath.Join(dir, fmt.Sprintf("file-%03d.txt", i))
 		if err := os.WriteFile(name, []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	_, err := BrowseDir(dir, dir)
-	if err == nil {
-		t.Fatal("expected oversized browse error")
+	page, err := BrowseDirPageAt(dir, dir, BrowseDirOptions{})
+	if err != nil {
+		t.Fatalf("browse page: %v", err)
 	}
-	expectedErr := fmt.Sprintf(
-		"directory contains %d entries; paginated browsing is required",
-		browseDirEntryLimit+25,
-	)
-	if err.Error() != expectedErr {
-		t.Fatalf("error = %q, expected %q", err.Error(), expectedErr)
+	if len(page.Entries) != defaultBrowseDirLimit {
+		t.Fatalf("expected %d entries, got %d", defaultBrowseDirLimit, len(page.Entries))
+	}
+	if !page.HasMore {
+		t.Fatal("expected another page")
+	}
+	if page.NextCursor != strconv.Itoa(defaultBrowseDirLimit) {
+		t.Fatalf("next cursor = %q", page.NextCursor)
+	}
+	if page.Entries[0].Name != "file-000.txt" {
+		t.Fatalf("first entry = %q", page.Entries[0].Name)
+	}
+
+	next, err := BrowseDirPageAt(dir, dir, BrowseDirOptions{Cursor: page.NextCursor})
+	if err != nil {
+		t.Fatalf("browse next page: %v", err)
+	}
+	if len(next.Entries) != 25 {
+		t.Fatalf("expected 25 entries, got %d", len(next.Entries))
+	}
+	if next.HasMore {
+		t.Fatal("did not expect another page")
+	}
+	if next.Entries[0].Name != "file-200.txt" {
+		t.Fatalf("next first entry = %q", next.Entries[0].Name)
+	}
+}
+
+func TestBrowseDirPageAtRejectsInvalidCursor(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := BrowseDirPageAt(dir, dir, BrowseDirOptions{Cursor: "nope"})
+	if err == nil {
+		t.Fatal("expected invalid cursor error")
 	}
 }
 

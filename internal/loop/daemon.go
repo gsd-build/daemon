@@ -647,13 +647,18 @@ func (d *Daemon) handleContextStatsRequest(msg *protocol.ContextStatsRequest) er
 }
 
 func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
-	entries, err := fs.BrowseDir(msg.Path, d.scopeRootForChannel(msg.ChannelID))
+	page, err := fs.BrowseDirPageAt(msg.Path, d.scopeRootForChannel(msg.ChannelID), fs.BrowseDirOptions{
+		Limit:  msg.Limit,
+		Cursor: msg.Cursor,
+	})
 	result := &protocol.BrowseDirResult{
-		Type:      protocol.MsgTypeBrowseDirResult,
-		RequestID: msg.RequestID,
-		ChannelID: msg.ChannelID,
-		OK:        err == nil,
-		Entries:   entries,
+		Type:       protocol.MsgTypeBrowseDirResult,
+		RequestID:  msg.RequestID,
+		ChannelID:  msg.ChannelID,
+		OK:         err == nil,
+		Entries:    page.Entries,
+		HasMore:    page.HasMore,
+		NextCursor: page.NextCursor,
 	}
 	if err != nil {
 		result.Error = err.Error()
