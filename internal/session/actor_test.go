@@ -3,11 +3,8 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -17,53 +14,58 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
-func buildFakeClaude(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, _ := runtime.Caller(0)
-	daemonDir := filepath.Join(filepath.Dir(thisFile), "..", "..")
-	tmp := t.TempDir()
-	binPath := filepath.Join(tmp, "fake-claude")
-	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/fake-claude")
-	cmd.Dir = daemonDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build fake-claude: %v\n%s", err, out)
-	}
-	return binPath
-}
-
-func readArgsFile(t *testing.T, path string) []string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read args file: %v", err)
-	}
-	var argv []string
-	if err := json.Unmarshal(data, &argv); err != nil {
-		t.Fatalf("unmarshal args file: %v", err)
-	}
-	return argv
-}
-
 func writeFakePi(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "fake-pi")
 	script := `#!/bin/sh
-: "${FAKE_PI_ARGS_FILE:?}"
-: > "$FAKE_PI_ARGS_FILE"
-for arg in "$@"; do
-  printf '%s\000' "$arg" >> "$FAKE_PI_ARGS_FILE"
-done
-IFS= read -r _prompt || true
+if [ -n "$FAKE_PI_ARGS_FILE" ]; then
+  : > "$FAKE_PI_ARGS_FILE"
+  for arg in "$@"; do
+    printf '%s\000' "$arg" >> "$FAKE_PI_ARGS_FILE"
+  done
+fi
+IFS= read -r prompt_frame || true
+if [ -n "$FAKE_PI_PROMPT_FILE" ]; then
+  printf '%s\n' "$prompt_frame" > "$FAKE_PI_PROMPT_FILE"
+fi
+if [ -n "$FAKE_PI_SLEEP" ]; then
+  sleep "$FAKE_PI_SLEEP"
+fi
+if [ "$FAKE_PI_INVALID_AGENT_END" = "1" ]; then
+  printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","usage":{"input":"not-a-number"}}]}'
+  exit 0
+fi
 printf '%s\n' '{"type":"agent_start"}'
 printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"remember this"}]},{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
-sleep 5
-`
+	`
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake pi: %v", err)
 	}
 	return path
+}
+
+func writeFakePiExtension(t *testing.T) string {
+	t.Helper()
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write fake pi extension: %v", err)
+	}
+	return extensionPath
+}
+
+func testPiOptions(t *testing.T, opts Options) Options {
+	t.Helper()
+	if opts.CWD == "" {
+		opts.CWD = t.TempDir()
+	}
+	if opts.PiBinaryPath == "" {
+		opts.PiBinaryPath = writeFakePi(t)
+	}
+	if opts.PiExtensionPath == "" {
+		opts.PiExtensionPath = writeFakePiExtension(t)
+	}
+	return opts
 }
 
 func readNulArgsFile(t *testing.T, path string) []string {
@@ -355,15 +357,13 @@ func (r *fakeRelay) waitForType(t *testing.T, msgType string, timeout time.Durat
 }
 
 func TestCancelTask_ActorStaysAlive(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-cancel",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	t.Setenv("FAKE_PI_SLEEP", "5")
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-cancel",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
 	}
@@ -422,15 +422,12 @@ func TestCancelTask_ActorStaysAlive(t *testing.T) {
 }
 
 func TestActorHappyPath(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-1",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-1",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
 	}
@@ -482,28 +479,26 @@ func TestActorHappyPath(t *testing.T) {
 	if len(completes) != 1 {
 		t.Fatalf("expected 1 taskComplete, got %d", len(completes))
 	}
-	if completes[0].ClaudeSessionID != "fake-session-123" {
-		t.Errorf("expected claudeSessionId=fake-session-123, got %s", completes[0].ClaudeSessionID)
+	if completes[0].ClaudeSessionID != "" {
+		t.Errorf("expected empty claudeSessionId, got %s", completes[0].ClaudeSessionID)
 	}
 }
 
 func TestActorIncludesContextRefsInExecutorPrompt(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	argsFile := filepath.Join(t.TempDir(), "claude.args")
-	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
+	promptFile := filepath.Join(t.TempDir(), "pi-prompt.json")
+	t.Setenv("FAKE_PI_PROMPT_FILE", promptFile)
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-context",
-		BinaryPath: binPath,
-		CWD:        root,
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-context",
+		CWD:       root,
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
 	}
@@ -530,8 +525,17 @@ func TestActorIncludesContextRefsInExecutorPrompt(t *testing.T) {
 		t.Fatal("timed out waiting for TaskComplete frame")
 	}
 
-	args := readArgsFile(t, argsFile)
-	prompt := args[len(args)-1]
+	promptBytes, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatalf("read prompt file: %v", err)
+	}
+	var promptFrame struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(promptBytes, &promptFrame); err != nil {
+		t.Fatalf("unmarshal prompt frame: %v", err)
+	}
+	prompt := promptFrame.Message
 	if !strings.Contains(prompt, "<attached_context>") {
 		t.Fatalf("prompt missing attached context:\n%s", prompt)
 	}
@@ -544,15 +548,12 @@ func TestActorIncludesContextRefsInExecutorPrompt(t *testing.T) {
 }
 
 func TestActorPropagatesRequestIDToLifecycleFrames(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-request-id",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-request-id",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
 	}
@@ -599,17 +600,14 @@ func TestActorPropagatesRequestIDToLifecycleFrames(t *testing.T) {
 }
 
 func TestActorMalformedFinalResultEmitsTaskError(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 
-	t.Setenv("FAKE_CLAUDE_INVALID_RESULT", "1")
+	t.Setenv("FAKE_PI_INVALID_AGENT_END", "1")
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-invalid-result",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-invalid-result",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
 	}
@@ -644,341 +642,6 @@ func TestActorMalformedFinalResultEmitsTaskError(t *testing.T) {
 		if tc, ok := frame.(*protocol.TaskComplete); ok && tc.TaskID == "task-invalid-result" {
 			t.Fatal("expected malformed final result to avoid TaskComplete")
 		}
-	}
-}
-
-func TestActorPermissionDenialAndApproval(t *testing.T) {
-	binPath := buildFakeClaude(t)
-	relay := newFakeRelay()
-
-	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
-
-	actor, err := NewActor(Options{
-		SessionID:  "sess-perm",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	go func() { _ = actor.Run(ctx) }()
-
-	if err := actor.SendTask(protocol.Task{
-		TaskID:    "task-1",
-		SessionID: "sess-perm",
-		ChannelID: "ch-1",
-		Prompt:    "Write a file",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	gotPerm := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
-		for _, f := range frames {
-			if _, ok := f.(*protocol.PermissionRequest); ok {
-				return true
-			}
-		}
-		return false
-	})
-	if !gotPerm {
-		t.Fatal("timed out waiting for PermissionRequest")
-	}
-
-	if err := actor.HandlePermissionResponse(&protocol.PermissionResponse{
-		Type:      protocol.MsgTypePermissionResponse,
-		SessionID: "sess-perm",
-		ChannelID: "ch-1",
-		RequestID: "toolu_fake_001",
-		Approved:  true,
-	}); err != nil {
-		t.Fatalf("HandlePermissionResponse: %v", err)
-	}
-
-	if !relay.waitForTaskComplete(t, 10*time.Second) {
-		t.Fatal("timed out waiting for TaskComplete after approval")
-	}
-	_ = actor.Stop()
-
-	allowed := actor.AllowedTools()
-	if len(allowed) != 1 || allowed[0] != "Write" {
-		t.Errorf("allowedTools: %+v", allowed)
-	}
-}
-
-func TestActorPermissionApprovalKeepsContextRefsInExecutorPrompt(t *testing.T) {
-	binPath := buildFakeClaude(t)
-	relay := newFakeRelay()
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	argsFile := filepath.Join(t.TempDir(), "claude.args")
-	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
-	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
-
-	actor, err := NewActor(Options{
-		SessionID:  "sess-context-perm",
-		BinaryPath: binPath,
-		CWD:        root,
-		Relay:      relay,
-	})
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
-	}
-	defer actor.Stop()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	go func() { _ = actor.Run(ctx) }()
-
-	if err := actor.SendTask(protocol.Task{
-		TaskID:    "task-context-perm",
-		SessionID: "sess-context-perm",
-		ChannelID: "ch-context-perm",
-		Prompt:    "Write a file",
-		CWD:       root,
-		ContextRefs: []protocol.ContextRef{
-			{Kind: "file", Path: "README.md", Name: "README.md"},
-		},
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	gotPerm := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
-		for _, f := range frames {
-			if _, ok := f.(*protocol.PermissionRequest); ok {
-				return true
-			}
-		}
-		return false
-	})
-	if !gotPerm {
-		t.Fatal("timed out waiting for PermissionRequest")
-	}
-
-	if err := actor.HandlePermissionResponse(&protocol.PermissionResponse{
-		Type:      protocol.MsgTypePermissionResponse,
-		SessionID: "sess-context-perm",
-		ChannelID: "ch-context-perm",
-		RequestID: "toolu_fake_001",
-		Approved:  true,
-	}); err != nil {
-		t.Fatalf("HandlePermissionResponse: %v", err)
-	}
-
-	if !relay.waitForTaskComplete(t, 10*time.Second) {
-		t.Fatal("timed out waiting for TaskComplete after approval")
-	}
-
-	args := readArgsFile(t, argsFile)
-	prompt := args[len(args)-1]
-	if !strings.Contains(prompt, "<attached_context>") {
-		t.Fatalf("retry prompt missing attached context:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "Write a file") || !strings.Contains(prompt, "hello\n") {
-		t.Fatalf("retry prompt missing original prompt or context body:\n%s", prompt)
-	}
-}
-
-func TestActorPermissionRequestTimesOut(t *testing.T) {
-	binPath := buildFakeClaude(t)
-	relay := newFakeRelay()
-
-	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
-
-	actor, err := NewActor(Options{
-		SessionID:  "sess-perm-timeout",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
-	}
-	actor.interactionTimeout = 50 * time.Millisecond
-	defer actor.Stop()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go func() { _ = actor.Run(ctx) }()
-
-	if err := actor.SendTask(protocol.Task{
-		TaskID:    "task-perm-timeout",
-		SessionID: "sess-perm-timeout",
-		ChannelID: "ch-perm-timeout",
-		Prompt:    "Write a file",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	gotTimeout := relay.waitFor(t, 2*time.Second, func(frames []any) bool {
-		for _, f := range frames {
-			if te, ok := f.(*protocol.TaskError); ok {
-				return strings.Contains(te.Error, "permission response")
-			}
-		}
-		return false
-	})
-	if !gotTimeout {
-		t.Fatal("expected permission timeout TaskError")
-	}
-}
-
-func TestActorBatchQuestions(t *testing.T) {
-	binPath := buildFakeClaude(t)
-	relay := newFakeRelay()
-
-	// Emit 3 AskUserQuestion denials in a single result.
-	t.Setenv("FAKE_CLAUDE_QUESTIONS", "3")
-
-	actor, err := NewActor(Options{
-		SessionID:  "sess-batch-q",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	go func() { _ = actor.Run(ctx) }()
-
-	if err := actor.SendTask(protocol.Task{
-		TaskID:    "task-1",
-		SessionID: "sess-batch-q",
-		ChannelID: "ch-1",
-		Prompt:    "ask me things",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	// Wait for all 3 questions to arrive at the relay.
-	gotQuestions := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
-		count := 0
-		for _, f := range frames {
-			if _, ok := f.(*protocol.Question); ok {
-				count++
-			}
-		}
-		return count == 3
-	})
-	if !gotQuestions {
-		frames := relay.GetFrames()
-		count := 0
-		for _, f := range frames {
-			if _, ok := f.(*protocol.Question); ok {
-				count++
-			}
-		}
-		t.Fatalf("expected 3 questions, got %d", count)
-	}
-
-	// Collect the requestIDs.
-	var questionMsgs []*protocol.Question
-	for _, f := range relay.GetFrames() {
-		if q, ok := f.(*protocol.Question); ok {
-			questionMsgs = append(questionMsgs, q)
-		}
-	}
-
-	// Answer in reverse order to prove order independence.
-	for i := len(questionMsgs) - 1; i >= 0; i-- {
-		q := questionMsgs[i]
-		if err := actor.HandleQuestionResponse(&protocol.QuestionResponse{
-			Type:      protocol.MsgTypeQuestionResponse,
-			SessionID: "sess-batch-q",
-			ChannelID: "ch-1",
-			RequestID: q.RequestID,
-			Answer:    "answer-" + q.RequestID,
-		}); err != nil {
-			t.Fatalf("HandleQuestionResponse %s: %v", q.RequestID, err)
-		}
-	}
-
-	// The actor should re-spawn and complete.
-	if !relay.waitForTaskComplete(t, 10*time.Second) {
-		t.Fatal("timed out waiting for TaskComplete after batch answers")
-	}
-	_ = actor.Stop()
-
-	// Verify exactly 3 questions were sent as protocol.Question messages.
-	if len(questionMsgs) != 3 {
-		t.Errorf("expected 3 Question messages, got %d", len(questionMsgs))
-	}
-	for i, q := range questionMsgs {
-		expected := fmt.Sprintf("Question %d?", i+1)
-		if q.Question != expected {
-			t.Errorf("question %d: got %q, want %q", i, q.Question, expected)
-		}
-		expectedHeader := fmt.Sprintf("Header %d", i+1)
-		if q.Header != expectedHeader {
-			t.Errorf("question %d: header = %q, want %q", i, q.Header, expectedHeader)
-		}
-		if !q.MultiSelect {
-			t.Errorf("question %d: expected multiSelect true", i)
-		}
-		if len(q.Options) != 2 {
-			t.Errorf("question %d: expected 2 options, got %d", i, len(q.Options))
-		}
-		if q.Options[0].Description == "" {
-			t.Errorf("question %d: missing option description", i)
-		}
-		if q.Options[0].Preview == "" {
-			t.Errorf("question %d: missing option preview", i)
-		}
-	}
-}
-
-func TestActorBatchQuestionsTimeout(t *testing.T) {
-	binPath := buildFakeClaude(t)
-	relay := newFakeRelay()
-
-	t.Setenv("FAKE_CLAUDE_QUESTIONS", "2")
-
-	actor, err := NewActor(Options{
-		SessionID:  "sess-batch-q-timeout",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
-	}
-	actor.interactionTimeout = 50 * time.Millisecond
-	defer actor.Stop()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go func() { _ = actor.Run(ctx) }()
-
-	if err := actor.SendTask(protocol.Task{
-		TaskID:    "task-batch-q-timeout",
-		SessionID: "sess-batch-q-timeout",
-		ChannelID: "ch-batch-q-timeout",
-		Prompt:    "ask me things",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	gotTimeout := relay.waitFor(t, 2*time.Second, func(frames []any) bool {
-		for _, f := range frames {
-			if te, ok := f.(*protocol.TaskError); ok {
-				return strings.Contains(te.Error, "question response")
-			}
-		}
-		return false
-	})
-	if !gotTimeout {
-		t.Fatal("expected question timeout TaskError")
 	}
 }
 
@@ -1057,18 +720,14 @@ func TestActorSendTaskWhenBusy(t *testing.T) {
 }
 
 func TestActorTaskTimeout(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 
-	// FAKE_CLAUDE_SLEEP makes fake-claude sleep for N seconds before producing output
-	t.Setenv("FAKE_CLAUDE_SLEEP", "10")
+	t.Setenv("FAKE_PI_SLEEP", "10")
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-timeout",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-timeout",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
 	}
@@ -1117,15 +776,12 @@ func TestActorTaskTimeout(t *testing.T) {
 }
 
 func TestActorLastActiveAt(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-active",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-active",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,16 +817,13 @@ func TestActorLastActiveAt(t *testing.T) {
 }
 
 func TestActorWritesPIDFile(t *testing.T) {
-	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
 	pidDir := t.TempDir()
 
-	actor, err := NewActor(Options{
-		SessionID:  "sess-pid",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relay,
-	})
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-pid",
+		Relay:     relay,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,10 +860,9 @@ func TestActorWritesPIDFile(t *testing.T) {
 func TestActorInfoExecutingState(t *testing.T) {
 	relay := newFakeRelay()
 	actor, err := NewActor(Options{
-		SessionID:  "sess-info-exec",
-		BinaryPath: "echo",
-		CWD:        "/tmp",
-		Relay:      relay,
+		SessionID: "sess-info-exec",
+		CWD:       "/tmp",
+		Relay:     relay,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1475,10 +1127,9 @@ func TestPendingFileToolStarts_SweepDropsStaleEntries(t *testing.T) {
 func TestActorInfoIdleState(t *testing.T) {
 	relay := newFakeRelay()
 	actor, err := NewActor(Options{
-		SessionID:  "sess-info-idle",
-		BinaryPath: "echo",
-		CWD:        "/tmp",
-		Relay:      relay,
+		SessionID: "sess-info-idle",
+		CWD:       "/tmp",
+		Relay:     relay,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -153,9 +153,9 @@ func buildRelayURL(cfg *config.Config) string {
 	return u.String()
 }
 
-// New constructs a Daemon that spawns the real `claude` CLI on PATH.
+// New constructs a Daemon that runs tasks through Pi.
 func New(cfg *config.Config, version string) (*Daemon, error) {
-	return NewWithBinaryPath(cfg, version, "claude")
+	return NewWithPiBinaryPath(cfg, version, "")
 }
 
 func defaultPiExtensionPath() string {
@@ -181,9 +181,9 @@ func defaultPiExtensionPath() string {
 	return repoPath
 }
 
-// NewWithBinaryPath constructs a Daemon that spawns the given binary instead
-// of the default `claude`. Used by integration tests to inject fake-claude.
-func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon, error) {
+// NewWithPiBinaryPath constructs a Daemon with an optional Pi binary override.
+// Used by integration tests to inject a fake Pi process.
+func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (*Daemon, error) {
 	client := relay.NewClient(relay.Config{
 		URL:           buildRelayURL(cfg),
 		AuthToken:     cfg.AuthToken,
@@ -209,6 +209,9 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	if piBinaryPath == "" {
 		piBinaryPath = "pi"
 	}
+	if piBinaryOverride != "" {
+		piBinaryPath = piBinaryOverride
+	}
 	piExtensionPath := defaultPiExtensionPath()
 	// Self-heal pi extension dependencies if missing. Covers daemons that
 	// auto-updated through v0.2.31, whose updater shipped source-only
@@ -225,7 +228,6 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 	forcePi := os.Getenv("GSD_FORCE_PI") == "1"
 
 	manager := session.NewManager(session.ManagerOptions{
-		BinaryPath:      binaryPath,
 		PiBinaryPath:    piBinaryPath,
 		PiExtensionPath: piExtensionPath,
 		Relay:           client,

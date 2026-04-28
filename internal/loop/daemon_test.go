@@ -7,9 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os/exec"
+	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -267,7 +266,7 @@ func TestHandleTaskForcePiSetsEngine(t *testing.T) {
 		SessionID: "sess-force-pi",
 		ChannelID: "ch-force-pi",
 		Prompt:    "hello",
-		Engine:    "claude",
+		Engine:    "legacy",
 	}
 	if err := d.handleTask(msg); err != nil {
 		t.Fatalf("handleTask: %v", err)
@@ -501,7 +500,7 @@ func TestCheckAndRefreshTokenUpdatesLiveClients(t *testing.T) {
 		RelayURL:       relayURL,
 	}
 
-	d, err := NewWithBinaryPath(cfg, "test-version", "claude")
+	d, err := NewWithPiBinaryPath(cfg, "test-version", "")
 	if err != nil {
 		t.Fatalf("new daemon: %v", err)
 	}
@@ -648,31 +647,44 @@ func (r *loopFakeRelay) waitForTaskStarted(t *testing.T, timeout time.Duration, 
 	}
 }
 
-func buildFakeClaudeBinary(t *testing.T) string {
+func writeFakePiBinary(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, _ := runtime.Caller(0)
-	daemonDir := filepath.Join(filepath.Dir(thisFile), "..", "..")
 	tmp := t.TempDir()
-	binPath := filepath.Join(tmp, "fake-claude")
-	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/fake-claude")
-	cmd.Dir = daemonDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build fake-claude: %v\n%s", err, out)
+	path := filepath.Join(tmp, "fake-pi")
+	script := `#!/bin/sh
+IFS= read -r _prompt || true
+if [ -n "$FAKE_PI_SLEEP" ]; then
+  sleep "$FAKE_PI_SLEEP"
+fi
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake pi: %v", err)
 	}
-	return binPath
+	return path
+}
+
+func writeFakePiExtension(t *testing.T) string {
+	t.Helper()
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write fake pi extension: %v", err)
+	}
+	return extensionPath
 }
 
 func TestHandleTaskIgnoresDuplicateTaskID(t *testing.T) {
-	binPath := buildFakeClaudeBinary(t)
-	t.Setenv("FAKE_CLAUDE_SLEEP", "1")
+	piPath := writeFakePiBinary(t)
+	t.Setenv("FAKE_PI_SLEEP", "1")
 
 	relaySink := newLoopFakeRelay()
 	actor, err := session.NewActor(session.Options{
-		SessionID:  "sess-dup",
-		BinaryPath: binPath,
-		CWD:        t.TempDir(),
-		Relay:      relaySink,
+		SessionID:       "sess-dup",
+		CWD:             t.TempDir(),
+		Relay:           relaySink,
+		PiBinaryPath:    piPath,
+		PiExtensionPath: writeFakePiExtension(t),
 	})
 	if err != nil {
 		t.Fatalf("new actor: %v", err)

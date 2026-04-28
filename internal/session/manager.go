@@ -13,7 +13,6 @@ import (
 
 // ManagerOptions configures a new Manager.
 type ManagerOptions struct {
-	BinaryPath      string
 	PiBinaryPath    string
 	PiExtensionPath string
 	Relay           RelaySender
@@ -28,7 +27,6 @@ type Manager struct {
 	actors map[string]*Actor
 
 	relay           RelaySender
-	binaryPath      string
 	piBinaryPath    string
 	piExtensionPath string
 	cfg             *config.Config
@@ -41,7 +39,6 @@ func NewManager(opts ManagerOptions) *Manager {
 	return &Manager{
 		actors:          make(map[string]*Actor),
 		relay:           opts.Relay,
-		binaryPath:      opts.BinaryPath,
 		piBinaryPath:    opts.PiBinaryPath,
 		piExtensionPath: opts.PiExtensionPath,
 		cfg:             opts.Config,
@@ -121,9 +118,6 @@ func (m *Manager) Spawn(
 
 	if opts.Relay == nil {
 		opts.Relay = m.relay
-	}
-	if opts.BinaryPath == "" {
-		opts.BinaryPath = m.binaryPath
 	}
 	if opts.PiBinaryPath == "" {
 		opts.PiBinaryPath = m.piBinaryPath
