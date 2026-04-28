@@ -100,8 +100,14 @@ func TestActorReportsVerifiedLocalServer(t *testing.T) {
 }
 
 func TestLocalServerDetectionOutlivesTaskContext(t *testing.T) {
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var startOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(100 * time.Millisecond)
+		startOnce.Do(func() {
+			close(probeStarted)
+		})
+		<-releaseProbe
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer server.Close()
@@ -157,7 +163,14 @@ func TestLocalServerDetectionOutlivesTaskContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("forward events: %v", err)
 	}
+
+	select {
+	case <-probeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("local server probe did not start")
+	}
 	cancelTask()
+	close(releaseProbe)
 
 	ok := relay.waitFor(t, 3*time.Second, func(frames []any) bool {
 		for _, frame := range frames {
