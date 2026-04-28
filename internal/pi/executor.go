@@ -133,7 +133,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	args := []string{
 		"-e", e.opts.ExtensionPath,
 		"--provider", e.opts.Provider,
-		"--no-extensions", "--no-skills", "--no-prompt-templates",
+		"--no-extensions", "--no-prompt-templates",
 		"--offline",
 	}
 	if e.opts.Model != "" {
