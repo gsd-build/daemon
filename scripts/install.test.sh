@@ -55,8 +55,34 @@ fi
 echo "Packaging fake pi extension..."
 EXTENSION_DIR="$WORK_DIR/pi-extension"
 mkdir -p "$EXTENSION_DIR"
+cat > "$EXTENSION_DIR/package.json" <<'EOF'
+{
+  "name": "fake-pi-extension",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}
+EOF
+cat > "$EXTENSION_DIR/package-lock.json" <<'EOF'
+{
+  "name": "fake-pi-extension",
+  "version": "0.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "fake-pi-extension",
+      "version": "0.0.0",
+      "hasInstallScript": true
+    }
+  }
+}
+EOF
 printf '%s\n' 'export default {};' > "$EXTENSION_DIR/index.ts"
 printf '%s\n' 'export function applyUsageFromSdkMessage() {}' > "$EXTENSION_DIR/usage-estimator.js"
+printf '%s\n' 'require("node:fs").writeFileSync("postinstall-ran", "1");' > "$EXTENSION_DIR/postinstall.js"
 tar -czf "$DIST_DIR/$EXTENSION_ASSET_NAME" -C "$EXTENSION_DIR" .
 
 echo "Computing checksum..."
@@ -140,6 +166,11 @@ fi
 
 if [ ! -f "$INSTALL_DIR/pi-extension/index.ts" ]; then
     echo "FAIL: pi extension not installed"
+    exit 1
+fi
+
+if [ -f "$INSTALL_DIR/pi-extension/postinstall-ran" ]; then
+    echo "FAIL: pi extension lifecycle script ran during install"
     exit 1
 fi
 
