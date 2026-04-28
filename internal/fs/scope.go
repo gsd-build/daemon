@@ -62,6 +62,20 @@ func resolveExistingPath(path string) (string, error) {
 	return resolved, nil
 }
 
+func ResolveExistingPathFromCWD(path string, cwd string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	candidate := path
+	if !filepath.IsAbs(candidate) && candidate != "~" && !strings.HasPrefix(candidate, "~/") {
+		if cwd == "" {
+			return "", fmt.Errorf("cwd is required for relative path %q", path)
+		}
+		candidate = filepath.Join(cwd, candidate)
+	}
+	return resolveExistingPath(candidate)
+}
+
 func resolveCreatePath(path string) (string, error) {
 	cleaned, err := resolveInputPath(path)
 	if err != nil {
@@ -100,6 +114,26 @@ func ensurePathAllowed(resolvedPath, scopeRoot string) error {
 		return fmt.Errorf("path %q is blocked", resolvedPath)
 	}
 	return nil
+}
+
+func ensurePathAllowedOrExact(resolvedPath, scopeRoot string, exactAllowedPaths []string) error {
+	if !pathWithinRoot(resolvedPath, scopeRoot) && !pathInExactAllowedSet(resolvedPath, exactAllowedPaths) {
+		return fmt.Errorf("path %q is outside allowed root %q", resolvedPath, scopeRoot)
+	}
+	if isSensitivePath(resolvedPath) {
+		return fmt.Errorf("path %q is blocked", resolvedPath)
+	}
+	return nil
+}
+
+func pathInExactAllowedSet(path string, exactAllowedPaths []string) bool {
+	cleaned := filepath.Clean(path)
+	for _, allowed := range exactAllowedPaths {
+		if cleaned == filepath.Clean(allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func pathWithinRoot(path, root string) bool {

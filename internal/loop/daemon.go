@@ -63,8 +63,88 @@ type Daemon struct {
 	previewWork          chan struct{}
 	generateSessionTitle sessionTitleGenerator
 	browserManager       *browser.Manager
+	agentTouchedFiles    agentTouchedFileStore
 	runCtxMu             sync.RWMutex
 	runCtx               context.Context
+}
+
+const (
+	agentTouchedFileMaxAge        = 24 * time.Hour
+	agentTouchedFileSweepInterval = 6 * time.Hour
+)
+
+type agentTouchedFileStore struct {
+	mu        sync.RWMutex
+	byChannel map[string]map[string]time.Time
+}
+
+func (s *agentTouchedFileStore) add(channelID string, path string) {
+	s.addAt(channelID, path, time.Now())
+}
+
+func (s *agentTouchedFileStore) addAt(channelID string, path string, touchedAt time.Time) {
+	if channelID == "" || path == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byChannel == nil {
+		s.byChannel = make(map[string]map[string]time.Time)
+	}
+	paths := s.byChannel[channelID]
+	if paths == nil {
+		paths = make(map[string]time.Time)
+		s.byChannel[channelID] = paths
+	}
+	paths[path] = touchedAt
+}
+
+func (s *agentTouchedFileStore) list(channelID string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	paths := s.byChannel[channelID]
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(paths))
+	for path := range paths {
+		out = append(out, path)
+	}
+	return out
+}
+
+func (s *agentTouchedFileStore) reset(channelID string) {
+	if channelID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.byChannel) == 0 {
+		return
+	}
+	delete(s.byChannel, channelID)
+}
+
+func (s *agentTouchedFileStore) sweep(now time.Time, maxAge time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.byChannel) == 0 {
+		return 0
+	}
+	cutoff := now.Add(-maxAge)
+	removed := 0
+	for channelID, paths := range s.byChannel {
+		for path, touchedAt := range paths {
+			if touchedAt.Before(cutoff) {
+				delete(paths, path)
+				removed++
+			}
+		}
+		if len(paths) == 0 {
+			delete(s.byChannel, channelID)
+		}
+	}
+	return removed
 }
 
 type terminalRelaySender struct {
@@ -336,6 +416,19 @@ func (d *Daemon) runTokenRefreshCheck(ctx context.Context) {
 	}
 }
 
+func (d *Daemon) runAgentTouchedFileSweep(ctx context.Context) {
+	ticker := time.NewTicker(agentTouchedFileSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.agentTouchedFiles.sweep(time.Now(), agentTouchedFileMaxAge)
+		}
+	}
+}
+
 // Health implements sockapi.StatusProvider.
 func (d *Daemon) Health() sockapi.HealthData {
 	if !d.client.Connected() {
@@ -396,6 +489,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	go d.runTokenRefreshCheck(ctx)
+	go d.runAgentTouchedFileSweep(ctx)
 	go d.runHeartbeat(ctx)
 	d.manager.StartReaper(ctx, 5*time.Minute, 30*time.Minute)
 	defer d.gracefulShutdown(ctx)
@@ -620,6 +714,12 @@ func (d *Daemon) sendPreviewOpenResult(msg *protocol.PreviewOpen, ok bool, code 
 func (d *Daemon) handleTask(msg *protocol.Task) error {
 	ctx := context.Background()
 	if msg.ChannelID != "" && msg.CWD != "" {
+		if root, ok := d.channelRoots.Load(msg.ChannelID); ok {
+			rootStr, _ := root.(string)
+			if rootStr != "" && filepath.Clean(rootStr) != filepath.Clean(msg.CWD) {
+				d.agentTouchedFiles.reset(msg.ChannelID)
+			}
+		}
 		d.channelRoots.Store(msg.ChannelID, msg.CWD)
 	}
 	if d.forcePi {
@@ -641,16 +741,17 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	if actor == nil {
 		var err error
 		actor, err = d.manager.Spawn(ctx, session.Options{
-			SessionID:       msg.SessionID,
-			CWD:             msg.CWD,
-			Model:           msg.Model,
-			Effort:          msg.Effort,
-			PermissionMode:  msg.PermissionMode,
-			ResumeSession:   msg.ClaudeSessionID,
-			PiBinaryPath:    d.piBinaryPath,
-			PiExtensionPath: d.piExtensionPath,
-			BrowserGrantID:  browserGrantID,
-			BrowserID:       browserID,
+			SessionID:         msg.SessionID,
+			CWD:               msg.CWD,
+			Model:             msg.Model,
+			Effort:            msg.Effort,
+			PermissionMode:    msg.PermissionMode,
+			ResumeSession:     msg.ClaudeSessionID,
+			PiBinaryPath:      d.piBinaryPath,
+			PiExtensionPath:   d.piExtensionPath,
+			BrowserGrantID:    browserGrantID,
+			BrowserID:         browserID,
+			RecordTouchedFile: d.recordAgentTouchedFile,
 		})
 		if err != nil {
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -817,7 +918,12 @@ func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
 }
 
 func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
-	content, truncated, err := fs.ReadFile(msg.Path, d.scopeRootForChannel(msg.ChannelID), msg.MaxBytes)
+	content, truncated, err := fs.ReadFileWithAllowedPaths(
+		msg.Path,
+		d.scopeRootForChannel(msg.ChannelID),
+		msg.MaxBytes,
+		d.agentTouchedFiles.list(msg.ChannelID),
+	)
 	result := &protocol.ReadFileResult{
 		Type:      protocol.MsgTypeReadFileResult,
 		RequestID: msg.RequestID,
@@ -832,6 +938,15 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return d.client.Send(sendCtx, result)
+}
+
+func (d *Daemon) recordAgentTouchedFile(channelID string, cwd string, path string) {
+	resolved, err := fs.ResolveExistingPathFromCWD(path, cwd)
+	if err != nil {
+		slog.Debug("agent touched file path not recorded", "channelID", channelID, "path", path, "cwd", cwd, "err", err)
+		return
+	}
+	d.agentTouchedFiles.add(channelID, resolved)
 }
 
 func (d *Daemon) handleListSkills(msg *protocol.ListSkills) error {

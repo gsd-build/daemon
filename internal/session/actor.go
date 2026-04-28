@@ -36,18 +36,19 @@ type ImageUploader interface {
 
 // Options configures a new Actor.
 type Options struct {
-	SessionID       string
-	CWD             string
-	Relay           RelaySender
-	Model           string
-	Effort          string
-	PermissionMode  string
-	ResumeSession   string
-	PiBinaryPath    string
-	PiExtensionPath string
-	Uploader        ImageUploader // nil = image upload disabled
-	BrowserGrantID  string
-	BrowserID       string
+	SessionID         string
+	CWD               string
+	Relay             RelaySender
+	Model             string
+	Effort            string
+	PermissionMode    string
+	ResumeSession     string
+	PiBinaryPath      string
+	PiExtensionPath   string
+	Uploader          ImageUploader // nil = image upload disabled
+	BrowserGrantID    string
+	BrowserID         string
+	RecordTouchedFile func(channelID string, cwd string, path string)
 }
 
 // Actor drives a single agent session using spawn-per-task execution.
@@ -94,9 +95,9 @@ type Actor struct {
 	// pidDir is the directory for PID files. Empty disables PID tracking.
 	pidDir string
 
-	// pendingFileToolStarts tracks pi write/edit tool_execution_start events
-	// awaiting their matching tool_execution_end. Keyed by toolCallID, value is
-	// pendingFileTool. Populated in capturePiToolStart, consumed in
+	// pendingFileToolStarts tracks pi file tool_execution_start events awaiting
+	// their matching tool_execution_end. Keyed by toolCallID, value is
+	// pendingFileTool. Populated in capturePiToolStart and consumed in
 	// capturePiToolEnd.
 	pendingFileToolStarts sync.Map
 	localServerDetections sync.Map
@@ -105,9 +106,8 @@ type Actor struct {
 	now          func() time.Time
 }
 
-// pendingFileTool records a pi write/edit start event awaiting its matching
-// tool_execution_end so capturePiToolEnd can emit a file_activity stream event
-// with the path argument.
+// pendingFileTool records a pi file-tool start event awaiting its matching
+// tool_execution_end.
 type pendingFileTool struct {
 	toolName  string
 	args      map[string]any
@@ -670,11 +670,9 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 
 func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {
 	return func(event pi.ToolExecutionStart) {
-		// Remember start args for write/edit so capturePiToolEnd can emit a
-		// file_activity stream event with the path argument on completion.
-		if event.ToolName == "write" || event.ToolName == "edit" {
+		if toolName, ok := normalizePiFileToolName(event.ToolName); ok {
 			a.pendingFileToolStarts.Store(event.ToolCallID, pendingFileTool{
-				toolName:  event.ToolName,
+				toolName:  toolName,
 				args:      event.Args,
 				startedAt: time.Now(),
 			})
@@ -697,14 +695,15 @@ func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) f
 // tool names are ignored. The pending start entry is removed once consumed.
 func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
 	return func(event pi.ToolExecutionEnd) {
-		if event.IsError {
-			return
-		}
-		if event.ToolName != "write" && event.ToolName != "edit" {
+		toolName, ok := normalizePiFileToolName(event.ToolName)
+		if !ok {
 			return
 		}
 		v, ok := a.pendingFileToolStarts.LoadAndDelete(event.ToolCallID)
 		if !ok {
+			return
+		}
+		if event.IsError {
 			return
 		}
 		started, ok := v.(pendingFileTool)
@@ -712,8 +711,17 @@ func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
 			return
 		}
 
-		path, _ := started.args["path"].(string)
+		path := fileToolPath(started.args)
 		if path == "" {
+			return
+		}
+		if started.toolName != "" {
+			toolName = started.toolName
+		}
+		if a.opts.RecordTouchedFile != nil {
+			a.opts.RecordTouchedFile(channelID, a.opts.CWD, path)
+		}
+		if toolName == "read" {
 			return
 		}
 
@@ -726,7 +734,7 @@ func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
 
 		payload, err := json.Marshal(map[string]any{
 			"type":             "file_activity",
-			"op":               event.ToolName,
+			"op":               toolName,
 			"path":             path,
 			"cwd":              a.opts.CWD,
 			"firstChangedLine": firstChangedLine,
@@ -754,8 +762,27 @@ func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
 	}
 }
 
+func normalizePiFileToolName(name string) (string, bool) {
+	switch strings.ToLower(name) {
+	case "read", "write", "edit":
+		return strings.ToLower(name), true
+	default:
+		return "", false
+	}
+}
+
+func fileToolPath(args map[string]any) string {
+	if path, ok := args["path"].(string); ok {
+		return path
+	}
+	if path, ok := args["file_path"].(string); ok {
+		return path
+	}
+	return ""
+}
+
 // sweepStalePendingFileTools removes pendingFileToolStarts entries older than
-// maxAge. Called periodically to bound memory in case pi sends a write/edit
+// maxAge. Called periodically to bound memory in case pi sends a file tool
 // start event with no matching end (crash, abandoned tool call, etc.).
 func (a *Actor) sweepStalePendingFileTools(maxAge time.Duration) {
 	cutoff := time.Now().Add(-maxAge)
