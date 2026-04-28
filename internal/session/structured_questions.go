@@ -144,14 +144,18 @@ func parseAnswerList(answer string) []string {
 }
 
 type structuredQuestionCoordinator struct {
-	mu      sync.Mutex
-	waiters []chan structuredQuestionRound
-	pending []structuredQuestionRound
+	mu        sync.Mutex
+	waiters   []chan structuredQuestionRound
+	pending   []structuredQuestionRound
+	discarded map[string]int
 }
 
 func (c *structuredQuestionCoordinator) put(round structuredQuestionRound) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.takeDiscardedLocked(round) {
+		return
+	}
 	if len(c.waiters) > 0 {
 		waiter := c.waiters[0]
 		c.waiters = c.waiters[1:]
@@ -160,6 +164,37 @@ func (c *structuredQuestionCoordinator) put(round structuredQuestionRound) {
 		return
 	}
 	c.pending = append(c.pending, round)
+}
+
+func (c *structuredQuestionCoordinator) discardNextMatching(round structuredQuestionRound) {
+	signature := structuredQuestionRoundSignature(round)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, candidate := range c.pending {
+		if structuredQuestionRoundSignature(candidate) != signature {
+			continue
+		}
+		c.pending = append(c.pending[:i], c.pending[i+1:]...)
+		return
+	}
+	if c.discarded == nil {
+		c.discarded = make(map[string]int)
+	}
+	c.discarded[signature]++
+}
+
+func (c *structuredQuestionCoordinator) takeDiscardedLocked(round structuredQuestionRound) bool {
+	signature := structuredQuestionRoundSignature(round)
+	count := c.discarded[signature]
+	if count == 0 {
+		return false
+	}
+	if count == 1 {
+		delete(c.discarded, signature)
+	} else {
+		c.discarded[signature] = count - 1
+	}
+	return true
 }
 
 func (c *structuredQuestionCoordinator) wait(ctx context.Context) (structuredQuestionRound, bool) {
@@ -193,4 +228,9 @@ func (c *structuredQuestionCoordinator) wait(ctx context.Context) (structuredQue
 		c.mu.Unlock()
 		return structuredQuestionRound{}, false
 	}
+}
+
+func structuredQuestionRoundSignature(round structuredQuestionRound) string {
+	raw, _ := json.Marshal(round.Questions)
+	return string(raw)
 }
