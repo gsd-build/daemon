@@ -478,6 +478,62 @@ func TestActorHappyPath(t *testing.T) {
 	}
 }
 
+func TestActorIncludesContextRefsInExecutorPrompt(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argsFile := filepath.Join(t.TempDir(), "claude.args")
+	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-context",
+		BinaryPath: binPath,
+		CWD:        root,
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-context",
+		SessionID: "sess-context",
+		ChannelID: "ch-context",
+		Prompt:    "inspect this",
+		CWD:       root,
+		ContextRefs: []protocol.ContextRef{
+			{Kind: "file", Path: "README.md", Name: "README.md"},
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete frame")
+	}
+
+	args := readArgsFile(t, argsFile)
+	prompt := args[len(args)-1]
+	if !strings.Contains(prompt, "<attached_context>") {
+		t.Fatalf("prompt missing attached context:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `<file path="README.md" bytes=6>`) {
+		t.Fatalf("prompt missing file context:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "hello\n") || !strings.Contains(prompt, "inspect this") {
+		t.Fatalf("prompt missing body or original prompt:\n%s", prompt)
+	}
+}
+
 func TestActorPropagatesRequestIDToLifecycleFrames(t *testing.T) {
 	binPath := buildFakeClaude(t)
 	relay := newFakeRelay()
@@ -642,6 +698,82 @@ func TestActorPermissionDenialAndApproval(t *testing.T) {
 	allowed := actor.AllowedTools()
 	if len(allowed) != 1 || allowed[0] != "Write" {
 		t.Errorf("allowedTools: %+v", allowed)
+	}
+}
+
+func TestActorPermissionApprovalKeepsContextRefsInExecutorPrompt(t *testing.T) {
+	binPath := buildFakeClaude(t)
+	relay := newFakeRelay()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argsFile := filepath.Join(t.TempDir(), "claude.args")
+	t.Setenv("FAKE_CLAUDE_ARGS_FILE", argsFile)
+	t.Setenv("FAKE_CLAUDE_DENY_TOOL", "Write")
+
+	actor, err := NewActor(Options{
+		SessionID:  "sess-context-perm",
+		BinaryPath: binPath,
+		CWD:        root,
+		Relay:      relay,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-context-perm",
+		SessionID: "sess-context-perm",
+		ChannelID: "ch-context-perm",
+		Prompt:    "Write a file",
+		CWD:       root,
+		ContextRefs: []protocol.ContextRef{
+			{Kind: "file", Path: "README.md", Name: "README.md"},
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	gotPerm := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		for _, f := range frames {
+			if _, ok := f.(*protocol.PermissionRequest); ok {
+				return true
+			}
+		}
+		return false
+	})
+	if !gotPerm {
+		t.Fatal("timed out waiting for PermissionRequest")
+	}
+
+	if err := actor.HandlePermissionResponse(&protocol.PermissionResponse{
+		Type:      protocol.MsgTypePermissionResponse,
+		SessionID: "sess-context-perm",
+		ChannelID: "ch-context-perm",
+		RequestID: "toolu_fake_001",
+		Approved:  true,
+	}); err != nil {
+		t.Fatalf("HandlePermissionResponse: %v", err)
+	}
+
+	if !relay.waitForTaskComplete(t, 10*time.Second) {
+		t.Fatal("timed out waiting for TaskComplete after approval")
+	}
+
+	args := readArgsFile(t, argsFile)
+	prompt := args[len(args)-1]
+	if !strings.Contains(prompt, "<attached_context>") {
+		t.Fatalf("retry prompt missing attached context:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Write a file") || !strings.Contains(prompt, "hello\n") {
+		t.Fatalf("retry prompt missing original prompt or context body:\n%s", prompt)
 	}
 }
 
