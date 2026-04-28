@@ -103,11 +103,23 @@ func TestLocalServerDetectionOutlivesTaskContext(t *testing.T) {
 	probeStarted := make(chan struct{})
 	releaseProbe := make(chan struct{})
 	var startOnce sync.Once
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseProbe)
+		})
+	}
+	t.Cleanup(release)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startOnce.Do(func() {
 			close(probeStarted)
 		})
-		<-releaseProbe
+		select {
+		case <-releaseProbe:
+		case <-r.Context().Done():
+			return
+		}
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer server.Close()
@@ -131,6 +143,7 @@ func TestLocalServerDetectionOutlivesTaskContext(t *testing.T) {
 	}
 	tc := &taskContext{TaskID: "task-preview", ChannelID: "ch-preview"}
 	taskCtx, cancelTask := context.WithCancel(context.Background())
+	t.Cleanup(cancelTask)
 
 	_, err = actor.forwardExecutorEvents(context.Background(), taskCtx, tc, func(_ context.Context, onEvent func(claude.Event) error) error {
 		if err := onEvent(claude.Event{Type: "assistant", Raw: mustJSON(t, map[string]any{
@@ -170,7 +183,7 @@ func TestLocalServerDetectionOutlivesTaskContext(t *testing.T) {
 		t.Fatal("local server probe did not start")
 	}
 	cancelTask()
-	close(releaseProbe)
+	release()
 
 	ok := relay.waitFor(t, 3*time.Second, func(frames []any) bool {
 		for _, frame := range frames {
