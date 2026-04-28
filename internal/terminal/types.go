@@ -13,20 +13,22 @@ const (
 )
 
 type Limits struct {
-	ScrollbackBytes int
-	IdleTimeout     time.Duration
-	MaxLifetime     time.Duration
-	OutputChunkSize int
-	OutputFlush     time.Duration
+	ScrollbackBytes        int
+	IdleTimeout            time.Duration
+	MaxLifetime            time.Duration
+	OutputChunkSize        int
+	OutputFlush            time.Duration
+	TerminationGracePeriod time.Duration
 }
 
 func DefaultLimits() Limits {
 	return Limits{
-		ScrollbackBytes: 256 * 1024,
-		IdleTimeout:     5 * time.Minute,
-		MaxLifetime:     4 * time.Hour,
-		OutputChunkSize: 8 * 1024,
-		OutputFlush:     16 * time.Millisecond,
+		ScrollbackBytes:        256 * 1024,
+		IdleTimeout:            5 * time.Minute,
+		MaxLifetime:            4 * time.Hour,
+		OutputChunkSize:        8 * 1024,
+		OutputFlush:            16 * time.Millisecond,
+		TerminationGracePeriod: 2 * time.Second,
 	}
 }
 
