@@ -150,6 +150,7 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 		TaskID:    "task-persist-pi",
 		ChannelID: "ch-persist-pi",
 		Engine:    "pi",
+		Model:     "claude-opus-4-6[1m]",
 	}, "remember this")
 	if err != nil {
 		t.Fatalf("runPiExecutor: %v", err)
@@ -170,6 +171,16 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 	wantSessionFile := filepath.Join(home, ".gsd-cloud", "pi-sessions", "sess-persist-pi.jsonl")
 	if args[sessionFlag+1] != wantSessionFile {
 		t.Fatalf("pi session file = %q, want %q", args[sessionFlag+1], wantSessionFile)
+	}
+	modelFlag := argIndex(args, "--model")
+	if modelFlag < 0 || modelFlag+1 >= len(args) {
+		t.Fatalf("pi args missing --model value: %v", args)
+	}
+	if args[modelFlag+1] != "claude-opus-4-6" {
+		t.Fatalf("pi model = %q, want claude-opus-4-6", args[modelFlag+1])
+	}
+	if got := actor.currentPiModel(); got != "claude-opus-4-6" {
+		t.Fatalf("current pi model = %q", got)
 	}
 }
 

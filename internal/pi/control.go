@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,7 @@ const (
 	defaultReserveTokens    int64 = 16384
 	defaultKeepRecentTokens int64 = 20000
 	defaultContextWindow    int64 = 200000
+	longContextWindow       int64 = 1000000
 )
 
 type ControlCommandType string
@@ -37,11 +39,13 @@ type ControlCommand struct {
 }
 
 type ControlOptions struct {
-	BinaryPath  string
-	CWD         string
-	SessionFile string
-	Command     ControlCommand
-	OnEvent     func(ControlEvent)
+	BinaryPath    string
+	CWD           string
+	SessionFile   string
+	Model         string
+	ContextWindow int64
+	Command       ControlCommand
+	OnEvent       func(ControlEvent)
 }
 
 type ContextUsage struct {
@@ -151,7 +155,12 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 		stderrBytes, stderrErr = io.ReadAll(stderr)
 	}()
 
-	result, readErr := readControlOutput(stdout, opts.OnEvent)
+	fallbackContextWindow := opts.ContextWindow
+	if fallbackContextWindow <= 0 {
+		fallbackContextWindow = ContextWindowForModel(opts.Model)
+	}
+
+	result, readErr := readControlOutput(stdout, opts.OnEvent, fallbackContextWindow)
 	<-stderrDone
 	waitErr := cmd.Wait()
 	if readErr != nil {
@@ -187,7 +196,7 @@ func writeControlCommand(w io.Writer, command ControlCommand) error {
 	return nil
 }
 
-func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, error) {
+func readControlOutput(r io.Reader, onEvent func(ControlEvent), fallbackContextWindow int64) (ControlResult, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	result := ControlResult{}
@@ -204,15 +213,15 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 		case "compaction_start":
 			sawCompactionStart = true
 			if onEvent != nil {
-				onEvent(frame.toEvent(ControlEventCompactionStart))
+				onEvent(frame.toEvent(ControlEventCompactionStart, fallbackContextWindow))
 			}
 		case "compaction_end":
 			sawCompactionEnd = true
 			if onEvent != nil {
-				onEvent(frame.toEvent(ControlEventCompactionEnd))
+				onEvent(frame.toEvent(ControlEventCompactionEnd, fallbackContextWindow))
 			}
 		case "response":
-			terminalResult, ok := frame.toResponseResult(onEvent, !sawCompactionStart, !sawCompactionEnd)
+			terminalResult, ok := frame.toResponseResult(onEvent, !sawCompactionStart, !sawCompactionEnd, fallbackContextWindow)
 			if ok {
 				if frame.Command == string(ControlCommandCompact) {
 					sawCompactionStart = true
@@ -226,7 +235,7 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 			result = ControlResult{
 				OK:           frame.OK || frame.Error == "",
 				Error:        frame.Error,
-				ContextUsage: frame.ContextUsage.toContextUsage(),
+				ContextUsage: frame.ContextUsage.toContextUsage().withFallbackWindow(fallbackContextWindow),
 			}
 		}
 	}
@@ -239,38 +248,38 @@ func readControlOutput(r io.Reader, onEvent func(ControlEvent)) (ControlResult, 
 	return result, nil
 }
 
-func (frame rawControlFrame) toEvent(eventType ControlEventType) ControlEvent {
+func (frame rawControlFrame) toEvent(eventType ControlEventType, fallbackContextWindow int64) ControlEvent {
 	return ControlEvent{
 		Type:             eventType,
 		Reason:           frame.Reason,
 		Summary:          frame.Summary,
 		FirstKeptEntryID: frame.FirstKeptEntryID,
-		ContextUsage:     frame.ContextUsage.toContextUsage(),
+		ContextUsage:     frame.ContextUsage.toContextUsage().withFallbackWindow(fallbackContextWindow),
 		ObservedAt:       time.Now().UTC(),
 	}
 }
 
-func (frame rawControlFrame) toResponseResult(onEvent func(ControlEvent), synthesizeStart bool, synthesizeEnd bool) (ControlResult, bool) {
+func (frame rawControlFrame) toResponseResult(onEvent func(ControlEvent), synthesizeStart bool, synthesizeEnd bool, fallbackContextWindow int64) (ControlResult, bool) {
 	switch frame.Command {
 	case string(ControlCommandGetSessionStats):
 		return ControlResult{
 			OK:           frame.responseOK(),
 			Error:        frame.responseError(),
-			ContextUsage: frame.responseContextUsage(),
+			ContextUsage: frame.responseContextUsage(fallbackContextWindow),
 		}, true
 	case string(ControlCommandCompact):
 		if frame.responseOK() && onEvent != nil {
 			if synthesizeStart {
-				onEvent(frame.toResponseCompactionStartEvent())
+				onEvent(frame.toResponseCompactionStartEvent(fallbackContextWindow))
 			}
 			if synthesizeEnd {
-				onEvent(frame.toResponseCompactionEndEvent())
+				onEvent(frame.toResponseCompactionEndEvent(fallbackContextWindow))
 			}
 		}
 		return ControlResult{
 			OK:           frame.responseOK(),
 			Error:        frame.responseError(),
-			ContextUsage: frame.responseContextUsage(),
+			ContextUsage: frame.responseContextUsage(fallbackContextWindow),
 		}, true
 	default:
 		return ControlResult{}, false
@@ -302,29 +311,29 @@ func (frame rawControlFrame) responseError() string {
 	return ""
 }
 
-func (frame rawControlFrame) responseContextUsage() *ContextUsage {
+func (frame rawControlFrame) responseContextUsage(fallbackContextWindow int64) *ContextUsage {
 	if usage := frame.ContextUsage.toContextUsage(); usage != nil {
-		return usage.withFallbackWindow(defaultContextWindow)
+		return usage.withFallbackWindow(fallbackContextWindow)
 	}
 	if frame.Data == nil {
 		return nil
 	}
 	if usage := frame.Data.ContextUsage.toContextUsage(); usage != nil {
-		return usage.withFallbackWindow(defaultContextWindow)
+		return usage.withFallbackWindow(fallbackContextWindow)
 	}
-	if usage := frame.Data.Tokens.toContextUsage(); usage != nil {
+	if usage := frame.Data.Tokens.toContextUsage(fallbackContextWindow); usage != nil {
 		return usage
 	}
 	if frame.Data.TokensAfter != nil {
-		return contextUsageFromTokenCount(*frame.Data.TokensAfter)
+		return contextUsageFromTokenCount(*frame.Data.TokensAfter, fallbackContextWindow)
 	}
 	if frame.Data.TokensBefore != nil {
-		return contextUsageFromTokenCount(*frame.Data.TokensBefore)
+		return contextUsageFromTokenCount(*frame.Data.TokensBefore, fallbackContextWindow)
 	}
 	return nil
 }
 
-func (frame rawControlFrame) toResponseCompactionStartEvent() ControlEvent {
+func (frame rawControlFrame) toResponseCompactionStartEvent(fallbackContextWindow int64) ControlEvent {
 	event := ControlEvent{
 		Type:       ControlEventCompactionStart,
 		Reason:     frame.Reason,
@@ -334,14 +343,14 @@ func (frame rawControlFrame) toResponseCompactionStartEvent() ControlEvent {
 		event.Reason = "manual"
 	}
 	if frame.Data != nil && frame.Data.TokensBefore != nil {
-		event.ContextUsage = contextUsageFromTokenCount(*frame.Data.TokensBefore)
+		event.ContextUsage = contextUsageFromTokenCount(*frame.Data.TokensBefore, fallbackContextWindow)
 	} else {
-		event.ContextUsage = frame.responseContextUsage()
+		event.ContextUsage = frame.responseContextUsage(fallbackContextWindow)
 	}
 	return event
 }
 
-func (frame rawControlFrame) toResponseCompactionEndEvent() ControlEvent {
+func (frame rawControlFrame) toResponseCompactionEndEvent(fallbackContextWindow int64) ControlEvent {
 	event := ControlEvent{
 		Type:       ControlEventCompactionEnd,
 		Reason:     frame.Reason,
@@ -354,9 +363,9 @@ func (frame rawControlFrame) toResponseCompactionEndEvent() ControlEvent {
 		event.Summary = frame.Data.Summary
 		event.FirstKeptEntryID = frame.Data.FirstKeptEntryID
 		if frame.Data.TokensAfter != nil {
-			event.ContextUsage = contextUsageFromTokenCount(*frame.Data.TokensAfter)
+			event.ContextUsage = contextUsageFromTokenCount(*frame.Data.TokensAfter, fallbackContextWindow)
 		} else if usage := frame.Data.ContextUsage.toContextUsage(); usage != nil {
-			event.ContextUsage = usage.withFallbackWindow(defaultContextWindow)
+			event.ContextUsage = usage.withFallbackWindow(fallbackContextWindow)
 		}
 	}
 	if event.Summary == "" {
@@ -366,7 +375,7 @@ func (frame rawControlFrame) toResponseCompactionEndEvent() ControlEvent {
 		event.FirstKeptEntryID = frame.FirstKeptEntryID
 	}
 	if event.ContextUsage == nil {
-		event.ContextUsage = frame.ContextUsage.toContextUsage().withFallbackWindow(defaultContextWindow)
+		event.ContextUsage = frame.ContextUsage.toContextUsage().withFallbackWindow(fallbackContextWindow)
 	}
 	return event
 }
@@ -386,30 +395,54 @@ func (usage *ContextUsage) withFallbackWindow(contextWindow int64) *ContextUsage
 	if usage == nil {
 		return nil
 	}
-	if usage.ContextWindow > 0 || contextWindow <= 0 {
-		return usage
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindow
 	}
-	usage.ContextWindow = contextWindow
-	if usage.Percent == nil && usage.Tokens != nil {
-		percent := (float64(*usage.Tokens) / float64(contextWindow)) * 100
+	if usage.ContextWindow <= 0 {
+		usage.ContextWindow = contextWindow
+	}
+	if usage.Percent == nil && usage.Tokens != nil && usage.ContextWindow > 0 {
+		percent := (float64(*usage.Tokens) / float64(usage.ContextWindow)) * 100
 		usage.Percent = &percent
 	}
 	return usage
 }
 
-func (usage *rawTokenUsage) toContextUsage() *ContextUsage {
+func (usage *rawTokenUsage) toContextUsage(fallbackContextWindow int64) *ContextUsage {
 	if usage == nil {
 		return nil
 	}
-	return contextUsageFromTokenCount(usage.Total)
+	return contextUsageFromTokenCount(usage.Total, fallbackContextWindow)
 }
 
-func contextUsageFromTokenCount(tokens int64) *ContextUsage {
-	percent := (float64(tokens) / float64(defaultContextWindow)) * 100
+func contextUsageFromTokenCount(tokens int64, contextWindow int64) *ContextUsage {
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindow
+	}
+	percent := (float64(tokens) / float64(contextWindow)) * 100
 	return &ContextUsage{
 		Tokens:        &tokens,
-		ContextWindow: defaultContextWindow,
+		ContextWindow: contextWindow,
 		Percent:       &percent,
+	}
+}
+
+func ContextWindowForModel(model string) int64 {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(model, "["); i > 0 && strings.HasSuffix(model, "]") {
+		model = strings.TrimSpace(model[:i])
+	}
+	if i := strings.LastIndex(model, ":"); i > 0 {
+		model = strings.TrimSpace(model[:i])
+	}
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		model = model[i+1:]
+	}
+	switch model {
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		return longContextWindow
+	default:
+		return defaultContextWindow
 	}
 }
 
