@@ -8,30 +8,54 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 
 	protocol "github.com/gsd-build/protocol-go"
 )
 
-const browseDirEntryLimit = 200
+const (
+	defaultBrowseDirLimit = 200
+	maxBrowseDirLimit     = 500
+)
+
+type BrowseDirOptions struct {
+	Limit  int
+	Cursor string
+}
+
+type BrowseDirPage struct {
+	Entries    []protocol.BrowseEntry
+	HasMore    bool
+	NextCursor string
+}
 
 // BrowseDir lists entries in the given absolute path.
 func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
-	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
+	page, err := BrowseDirPageAt(path, scopeRoot, BrowseDirOptions{})
 	if err != nil {
 		return nil, err
+	}
+	return page.Entries, nil
+}
+
+// BrowseDirPageAt lists one bounded page of entries in the given absolute path.
+func BrowseDirPageAt(path, scopeRoot string, opts BrowseDirOptions) (BrowseDirPage, error) {
+	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
+	if err != nil {
+		return BrowseDirPage{}, err
 	}
 	resolved, err := resolveExistingPath(path)
 	if err != nil {
-		return nil, err
+		return BrowseDirPage{}, err
 	}
 	if err := ensurePathAllowed(resolved, resolvedRoot); err != nil {
-		return nil, err
+		return BrowseDirPage{}, err
 	}
 
 	entries, err := os.ReadDir(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("read dir: %w", err)
+		return BrowseDirPage{}, fmt.Errorf("read dir: %w", err)
 	}
 
 	result := make([]protocol.BrowseEntry, 0, len(entries))
@@ -58,8 +82,46 @@ func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 		}
 		return result[i].Name < result[j].Name
 	})
-	if len(result) > browseDirEntryLimit {
-		return nil, fmt.Errorf("directory contains %d entries; paginated browsing is required", len(result))
+
+	limit := normalizeBrowseDirLimit(opts.Limit)
+	start, err := parseBrowseCursor(opts.Cursor)
+	if err != nil {
+		return BrowseDirPage{}, err
 	}
-	return result, nil
+	if start >= len(result) {
+		return BrowseDirPage{Entries: []protocol.BrowseEntry{}}, nil
+	}
+	end := start + limit
+	if end > len(result) {
+		end = len(result)
+	}
+	page := BrowseDirPage{
+		Entries: result[start:end],
+		HasMore: end < len(result),
+	}
+	if page.HasMore {
+		page.NextCursor = strconv.Itoa(end)
+	}
+	return page, nil
+}
+
+func normalizeBrowseDirLimit(limit int) int {
+	if limit <= 0 {
+		return defaultBrowseDirLimit
+	}
+	if limit > maxBrowseDirLimit {
+		return maxBrowseDirLimit
+	}
+	return limit
+}
+
+func parseBrowseCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	start, err := strconv.Atoi(cursor)
+	if err != nil || start < 0 {
+		return 0, fmt.Errorf("invalid browse cursor")
+	}
+	return start, nil
 }
