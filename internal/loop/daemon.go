@@ -23,6 +23,7 @@ import (
 	"github.com/gsd-build/daemon/internal/preview"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
+	"github.com/gsd-build/daemon/internal/skills"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	"github.com/gsd-build/daemon/internal/terminal"
 	"github.com/gsd-build/daemon/internal/update"
@@ -425,6 +426,8 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleMkDir(msg)
 	case *protocol.ReadFile:
 		return d.handleRead(msg)
+	case *protocol.ListSkills:
+		return d.handleListSkills(msg)
 	case *protocol.PermissionResponse:
 		return d.handlePermissionResponse(msg)
 	case *protocol.QuestionResponse:
@@ -773,6 +776,27 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 		OK:        err == nil,
 		Content:   content,
 		Truncated: truncated,
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return d.client.Send(sendCtx, result)
+}
+
+func (d *Daemon) handleListSkills(msg *protocol.ListSkills) error {
+	cwd := msg.CWD
+	if cwd == "" {
+		cwd = d.scopeRootForChannel(msg.ChannelID)
+	}
+	discovered, err := skills.DiscoverClaudeSkills(cwd)
+	result := &protocol.ListSkillsResult{
+		Type:      protocol.MsgTypeListSkillsResult,
+		RequestID: msg.RequestID,
+		ChannelID: msg.ChannelID,
+		OK:        err == nil,
+		Skills:    discovered,
 	}
 	if err != nil {
 		result.Error = err.Error()

@@ -195,6 +195,60 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 	}
 }
 
+func TestActorPiExecutorPassesClaudeSkillPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projectDir := filepath.Join(home, "repo", "app")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	skillPath := filepath.Join(home, "repo", ".claude", "skills", "project-skill", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillPath, []byte("---\nname: project-skill\ndescription: Project skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write fake extension: %v", err)
+	}
+
+	actor, err := NewActor(Options{
+		SessionID:       "sess-pi-skills",
+		CWD:             projectDir,
+		Relay:           newFakeRelay(),
+		PiBinaryPath:    writeFakePi(t),
+		PiExtensionPath: extensionPath,
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:    "task-pi-skills",
+		ChannelID: "ch-pi-skills",
+		Engine:    "pi",
+	}, "use the project skill")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	skillFlag := argIndex(args, "--skill")
+	if skillFlag < 0 || skillFlag+1 >= len(args) {
+		t.Fatalf("pi args missing --skill value: %v", args)
+	}
+	if args[skillFlag+1] != skillPath {
+		t.Fatalf("pi skill path = %q, want %q", args[skillFlag+1], skillPath)
+	}
+}
+
 func TestHandleResultDoesNotPersistPiSyntheticSession(t *testing.T) {
 	relay := newFakeRelay()
 	actor := &Actor{

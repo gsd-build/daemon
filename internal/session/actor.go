@@ -18,6 +18,7 @@ import (
 	daemonfs "github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/pidfile"
+	"github.com/gsd-build/daemon/internal/skills"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	"github.com/gsd-build/daemon/internal/upload"
 	protocol "github.com/gsd-build/protocol-go"
@@ -603,6 +604,14 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	if err != nil {
 		return err
 	}
+	availableSkills, err := skills.DiscoverClaudeSkills(a.opts.CWD)
+	if err != nil {
+		slog.Warn("discover claude skills failed", "cwd", a.opts.CWD, "err", err)
+	}
+	skillPaths := make([]string, 0, len(availableSkills))
+	for _, skill := range availableSkills {
+		skillPaths = append(skillPaths, skill.Path)
+	}
 
 	exec := pi.NewExecutor(pi.Options{
 		BinaryPath:    binaryPath,
@@ -613,6 +622,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		Prompt:        prompt,
 		ExtensionPath: a.opts.PiExtensionPath,
 		Provider:      "claude-cli",
+		SkillPaths:    skillPaths,
 	})
 
 	coordinator := &structuredQuestionCoordinator{}

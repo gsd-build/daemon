@@ -57,6 +57,7 @@ type Options struct {
 	Prompt        string
 	ExtensionPath string // forwarded as -e <path>
 	Provider      string // forwarded as --provider <name>
+	SkillPaths    []string
 }
 
 // Executor spawns one `pi -p --mode rpc` process per task.
@@ -139,6 +140,11 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	if e.opts.Model != "" {
 		args = append(args, "--model", e.opts.Model)
 	}
+	for _, path := range e.opts.SkillPaths {
+		if path != "" {
+			args = append(args, "--skill", path)
+		}
+	}
 
 	slog.Info("starting pi",
 		"binary", e.opts.BinaryPath,
@@ -146,6 +152,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"model", e.opts.Model,
 		"provider", e.opts.Provider,
 		"extension", e.opts.ExtensionPath,
+		"skillCount", len(e.opts.SkillPaths),
 		"promptLen", len(e.opts.Prompt),
 	)
 
