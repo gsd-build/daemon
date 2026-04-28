@@ -17,6 +17,20 @@ func TestValidateCWDResolvesDirectory(t *testing.T) {
 	}
 }
 
+func TestValidateCWDDefaultsToHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	resolved, err := ValidateCWD("")
+	if err != nil {
+		t.Fatalf("ValidateCWD: %v", err)
+	}
+	if resolved != home {
+		t.Fatalf("resolved = %q, want %q", resolved, home)
+	}
+}
+
 func TestValidateCWDRejectsRelativePath(t *testing.T) {
 	if _, err := ValidateCWD("relative"); err == nil {
 		t.Fatal("expected relative cwd to be rejected")
