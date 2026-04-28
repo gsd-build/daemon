@@ -97,6 +97,7 @@ type Actor struct {
 	// pendingFileTool. Populated in capturePiToolStart, consumed in
 	// capturePiToolEnd.
 	pendingFileToolStarts sync.Map
+	localServerDetections sync.Map
 
 	runPiControl func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error)
 	now          func() time.Time
@@ -114,6 +115,7 @@ type pendingFileTool struct {
 type taskContext struct {
 	TaskID          string
 	ChannelID       string
+	ActorContext    context.Context
 	StartedAt       time.Time
 	OriginalPrompt  string
 	ExecutionPrompt string
@@ -495,6 +497,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	tc := &taskContext{
 		TaskID:          task.TaskID,
 		ChannelID:       task.ChannelID,
+		ActorContext:    ctx,
 		StartedAt:       time.Now(),
 		OriginalPrompt:  task.Prompt,
 		ExecutionPrompt: executionPrompt,
@@ -533,7 +536,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	}
 	sendCancel()
 
-	err := a.runExecutor(taskCtx, tc, tc.ExecutionPrompt)
+	err := a.runExecutor(ctx, taskCtx, tc, tc.ExecutionPrompt)
 
 	// If the task context was cancelled (user hit ESC or timeout), send the
 	// appropriate message and loop back for the next task.
@@ -570,18 +573,25 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 
 type executorRunner func(context.Context, func(claude.Event) error) error
 
-func (a *Actor) runExecutor(ctx context.Context, tc *taskContext, prompt string) error {
+func taskActorContext(tc *taskContext, fallback context.Context) context.Context {
+	if tc.ActorContext != nil {
+		return tc.ActorContext
+	}
+	return fallback
+}
+
+func (a *Actor) runExecutor(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string) error {
 	switch tc.Engine {
 	case "", "claude":
-		return a.runClaudeExecutor(ctx, tc, prompt)
+		return a.runClaudeExecutor(actorCtx, taskCtx, tc, prompt)
 	case "pi":
-		return a.runPiExecutor(ctx, tc, prompt)
+		return a.runPiExecutor(actorCtx, taskCtx, tc, prompt)
 	default:
 		return fmt.Errorf("unsupported task engine %q", tc.Engine)
 	}
 }
 
-func (a *Actor) runClaudeExecutor(ctx context.Context, tc *taskContext, prompt string) error {
+func (a *Actor) runClaudeExecutor(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string) error {
 	// Use per-task model/effort/permissionMode if provided, otherwise fall back
 	// to the actor's creation-time defaults.
 	model := tc.Model
@@ -611,12 +621,12 @@ func (a *Actor) runClaudeExecutor(ctx context.Context, tc *taskContext, prompt s
 
 	a.attachClaudePIDCallbacks(exec, tc.TaskID)
 
-	resultRaw, err := a.forwardExecutorEvents(ctx, tc, exec.Run)
+	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, exec.Run)
 	if err != nil {
 		return err
 	}
 
-	return a.handleResult(ctx, tc, resultRaw)
+	return a.handleResult(taskCtx, tc, resultRaw)
 }
 
 func (a *Actor) attachClaudePIDCallbacks(exec *claude.Executor, taskID string) {
@@ -635,7 +645,7 @@ func (a *Actor) attachClaudePIDCallbacks(exec *claude.Executor, taskID string) {
 	}
 }
 
-func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt string) error {
+func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string) error {
 	model := tc.Model
 	if model == "" {
 		model = a.opts.Model
@@ -667,14 +677,14 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 	exec.OnToolExecutionStart = a.capturePiToolStart(coordinator)
 	exec.OnToolExecutionEnd = a.capturePiToolEnd(tc.ChannelID)
 
-	resultRaw, err := a.forwardExecutorEvents(ctx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
+	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
 		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
 	})
 	if err != nil {
 		return err
 	}
 
-	return a.handleResult(ctx, tc, resultRaw)
+	return a.handleResult(taskCtx, tc, resultRaw)
 }
 
 func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {
@@ -950,12 +960,13 @@ func (a *Actor) handleStructuredQuestionRound(ctx context.Context, handlerCtx co
 	return formatStructuredQuestionResponse(round, answers), nil
 }
 
-func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run executorRunner) (json.RawMessage, error) {
+func (a *Actor) forwardExecutorEvents(actorCtx context.Context, taskCtx context.Context, tc *taskContext, run executorRunner) (json.RawMessage, error) {
 	var resultRaw json.RawMessage
 	const maxConsecutiveFailures = 3
 	consecutiveFailures := 0
+	localServers := newLocalServerDetector()
 
-	err := run(ctx, func(e claude.Event) error {
+	err := run(taskCtx, func(e claude.Event) error {
 		next := atomic.AddInt64(&a.seq, 1)
 
 		// Send to relay
@@ -966,7 +977,7 @@ func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run 
 			SequenceNumber: next,
 			Event:          e.Raw,
 		}
-		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
+		sendCtx, sendCancel := context.WithTimeout(taskCtx, 5*time.Second)
 		if err := a.opts.Relay.Send(sendCtx, frame); err != nil {
 			consecutiveFailures++
 			slog.Warn("relay send failed",
@@ -993,8 +1004,9 @@ func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run 
 		// Detect image reads and upload asynchronously.
 		if a.opts.Uploader != nil && e.Type == "assistant" {
 			slog.Debug("checking assistant event for image reads", "session", a.opts.SessionID)
-			a.maybeUploadImages(ctx, e.Raw, tc.ChannelID, next)
+			a.maybeUploadImages(taskCtx, e.Raw, tc.ChannelID, next)
 		}
+		a.maybeReportLocalServers(actorCtx, tc, localServers, e.Raw)
 
 		return nil
 	})
@@ -1148,7 +1160,7 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 			if resp.Approved {
 				slog.Info("permission approved, resuming", "tool", denial.ToolName)
 				a.addAllowedTool(denial.ToolName)
-				return a.runExecutor(ctx, tc, tc.ExecutionPrompt)
+				return a.runExecutor(taskActorContext(tc, ctx), ctx, tc, tc.ExecutionPrompt)
 			}
 			return a.handleDenyResponse(ctx, tc)
 		}
@@ -1321,7 +1333,7 @@ func (a *Actor) handleBatchQuestions(ctx context.Context, tc *taskContext, denia
 	}
 	answerPrompt := "My answers:\n\n" + strings.Join(parts, "\n\n")
 
-	return a.runExecutor(ctx, tc, answerPrompt)
+	return a.runExecutor(taskActorContext(tc, ctx), ctx, tc, answerPrompt)
 }
 
 // maybeUploadImages inspects an "assistant" event for Read tool_use blocks
@@ -1408,7 +1420,7 @@ func (a *Actor) maybeUploadImages(taskCtx context.Context, raw json.RawMessage, 
 
 func (a *Actor) handleDenyResponse(ctx context.Context, tc *taskContext) error {
 	denyPrompt := "The previous tool request was denied. Please continue without using that tool."
-	return a.runExecutor(ctx, tc, denyPrompt)
+	return a.runExecutor(taskActorContext(tc, ctx), ctx, tc, denyPrompt)
 }
 
 // HandlePermissionResponse processes a permission response from the relay.

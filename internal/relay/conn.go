@@ -114,6 +114,7 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 			PreviewMaxFrameBytes:      preview.DefaultMaxFrameBytes,
 			PreviewChunkBytes:         preview.DefaultChunkBytes,
 			PreviewWebSocketProtocols: true,
+			LocalServerDetection:      true,
 		},
 	}
 	buf, err := json.Marshal(hello)
