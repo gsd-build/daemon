@@ -2,8 +2,10 @@ package preview
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -48,7 +50,7 @@ func TestWebSocketOpenPassesSubprotocol(t *testing.T) {
 	}
 }
 
-func TestWebSocketOpenPreservesPreviewHost(t *testing.T) {
+func TestWebSocketOpenRewritesPreviewHostToLocalTarget(t *testing.T) {
 	type seenHeaders struct {
 		host          string
 		forwardedHost string
@@ -86,8 +88,9 @@ func TestWebSocketOpenPreservesPreviewHost(t *testing.T) {
 	}
 	select {
 	case got := <-seen:
-		if got.host != "preview_1.preview.gsd.build" {
-			t.Fatalf("Host = %q, want preview host", got.host)
+		wantHost := net.JoinHostPort("127.0.0.1", strconv.Itoa(mustPort(t, target.URL)))
+		if got.host != wantHost {
+			t.Fatalf("Host = %q, want local target %q", got.host, wantHost)
 		}
 		if got.forwardedHost != "preview_1.preview.gsd.build" {
 			t.Fatalf("X-Forwarded-Host = %q, want preview host", got.forwardedHost)

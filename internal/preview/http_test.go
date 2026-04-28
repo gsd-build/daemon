@@ -3,6 +3,7 @@ package preview
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,10 +15,17 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
-func TestHandleHTTPRequestPreservesPreviewHost(t *testing.T) {
-	seenHost := make(chan string, 1)
+func TestHandleHTTPRequestRewritesPreviewHostToLocalTarget(t *testing.T) {
+	type seenHeaders struct {
+		host          string
+		forwardedHost string
+	}
+	seen := make(chan seenHeaders, 1)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenHost <- r.Host
+		seen <- seenHeaders{
+			host:          r.Host,
+			forwardedHost: r.Header.Get("X-Forwarded-Host"),
+		}
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer target.Close()
@@ -40,8 +48,40 @@ func TestHandleHTTPRequestPreservesPreviewHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if got := <-seenHost; got != "preview_1.preview.gsd.build" {
-		t.Fatalf("Host = %q, want preview host", got)
+	got := <-seen
+	wantHost := mustURLHost(t, target.URL)
+	if got.host != wantHost {
+		t.Fatalf("Host = %q, want local target %q", got.host, wantHost)
+	}
+	if got.forwardedHost != "preview_1.preview.gsd.build" {
+		t.Fatalf("X-Forwarded-Host = %q, want preview host", got.forwardedHost)
+	}
+}
+
+func TestHandleHTTPRequestFallsBackToIPv6Loopback(t *testing.T) {
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	target.Listener = listener
+	target.Start()
+	defer target.Close()
+
+	registry := NewRegistry()
+	mustOpenPreview(t, registry, mustPort(t, target.URL))
+	sender := &fakeSender{}
+	handler := &HTTPHandler{Registry: registry, Sender: sender, Client: target.Client()}
+
+	if err := handler.Handle(context.Background(), previewGET("stream_1")); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	chunks := messagesOfType[*protocol.PreviewStreamChunk](sender)
+	if len(chunks) == 0 {
+		t.Fatal("no response chunks sent")
 	}
 }
 
@@ -115,6 +155,15 @@ func mustPort(t *testing.T, rawURL string) int {
 		t.Fatalf("parse port: %v", err)
 	}
 	return port
+}
+
+func mustURLHost(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	return u.Host
 }
 
 func mustOpenPreview(t *testing.T, registry *Registry, port int) {
