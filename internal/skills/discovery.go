@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -138,7 +139,11 @@ func readSkill(path string, fallbackName string, scope string) (protocol.Skill, 
 	if err != nil {
 		return protocol.Skill{}, false
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			slog.Debug("close skill metadata file failed", "path", path, "err", err)
+		}
+	}()
 
 	name, description := parseSkillMetadata(bufio.NewScanner(io.LimitReader(file, maxSkillReadBytes)))
 	if name == "" {
