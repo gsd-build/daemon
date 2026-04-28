@@ -176,7 +176,7 @@ install_pi_extension() {
     # package selects its platform-specific binary via optionalDependencies,
     # which only resolves correctly when npm runs on the target machine).
     say "  installing pi extension dependencies (this may take a moment)..."
-    if ! ( cd "$new_dir" && npm ci --omit=dev --include=optional --no-audit --no-fund --silent ); then
+    if ! ( cd "$new_dir" && npm ci --ignore-scripts --omit=dev --include=optional --no-audit --no-fund --silent ); then
         rm -rf "$new_dir"
         err "failed to install pi extension dependencies"
     fi
