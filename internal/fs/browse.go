@@ -30,7 +30,14 @@ type BrowseDirPage struct {
 	NextCursor string
 }
 
-// BrowseDir lists entries in the given absolute path.
+type browseCandidate struct {
+	name  string
+	path  string
+	isDir bool
+}
+
+// BrowseDir lists the first default-sized page of entries in the given absolute
+// path. Callers that need additional pages should use BrowseDirPageAt.
 func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 	page, err := BrowseDirPageAt(path, scopeRoot, BrowseDirOptions{})
 	if err != nil {
@@ -58,29 +65,23 @@ func BrowseDirPageAt(path, scopeRoot string, opts BrowseDirOptions) (BrowseDirPa
 		return BrowseDirPage{}, fmt.Errorf("read dir: %w", err)
 	}
 
-	result := make([]protocol.BrowseEntry, 0, len(entries))
+	candidates := make([]browseCandidate, 0, len(entries))
 	for _, e := range entries {
 		childPath := filepath.Clean(filepath.Join(resolved, e.Name()))
 		if err := ensurePathAllowed(childPath, resolvedRoot); err != nil {
 			continue
 		}
-		info, err := os.Lstat(childPath)
-		if err != nil {
-			continue
-		}
-		result = append(result, protocol.BrowseEntry{
-			Name:        e.Name(),
-			Path:        childPath,
-			IsDirectory: e.IsDir(),
-			Size:        info.Size(),
-			ModifiedAt:  info.ModTime().UTC().Format(time.RFC3339Nano),
+		candidates = append(candidates, browseCandidate{
+			name:  e.Name(),
+			path:  childPath,
+			isDir: e.IsDir(),
 		})
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].IsDirectory != result[j].IsDirectory {
-			return result[i].IsDirectory
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].isDir != candidates[j].isDir {
+			return candidates[i].isDir
 		}
-		return result[i].Name < result[j].Name
+		return candidates[i].name < candidates[j].name
 	})
 
 	limit := normalizeBrowseDirLimit(opts.Limit)
@@ -88,16 +89,31 @@ func BrowseDirPageAt(path, scopeRoot string, opts BrowseDirOptions) (BrowseDirPa
 	if err != nil {
 		return BrowseDirPage{}, err
 	}
-	if start >= len(result) {
+	if start >= len(candidates) {
 		return BrowseDirPage{Entries: []protocol.BrowseEntry{}}, nil
 	}
 	end := start + limit
-	if end > len(result) {
-		end = len(result)
+	if end > len(candidates) {
+		end = len(candidates)
+	}
+
+	result := make([]protocol.BrowseEntry, 0, end-start)
+	for _, candidate := range candidates[start:end] {
+		info, err := os.Lstat(candidate.path)
+		if err != nil {
+			continue
+		}
+		result = append(result, protocol.BrowseEntry{
+			Name:        candidate.name,
+			Path:        candidate.path,
+			IsDirectory: candidate.isDir,
+			Size:        info.Size(),
+			ModifiedAt:  info.ModTime().UTC().Format(time.RFC3339Nano),
+		})
 	}
 	page := BrowseDirPage{
-		Entries: result[start:end],
-		HasMore: end < len(result),
+		Entries: result,
+		HasMore: end < len(candidates),
 	}
 	if page.HasMore {
 		page.NextCursor = strconv.Itoa(end)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -121,7 +122,7 @@ func TestBrowseDirPageAtPaginatesLargeResults(t *testing.T) {
 	if !page.HasMore {
 		t.Fatal("expected another page")
 	}
-	if page.NextCursor != "200" {
+	if page.NextCursor != strconv.Itoa(defaultBrowseDirLimit) {
 		t.Fatalf("next cursor = %q", page.NextCursor)
 	}
 	if page.Entries[0].Name != "file-000.txt" {
