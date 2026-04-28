@@ -11,6 +11,10 @@ const DefaultMaxBytes = 512 * 1024
 
 // ReadFile returns up to maxBytes of file content and whether it was truncated.
 func ReadFile(path, scopeRoot string, maxBytes int) (string, bool, error) {
+	return ReadFileWithAllowedPaths(path, scopeRoot, maxBytes, nil)
+}
+
+func ReadFileWithAllowedPaths(path, scopeRoot string, maxBytes int, exactAllowedPaths []string) (string, bool, error) {
 	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
 	if err != nil {
 		return "", false, err
@@ -23,7 +27,7 @@ func ReadFile(path, scopeRoot string, maxBytes int) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if err := ensurePathAllowed(resolved, resolvedRoot); err != nil {
+	if err := ensurePathAllowedOrExact(resolved, resolvedRoot, exactAllowedPaths); err != nil {
 		return "", false, err
 	}
 

@@ -227,6 +227,132 @@ func TestScopeRootForChannelUsesStoredRoot(t *testing.T) {
 	}
 }
 
+func TestHandleReadAllowsExactAgentTouchedFileOutsideScope(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	touchedPath := filepath.Join(outside, "SKILL.md")
+	if err := os.WriteFile(touchedPath, []byte("skill body"), 0o644); err != nil {
+		t.Fatalf("write touched file: %v", err)
+	}
+	siblingPath := filepath.Join(outside, "OTHER.md")
+	if err := os.WriteFile(siblingPath, []byte("other body"), 0o644); err != nil {
+		t.Fatalf("write sibling file: %v", err)
+	}
+
+	client := relayClientStub(false)
+	d := &Daemon{client: client}
+	d.channelRoots.Store("ch-files", root)
+	d.recordAgentTouchedFile("ch-files", root, touchedPath)
+
+	if err := d.handleRead(&protocol.ReadFile{
+		Type:      protocol.MsgTypeReadFile,
+		RequestID: "req-ok",
+		ChannelID: "ch-files",
+		Path:      touchedPath,
+	}); err != nil {
+		t.Fatalf("handleRead touched file: %v", err)
+	}
+	env, err := drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain touched result: %v", err)
+	}
+	result, ok := env.Payload.(*protocol.ReadFileResult)
+	if !ok {
+		t.Fatalf("payload = %T, want ReadFileResult", env.Payload)
+	}
+	if !result.OK || result.Content != "skill body" {
+		t.Fatalf("touched result = %#v, want successful read", result)
+	}
+
+	if err := d.handleRead(&protocol.ReadFile{
+		Type:      protocol.MsgTypeReadFile,
+		RequestID: "req-no",
+		ChannelID: "ch-files",
+		Path:      siblingPath,
+	}); err != nil {
+		t.Fatalf("handleRead sibling file: %v", err)
+	}
+	env, err = drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain sibling result: %v", err)
+	}
+	result, ok = env.Payload.(*protocol.ReadFileResult)
+	if !ok {
+		t.Fatalf("payload = %T, want ReadFileResult", env.Payload)
+	}
+	if result.OK {
+		t.Fatalf("sibling result = %#v, want outside-scope rejection", result)
+	}
+}
+
+func TestAgentTouchedFileStoreSweepRemovesStaleEntries(t *testing.T) {
+	store := &agentTouchedFileStore{}
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+
+	store.addAt("stale-channel", "/tmp/stale.md", now.Add(-2*time.Hour))
+	store.addAt("fresh-channel", "/tmp/fresh.md", now.Add(-10*time.Minute))
+
+	removed := store.sweep(now, time.Hour)
+
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if got := store.list("stale-channel"); len(got) != 0 {
+		t.Fatalf("stale-channel paths = %v, want empty", got)
+	}
+	if got := store.list("fresh-channel"); len(got) != 1 || got[0] != "/tmp/fresh.md" {
+		t.Fatalf("fresh-channel paths = %v", got)
+	}
+}
+
+func TestHandleTaskClearsAgentTouchedFilesWhenChannelRootChanges(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	outside := t.TempDir()
+	touchedPath := filepath.Join(outside, "SKILL.md")
+	if err := os.WriteFile(touchedPath, []byte("skill body"), 0o644); err != nil {
+		t.Fatalf("write touched file: %v", err)
+	}
+	actor, err := session.NewActor(session.Options{
+		SessionID: "sess-root-change",
+		CWD:       rootB,
+		Relay:     newLoopFakeRelay(),
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	d := &Daemon{
+		client: relayClientStub(false),
+		manager: &mockManager{
+			spawnFn: func(ctx context.Context, opts session.Options) (*session.Actor, error) {
+				return actor, nil
+			},
+		},
+	}
+	d.channelRoots.Store("ch-root-change", rootA)
+	d.recordAgentTouchedFile("ch-root-change", rootA, touchedPath)
+	if got := d.agentTouchedFiles.list("ch-root-change"); len(got) != 1 {
+		t.Fatalf("initial touched files = %v, want one", got)
+	}
+
+	err = d.handleTask(&protocol.Task{
+		TaskID:    "task-root-change",
+		SessionID: "sess-root-change",
+		ChannelID: "ch-root-change",
+		CWD:       rootB,
+		Prompt:    "hello",
+	})
+	if err != nil {
+		t.Fatalf("handleTask: %v", err)
+	}
+
+	if got := d.agentTouchedFiles.list("ch-root-change"); len(got) != 0 {
+		t.Fatalf("touched files after root change = %v, want empty", got)
+	}
+}
+
 func TestDefaultPiExtensionPathUsesEnvOverride(t *testing.T) {
 	t.Setenv("GSD_PI_EXTENSION_PATH", "/tmp/gsd-pi-extension/index.ts")
 

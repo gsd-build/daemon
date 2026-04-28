@@ -1084,7 +1084,15 @@ func TestCapturePiToolStart_DoesNotEmitOnFileToolStart(t *testing.T) {
 
 func TestCapturePiToolEnd_EmitsFileActivityForWrite(t *testing.T) {
 	relay := newFakeRelay()
-	a := &Actor{opts: Options{SessionID: "sess-fa", CWD: "/work/repo", Relay: relay}}
+	var recorded []string
+	a := &Actor{opts: Options{
+		SessionID: "sess-fa",
+		CWD:       "/work/repo",
+		Relay:     relay,
+		RecordTouchedFile: func(channelID, cwd, path string) {
+			recorded = append(recorded, channelID+"|"+cwd+"|"+path)
+		},
+	}}
 	coord := &structuredQuestionCoordinator{}
 
 	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
@@ -1135,9 +1143,49 @@ func TestCapturePiToolEnd_EmitsFileActivityForWrite(t *testing.T) {
 	if payload["toolCallId"] != "tc-write" {
 		t.Errorf("toolCallId = %v", payload["toolCallId"])
 	}
+	if len(recorded) != 1 || recorded[0] != "ch-fa|/work/repo|src/new.ts" {
+		t.Fatalf("recorded touched files = %v", recorded)
+	}
 	ts, _ := payload["ts"].(float64)
 	if int64(ts) < before {
 		t.Errorf("ts = %v, expected >= %d", payload["ts"], before)
+	}
+}
+
+func TestCapturePiToolEnd_RecordsSuccessfulReadWithoutFileActivity(t *testing.T) {
+	relay := newFakeRelay()
+	var recorded []string
+	a := &Actor{opts: Options{
+		SessionID: "sess-read",
+		CWD:       "/work/repo",
+		Relay:     relay,
+		RecordTouchedFile: func(channelID, cwd, path string) {
+			recorded = append(recorded, channelID+"|"+cwd+"|"+path)
+		},
+	}}
+	coord := &structuredQuestionCoordinator{}
+
+	a.capturePiToolStart(coord)(pi.ToolExecutionStart{
+		ToolCallID: "tc-read",
+		ToolName:   "read",
+		Args:       map[string]any{"path": "../skills/SKILL.md"},
+	})
+
+	a.capturePiToolEnd("ch-read")(pi.ToolExecutionEnd{
+		ToolCallID: "tc-read",
+		ToolName:   "read",
+		Result:     map[string]any{},
+		IsError:    false,
+	})
+
+	if got := collectFileActivityFrames(relay.GetFrames()); len(got) != 0 {
+		t.Fatalf("expected zero file_activity frames, got %d", len(got))
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("recorded touched files = %v, want exactly one", recorded)
+	}
+	if recorded[0] != "ch-read|/work/repo|../skills/SKILL.md" {
+		t.Fatalf("recorded touched file = %q", recorded[0])
 	}
 }
 
