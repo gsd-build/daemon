@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,6 +58,7 @@ type Daemon struct {
 	previewRegistry *preview.Registry
 	previewHTTP     *preview.HTTPHandler
 	previewWS       *preview.WebSocketBridge
+	previewWork     chan struct{}
 	runCtxMu        sync.RWMutex
 	runCtx          context.Context
 }
@@ -247,6 +249,7 @@ func NewWithBinaryPath(cfg *config.Config, version, binaryPath string) (*Daemon,
 		previewRegistry: previewRegistry,
 		previewHTTP:     &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
 		previewWS:       preview.NewWebSocketBridge(previewRegistry, client),
+		previewWork:     make(chan struct{}, preview.DefaultMaxActiveStreams),
 	}
 
 	return d, nil
@@ -441,12 +444,12 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 	case *protocol.PreviewClose:
 		return d.handlePreviewClose(msg)
 	case *protocol.PreviewHTTPRequest:
-		return d.previewHTTP.Handle(d.runtimeContext(), msg)
+		return d.handlePreviewHTTPRequest(msg)
 	case *protocol.PreviewStreamCancel:
 		d.previewRegistry.CancelStream(msg.StreamID)
 		return nil
 	case *protocol.PreviewWebSocketOpen:
-		return d.previewWS.Open(d.runtimeContext(), msg)
+		return d.handlePreviewWebSocketOpen(msg)
 	case *protocol.PreviewWebSocketData:
 		return d.previewWS.Data(d.runtimeContext(), msg)
 	case *protocol.PreviewWebSocketClose:
@@ -491,6 +494,72 @@ func (d *Daemon) handlePreviewOpen(msg *protocol.PreviewOpen) error {
 func (d *Daemon) handlePreviewClose(msg *protocol.PreviewClose) error {
 	d.previewRegistry.Close(msg.PreviewID)
 	return nil
+}
+
+func (d *Daemon) handlePreviewHTTPRequest(msg *protocol.PreviewHTTPRequest) error {
+	if !d.startPreviewWork(msg.StreamID, func(ctx context.Context) error {
+		return d.previewHTTP.Handle(ctx, msg)
+	}) {
+		return d.sendPreviewHTTPError(msg, http.StatusTooManyRequests)
+	}
+	return nil
+}
+
+func (d *Daemon) handlePreviewWebSocketOpen(msg *protocol.PreviewWebSocketOpen) error {
+	if !d.startPreviewWork(msg.StreamID, func(ctx context.Context) error {
+		return d.previewWS.Open(ctx, msg)
+	}) {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return d.client.Send(sendCtx, &protocol.PreviewWebSocketOpenResult{
+			Type:      protocol.MsgTypePreviewWebSocketOpenResult,
+			StreamID:  msg.StreamID,
+			PreviewID: msg.PreviewID,
+			OK:        false,
+			Message:   "preview stream limit exceeded",
+		})
+	}
+	return nil
+}
+
+func (d *Daemon) startPreviewWork(streamID string, fn func(context.Context) error) bool {
+	if d.previewWork == nil {
+		d.previewWork = make(chan struct{}, preview.DefaultMaxActiveStreams)
+	}
+	select {
+	case d.previewWork <- struct{}{}:
+	default:
+		return false
+	}
+	go func() {
+		defer func() { <-d.previewWork }()
+		if err := fn(d.runtimeContext()); err != nil {
+			slog.Warn("preview work failed", "streamId", streamID, "err", err)
+		}
+	}()
+	return true
+}
+
+func (d *Daemon) sendPreviewHTTPError(msg *protocol.PreviewHTTPRequest, statusCode int) error {
+	sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := d.client.Send(sendCtx, &protocol.PreviewHTTPResponseHead{
+		Type:       protocol.MsgTypePreviewHTTPResponseHead,
+		RequestID:  msg.RequestID,
+		StreamID:   msg.StreamID,
+		PreviewID:  msg.PreviewID,
+		StatusCode: statusCode,
+		Headers:    map[string][]string{"content-type": {"text/plain; charset=utf-8"}},
+	}); err != nil {
+		return err
+	}
+	return d.client.Send(sendCtx, &protocol.PreviewStreamChunk{
+		Type:       protocol.MsgTypePreviewStreamChunk,
+		StreamID:   msg.StreamID,
+		Sequence:   1,
+		BodyBase64: base64.StdEncoding.EncodeToString([]byte("preview stream limit exceeded\n")),
+		Final:      true,
+	})
 }
 
 func (d *Daemon) sendPreviewOpenResult(msg *protocol.PreviewOpen, ok bool, code string, message string) error {
@@ -571,14 +640,23 @@ func (d *Daemon) handleStop(msg *protocol.Stop) error {
 
 func (d *Daemon) handleTerminalOpen(msg *protocol.TerminalOpen) error {
 	return d.terminalManager.Open(context.Background(), terminal.OpenRequest{
-		RequestID:  msg.RequestID,
-		TerminalID: msg.TerminalID,
-		SessionID:  msg.SessionID,
-		ChannelID:  msg.ChannelID,
-		CWD:        msg.CWD,
-		Cols:       msg.Cols,
-		Rows:       msg.Rows,
+		RequestID:   msg.RequestID,
+		TerminalID:  msg.TerminalID,
+		SessionID:   msg.SessionID,
+		ChannelID:   msg.ChannelID,
+		CWD:         msg.CWD,
+		Cols:        msg.Cols,
+		Rows:        msg.Rows,
+		IdleTimeout: durationFromMillis(msg.IdleTimeoutMs),
+		MaxLifetime: durationFromMillis(msg.MaxLifetimeMs),
 	})
+}
+
+func durationFromMillis(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func (d *Daemon) handleTerminalInput(msg *protocol.TerminalInput) error {

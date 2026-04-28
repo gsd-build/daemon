@@ -16,6 +16,7 @@ type Limits struct {
 	ScrollbackBytes        int
 	IdleTimeout            time.Duration
 	MaxLifetime            time.Duration
+	MaxSessions            int
 	OutputChunkSize        int
 	OutputFlush            time.Duration
 	TerminationGracePeriod time.Duration
@@ -26,6 +27,7 @@ func DefaultLimits() Limits {
 		ScrollbackBytes:        256 * 1024,
 		IdleTimeout:            5 * time.Minute,
 		MaxLifetime:            4 * time.Hour,
+		MaxSessions:            8,
 		OutputChunkSize:        8 * 1024,
 		OutputFlush:            16 * time.Millisecond,
 		TerminationGracePeriod: 2 * time.Second,
@@ -33,13 +35,15 @@ func DefaultLimits() Limits {
 }
 
 type OpenRequest struct {
-	RequestID  string
-	TerminalID string
-	SessionID  string
-	ChannelID  string
-	CWD        string
-	Cols       int
-	Rows       int
+	RequestID   string
+	TerminalID  string
+	SessionID   string
+	ChannelID   string
+	CWD         string
+	Cols        int
+	Rows        int
+	IdleTimeout time.Duration
+	MaxLifetime time.Duration
 }
 
 type EventSender interface {
