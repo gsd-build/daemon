@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
+	daemonfs "github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/sockapi"
@@ -111,17 +112,19 @@ type pendingFileTool struct {
 }
 
 type taskContext struct {
-	TaskID         string
-	ChannelID      string
-	StartedAt      time.Time
-	OriginalPrompt string
-	Engine         string
-	Model          string
-	Effort         string
-	PermissionMode string
-	RequestID      string
-	Traceparent    string
-	ImageURLs      []string
+	TaskID          string
+	ChannelID       string
+	StartedAt       time.Time
+	OriginalPrompt  string
+	ExecutionPrompt string
+	Engine          string
+	Model           string
+	Effort          string
+	PermissionMode  string
+	RequestID       string
+	Traceparent     string
+	ImageURLs       []string
+	ContextRefs     []protocol.ContextRef
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -487,18 +490,22 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		a.taskMu.Unlock()
 	}()
 
+	contextBlock := daemonfs.BuildContextRefBlock(task.CWD, task.ContextRefs, daemonfs.DefaultContextRefLimits())
+	executionPrompt := contextBlock + task.Prompt
 	tc := &taskContext{
-		TaskID:         task.TaskID,
-		ChannelID:      task.ChannelID,
-		StartedAt:      time.Now(),
-		OriginalPrompt: task.Prompt,
-		Engine:         task.Engine,
-		Model:          task.Model,
-		Effort:         task.Effort,
-		PermissionMode: task.PermissionMode,
-		RequestID:      task.RequestID,
-		Traceparent:    task.Traceparent,
-		ImageURLs:      task.ImageURLs,
+		TaskID:          task.TaskID,
+		ChannelID:       task.ChannelID,
+		StartedAt:       time.Now(),
+		OriginalPrompt:  task.Prompt,
+		ExecutionPrompt: executionPrompt,
+		Engine:          task.Engine,
+		Model:           task.Model,
+		Effort:          task.Effort,
+		PermissionMode:  task.PermissionMode,
+		RequestID:       task.RequestID,
+		Traceparent:     task.Traceparent,
+		ImageURLs:       task.ImageURLs,
+		ContextRefs:     task.ContextRefs,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -526,7 +533,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	}
 	sendCancel()
 
-	err := a.runExecutor(taskCtx, tc, task.Prompt)
+	err := a.runExecutor(taskCtx, tc, tc.ExecutionPrompt)
 
 	// If the task context was cancelled (user hit ESC or timeout), send the
 	// appropriate message and loop back for the next task.
@@ -1141,7 +1148,7 @@ func (a *Actor) handleDenials(ctx context.Context, tc *taskContext, denials []st
 			if resp.Approved {
 				slog.Info("permission approved, resuming", "tool", denial.ToolName)
 				a.addAllowedTool(denial.ToolName)
-				return a.runExecutor(ctx, tc, tc.OriginalPrompt)
+				return a.runExecutor(ctx, tc, tc.ExecutionPrompt)
 			}
 			return a.handleDenyResponse(ctx, tc)
 		}
