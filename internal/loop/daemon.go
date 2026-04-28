@@ -45,23 +45,24 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg             *config.Config
-	version         string
-	manager         SessionManager
-	terminalManager *terminal.Manager
-	client          *relay.Client
-	startedAt       time.Time
-	channelRoots    sync.Map
-	uploader        *upload.Client
-	piBinaryPath    string
-	piExtensionPath string
-	forcePi         bool
-	previewRegistry *preview.Registry
-	previewHTTP     *preview.HTTPHandler
-	previewWS       *preview.WebSocketBridge
-	previewWork     chan struct{}
-	runCtxMu        sync.RWMutex
-	runCtx          context.Context
+	cfg                  *config.Config
+	version              string
+	manager              SessionManager
+	terminalManager      *terminal.Manager
+	client               *relay.Client
+	startedAt            time.Time
+	channelRoots         sync.Map
+	uploader             *upload.Client
+	piBinaryPath         string
+	piExtensionPath      string
+	forcePi              bool
+	previewRegistry      *preview.Registry
+	previewHTTP          *preview.HTTPHandler
+	previewWS            *preview.WebSocketBridge
+	previewWork          chan struct{}
+	generateSessionTitle sessionTitleGenerator
+	runCtxMu             sync.RWMutex
+	runCtx               context.Context
 }
 
 type terminalRelaySender struct {
@@ -239,20 +240,21 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	previewRegistry := preview.NewRegistry()
 
 	d := &Daemon{
-		cfg:             cfg,
-		version:         version,
-		manager:         manager,
-		terminalManager: terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
-		client:          client,
-		startedAt:       time.Now(),
-		uploader:        uploader,
-		piBinaryPath:    piBinaryPath,
-		piExtensionPath: piExtensionPath,
-		forcePi:         forcePi,
-		previewRegistry: previewRegistry,
-		previewHTTP:     &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
-		previewWS:       preview.NewWebSocketBridge(previewRegistry, client),
-		previewWork:     make(chan struct{}, preview.DefaultMaxActiveStreams),
+		cfg:                  cfg,
+		version:              version,
+		manager:              manager,
+		terminalManager:      terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
+		client:               client,
+		startedAt:            time.Now(),
+		uploader:             uploader,
+		piBinaryPath:         piBinaryPath,
+		piExtensionPath:      piExtensionPath,
+		forcePi:              forcePi,
+		previewRegistry:      previewRegistry,
+		previewHTTP:          &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
+		previewWS:            preview.NewWebSocketBridge(previewRegistry, client),
+		previewWork:          make(chan struct{}, preview.DefaultMaxActiveStreams),
+		generateSessionTitle: defaultSessionTitleGenerator,
 	}
 
 	return d, nil
@@ -444,6 +446,8 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleCompactRequest(msg)
 	case *protocol.ContextStatsRequest:
 		return d.handleContextStatsRequest(msg)
+	case *protocol.SessionTitleRequest:
+		return d.handleSessionTitleRequest(msg)
 	case *protocol.PreviewOpen:
 		return d.handlePreviewOpen(msg)
 	case *protocol.PreviewClose:

@@ -116,6 +116,7 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 			PreviewWebSocketProtocols: true,
 			LocalServerDetection:      true,
 			Skills:                    true,
+			SessionTitles:             true,
 		},
 	}
 	buf, err := json.Marshal(hello)
