@@ -97,6 +97,7 @@ type Actor struct {
 	// pendingFileTool. Populated in capturePiToolStart, consumed in
 	// capturePiToolEnd.
 	pendingFileToolStarts sync.Map
+	localServerDetections sync.Map
 
 	runPiControl func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error)
 	now          func() time.Time
@@ -954,6 +955,7 @@ func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run 
 	var resultRaw json.RawMessage
 	const maxConsecutiveFailures = 3
 	consecutiveFailures := 0
+	localServers := newLocalServerDetector()
 
 	err := run(ctx, func(e claude.Event) error {
 		next := atomic.AddInt64(&a.seq, 1)
@@ -995,6 +997,7 @@ func (a *Actor) forwardExecutorEvents(ctx context.Context, tc *taskContext, run 
 			slog.Debug("checking assistant event for image reads", "session", a.opts.SessionID)
 			a.maybeUploadImages(ctx, e.Raw, tc.ChannelID, next)
 		}
+		a.maybeReportLocalServers(ctx, tc, localServers, e.Raw)
 
 		return nil
 	})
