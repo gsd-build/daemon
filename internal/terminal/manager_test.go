@@ -164,3 +164,63 @@ func TestManagerCloseAllStopsStubbornShell(t *testing.T) {
 		t.Fatalf("exit reasons = %v, want %q", events.exitReasons(), ReasonDaemonShutdown)
 	}
 }
+
+func TestManagerEnforcesMaxSessions(t *testing.T) {
+	events := &captureEvents{}
+	m := NewManager(events, Limits{
+		ScrollbackBytes: 1024,
+		MaxSessions:     1,
+		OutputChunkSize: 1024,
+	})
+	defer m.CloseAll(context.Background(), ReasonDaemonShutdown)
+
+	req := OpenRequest{
+		RequestID:  "open-1",
+		TerminalID: "term-1",
+		SessionID:  "sess-1",
+		ChannelID:  "chan-1",
+		CWD:        t.TempDir(),
+		Cols:       80,
+		Rows:       24,
+	}
+	if err := m.Open(context.Background(), req); err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	req.RequestID = "open-2"
+	req.TerminalID = "term-2"
+	if err := m.Open(context.Background(), req); err == nil {
+		t.Fatal("second Open succeeded, want max session error")
+	}
+}
+
+func TestManagerClosesIdleTerminal(t *testing.T) {
+	events := &captureEvents{}
+	m := NewManager(events, Limits{
+		ScrollbackBytes:        1024,
+		IdleTimeout:            50 * time.Millisecond,
+		MaxLifetime:            time.Second,
+		OutputChunkSize:        1024,
+		TerminationGracePeriod: 50 * time.Millisecond,
+	})
+
+	req := OpenRequest{
+		RequestID:  "open-1",
+		TerminalID: "term-1",
+		SessionID:  "sess-1",
+		ChannelID:  "chan-1",
+		CWD:        t.TempDir(),
+		Cols:       80,
+		Rows:       24,
+	}
+	if err := m.Open(context.Background(), req); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	deadline := time.After(2 * time.Second)
+	for !events.hasExitReason(ReasonDisconnectTimeout) {
+		select {
+		case <-deadline:
+			t.Fatalf("exit reasons = %v, want %q", events.exitReasons(), ReasonDisconnectTimeout)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}

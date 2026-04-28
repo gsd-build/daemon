@@ -70,6 +70,9 @@ func (r *Registry) RegisterStream(previewID, streamID string) (context.Context, 
 	if !ok {
 		return nil, nil, false
 	}
+	if len(p.streams) >= DefaultMaxActiveStreams {
+		return nil, nil, false
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.streams[streamID] = cancel
 	return ctx, cancel, true

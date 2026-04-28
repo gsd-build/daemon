@@ -35,6 +35,9 @@ type Session struct {
 	closeOnce   sync.Once
 	reasonMu    sync.Mutex
 	closeReason string
+	timerMu     sync.Mutex
+	idleTimer   *time.Timer
+	maxTimer    *time.Timer
 }
 
 func NewManager(events EventSender, limits Limits) *Manager {
@@ -52,6 +55,18 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) error {
 		_ = m.events.SendTerminalError(req.RequestID, req.TerminalID, req.SessionID, req.ChannelID, err.Error())
 		return err
 	}
+	m.mu.Lock()
+	if existing := m.sessions[req.TerminalID]; existing != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("terminal already exists")
+	}
+	if m.limits.MaxSessions > 0 && len(m.sessions) >= m.limits.MaxSessions {
+		m.mu.Unlock()
+		_ = m.events.SendTerminalError(req.RequestID, req.TerminalID, req.SessionID, req.ChannelID, "Terminal limit reached")
+		return fmt.Errorf("terminal limit reached")
+	}
+	m.mu.Unlock()
+
 	shell := ResolveShell()
 	cmd := exec.CommandContext(ctx, shell)
 	cmd.Dir = cwd
@@ -77,11 +92,19 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) error {
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("terminal already exists")
 	}
+	if m.limits.MaxSessions > 0 && len(m.sessions) >= m.limits.MaxSessions {
+		m.mu.Unlock()
+		_ = ptmx.Close()
+		_ = cmd.Process.Kill()
+		_ = m.events.SendTerminalError(req.RequestID, req.TerminalID, req.SessionID, req.ChannelID, "Terminal limit reached")
+		return fmt.Errorf("terminal limit reached")
+	}
 	m.sessions[req.TerminalID] = s
 	m.mu.Unlock()
 	_ = m.events.SendTerminalOpened(req, shell, cwd, time.Now().UTC())
 	go m.readLoop(s)
 	go m.waitLoop(s)
+	m.startTimers(s)
 	return nil
 }
 
@@ -90,6 +113,7 @@ func (m *Manager) Input(terminalID string, data []byte) error {
 	if !ok {
 		return fmt.Errorf("terminal not found")
 	}
+	m.touch(s)
 	_, err := s.ptmx.Write(data)
 	return err
 }
@@ -141,14 +165,19 @@ func (m *Manager) CloseAll(ctx context.Context, reason string) {
 func (m *Manager) closeSession(s *Session, reason string) {
 	s.closeOnce.Do(func() {
 		s.setCloseReason(reason)
+		m.stopTimers(s)
 		_ = s.ptmx.Close()
 		if s.cmd.Process != nil {
-			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM)
+			if err := syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM); err != nil {
+				_ = s.cmd.Process.Signal(syscall.SIGTERM)
+			}
 			time.AfterFunc(m.limits.TerminationGracePeriod, func() {
 				select {
 				case <-s.done:
 				default:
-					_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+					if err := syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+						_ = s.cmd.Process.Kill()
+					}
 				}
 			})
 		}
@@ -177,6 +206,7 @@ func (m *Manager) readLoop(s *Session) {
 func (m *Manager) waitLoop(s *Session) {
 	err := s.cmd.Wait()
 	_ = s.ptmx.Close()
+	m.stopTimers(s)
 	m.mu.Lock()
 	delete(m.sessions, s.req.TerminalID)
 	m.mu.Unlock()
@@ -217,6 +247,53 @@ func Encode(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
+func (m *Manager) startTimers(s *Session) {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+
+	idleTimeout := s.req.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = m.limits.IdleTimeout
+	}
+	if idleTimeout > 0 {
+		s.idleTimer = time.AfterFunc(idleTimeout, func() {
+			m.closeSession(s, ReasonDisconnectTimeout)
+		})
+	}
+	maxLifetime := s.req.MaxLifetime
+	if maxLifetime <= 0 {
+		maxLifetime = m.limits.MaxLifetime
+	}
+	if maxLifetime > 0 {
+		s.maxTimer = time.AfterFunc(maxLifetime, func() {
+			m.closeSession(s, ReasonMaxLifetime)
+		})
+	}
+}
+
+func (m *Manager) touch(s *Session) {
+	idleTimeout := s.req.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = m.limits.IdleTimeout
+	}
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	if s.idleTimer != nil && idleTimeout > 0 {
+		s.idleTimer.Reset(idleTimeout)
+	}
+}
+
+func (m *Manager) stopTimers(s *Session) {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+	}
+	if s.maxTimer != nil {
+		s.maxTimer.Stop()
+	}
+}
+
 func (s *Session) setCloseReason(reason string) {
 	s.reasonMu.Lock()
 	defer s.reasonMu.Unlock()
@@ -242,6 +319,9 @@ func normalizeLimits(limits Limits) Limits {
 	}
 	if limits.MaxLifetime == 0 {
 		limits.MaxLifetime = defaults.MaxLifetime
+	}
+	if limits.MaxSessions == 0 {
+		limits.MaxSessions = defaults.MaxSessions
 	}
 	if limits.OutputChunkSize == 0 {
 		limits.OutputChunkSize = defaults.OutputChunkSize

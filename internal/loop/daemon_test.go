@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -139,6 +140,71 @@ func TestStatusUsesEffectiveConfiguredConcurrency(t *testing.T) {
 	if got := d.Status().MaxConcurrentTasks; got != 2 {
 		t.Fatalf("expected configured max concurrency 2, got %d", got)
 	}
+}
+
+func TestPreviewHTTPRequestRunsOffRelayReadLoop(t *testing.T) {
+	started := make(chan struct{})
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer target.Close()
+
+	d, _ := newTestDaemonWithPreview(t)
+	port := mustURLPort(t, target.URL)
+	if err := d.previewRegistry.Open(context.Background(), preview.OpenRequest{
+		PreviewID: "preview_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		MachineID: "machine_1",
+		Target:    preview.Target{Host: "127.0.0.1", Port: port},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("open preview: %v", err)
+	}
+	d.previewHTTP.Client = target.Client()
+
+	start := time.Now()
+	if err := d.handleMessage(&protocol.Envelope{
+		Type: protocol.MsgTypePreviewHTTPRequest,
+		Payload: &protocol.PreviewHTTPRequest{
+			Type:      protocol.MsgTypePreviewHTTPRequest,
+			RequestID: "req_1",
+			StreamID:  "stream_1",
+			PreviewID: "preview_1",
+			Method:    http.MethodGet,
+			Path:      "/",
+		},
+	}); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("handleMessage blocked for %s", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("target request did not start")
+	}
+	if err := d.handleMessage(&protocol.Envelope{
+		Type:    protocol.MsgTypePreviewStreamCancel,
+		Payload: &protocol.PreviewStreamCancel{Type: protocol.MsgTypePreviewStreamCancel, StreamID: "stream_1"},
+	}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+}
+
+func mustURLPort(t *testing.T, rawURL string) int {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	return port
 }
 
 func TestScopeRootForChannelUsesHomeForMissingChannel(t *testing.T) {

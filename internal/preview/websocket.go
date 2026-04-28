@@ -24,6 +24,7 @@ type wsStream struct {
 	previewID string
 	conn      *websocket.Conn
 	cancel    context.CancelFunc
+	writeCh   chan *protocol.PreviewWebSocketData
 }
 
 func NewWebSocketBridge(registry *Registry, sender Sender) *WebSocketBridge {
@@ -71,9 +72,11 @@ func (b *WebSocketBridge) Open(ctx context.Context, msg *protocol.PreviewWebSock
 		b.Registry.UnregisterStream(msg.PreviewID, msg.StreamID)
 		return err
 	}
+	conn.SetReadLimit(DefaultMaxFrameBytes)
 
 	b.mu.Lock()
-	b.streams[msg.StreamID] = &wsStream{previewID: msg.PreviewID, conn: conn, cancel: closeStream}
+	stream := &wsStream{previewID: msg.PreviewID, conn: conn, cancel: closeStream, writeCh: make(chan *protocol.PreviewWebSocketData, 64)}
+	b.streams[msg.StreamID] = stream
 	b.mu.Unlock()
 
 	if err := b.Sender.Send(ctx, &protocol.PreviewWebSocketOpenResult{
@@ -88,6 +91,7 @@ func (b *WebSocketBridge) Open(ctx context.Context, msg *protocol.PreviewWebSock
 	}
 
 	go b.readLoop(mergedCtx, msg.StreamID, msg.PreviewID, conn)
+	go b.writeLoop(mergedCtx, msg.StreamID, stream)
 	return nil
 }
 
@@ -96,9 +100,42 @@ func (b *WebSocketBridge) Data(ctx context.Context, msg *protocol.PreviewWebSock
 	if !ok {
 		return fmt.Errorf("websocket stream not active")
 	}
+	select {
+	case stream.writeCh <- msg:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("websocket stream write queue full")
+	}
+}
+
+func (b *WebSocketBridge) writeLoop(ctx context.Context, streamID string, stream *wsStream) {
+	for {
+		select {
+		case msg := <-stream.writeCh:
+			if err := b.writeData(ctx, stream, msg); err != nil {
+				_ = b.Close(context.Background(), &protocol.PreviewWebSocketClose{
+					Type:     protocol.MsgTypePreviewWebSocketClose,
+					StreamID: streamID,
+					Code:     int(websocket.StatusPolicyViolation),
+					Reason:   "write_failed",
+				})
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (b *WebSocketBridge) writeData(ctx context.Context, stream *wsStream, msg *protocol.PreviewWebSocketData) error {
 	payload, err := base64.StdEncoding.DecodeString(msg.BodyBase64)
 	if err != nil {
 		return fmt.Errorf("decode websocket payload: %w", err)
+	}
+	if len(payload) > DefaultMaxFrameBytes {
+		return fmt.Errorf("websocket payload exceeds frame limit")
 	}
 	messageType := websocket.MessageText
 	if msg.IsBinary {
