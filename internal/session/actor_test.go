@@ -146,7 +146,7 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 		t.Fatalf("new actor: %v", err)
 	}
 
-	err = actor.runPiExecutor(context.Background(), &taskContext{
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
 		TaskID:    "task-persist-pi",
 		ChannelID: "ch-persist-pi",
 		Engine:    "pi",

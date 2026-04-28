@@ -92,7 +92,8 @@ func TestClientConnectHandshake(t *testing.T) {
 	}
 	if state.hellos[0].Capabilities == nil ||
 		!state.hellos[0].Capabilities.Stop ||
-		!state.hellos[0].Capabilities.Terminal {
+		!state.hellos[0].Capabilities.Terminal ||
+		!state.hellos[0].Capabilities.LocalServerDetection {
 		t.Fatalf("hello capabilities missing: %+v", state.hellos[0].Capabilities)
 	}
 }
