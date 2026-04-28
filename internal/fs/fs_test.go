@@ -102,7 +102,7 @@ func TestBrowseDirDoesNotResolveChildSymlinks(t *testing.T) {
 	}
 }
 
-func TestBrowseDirCapsLargeResults(t *testing.T) {
+func TestBrowseDirRejectsOversizedResults(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < browseDirEntryLimit+25; i++ {
 		name := filepath.Join(dir, fmt.Sprintf("file-%03d.txt", i))
@@ -111,18 +111,12 @@ func TestBrowseDirCapsLargeResults(t *testing.T) {
 		}
 	}
 
-	entries, err := BrowseDir(dir, dir)
-	if err != nil {
-		t.Fatalf("browse: %v", err)
+	_, err := BrowseDir(dir, dir)
+	if err == nil {
+		t.Fatal("expected oversized browse error")
 	}
-	if len(entries) != browseDirEntryLimit {
-		t.Fatalf("expected %d entries, got %d", browseDirEntryLimit, len(entries))
-	}
-	if entries[0].Name != "file-000.txt" {
-		t.Fatalf("first entry = %q", entries[0].Name)
-	}
-	if entries[len(entries)-1].Name != "file-199.txt" {
-		t.Fatalf("last entry = %q", entries[len(entries)-1].Name)
+	if err.Error() != "directory contains 225 entries; paginated browsing is required" {
+		t.Fatalf("error = %q", err.Error())
 	}
 }
 

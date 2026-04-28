@@ -59,7 +59,7 @@ func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 		return result[i].Name < result[j].Name
 	})
 	if len(result) > browseDirEntryLimit {
-		result = result[:browseDirEntryLimit]
+		return nil, fmt.Errorf("directory contains %d entries; paginated browsing is required", len(result))
 	}
 	return result, nil
 }
