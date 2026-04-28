@@ -141,6 +141,27 @@ func TestStatusUsesEffectiveConfiguredConcurrency(t *testing.T) {
 	}
 }
 
+func TestScopeRootForChannelUsesHomeForMissingChannel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	d := &Daemon{}
+
+	if got := d.scopeRootForChannel("browser-channel"); got != home {
+		t.Fatalf("scopeRootForChannel missing channel = %q, want %q", got, home)
+	}
+}
+
+func TestScopeRootForChannelUsesStoredRoot(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{}
+	d.channelRoots.Store("browser-channel", root)
+
+	if got := d.scopeRootForChannel("browser-channel"); got != root {
+		t.Fatalf("scopeRootForChannel stored channel = %q, want %q", got, root)
+	}
+}
+
 func TestDefaultPiExtensionPathUsesEnvOverride(t *testing.T) {
 	t.Setenv("GSD_PI_EXTENSION_PATH", "/tmp/gsd-pi-extension/index.ts")
 

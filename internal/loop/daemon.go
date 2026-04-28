@@ -699,13 +699,28 @@ func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
 
 func (d *Daemon) scopeRootForChannel(channelID string) string {
 	if channelID == "" {
-		return ""
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		return home
 	}
 	root, ok := d.channelRoots.Load(channelID)
 	if !ok {
-		return ""
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		return home
 	}
 	rootStr, _ := root.(string)
+	if rootStr == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		return home
+	}
 	return rootStr
 }
 
