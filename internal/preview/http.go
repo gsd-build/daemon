@@ -62,22 +62,11 @@ func (h *HTTPHandler) Handle(ctx context.Context, msg *protocol.PreviewHTTPReque
 		}
 	}()
 
-	localURL := "http://" + preview.Target.Addr() + msg.Path
-	req, err := http.NewRequestWithContext(reqCtx, msg.Method, localURL, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	copyRequestHeaders(req.Header, msg.Headers)
-	if host := firstHeader(msg.Headers, "host"); host != "" {
-		req.Host = host
-	}
-	req.Header.Set("X-Gsd-Preview-Id", msg.PreviewID)
-
 	client := h.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
-	resp, err := client.Do(req)
+	resp, err := h.doTargetRequest(reqCtx, client, preview.Target, msg)
 	if err != nil {
 		return fmt.Errorf("target request: %w", err)
 	}
@@ -133,6 +122,29 @@ func (h *HTTPHandler) Handle(ctx context.Context, msg *protocol.PreviewHTTPReque
 	}
 }
 
+func (h *HTTPHandler) doTargetRequest(ctx context.Context, client *http.Client, target Target, msg *protocol.PreviewHTTPRequest) (*http.Response, error) {
+	var lastErr error
+	for _, addr := range target.Addrs() {
+		localURL := "http://" + addr + msg.Path
+		req, err := http.NewRequestWithContext(ctx, msg.Method, localURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		copyRequestHeaders(req.Header, msg.Headers)
+		applyLocalTargetHeaders(req, msg.Headers, msg.PreviewID, addr)
+
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
 func copyRequestHeaders(dst http.Header, src map[string][]string) {
 	blocked := blockedHeaderNames(src)
 	for key, values := range src {
@@ -150,6 +162,7 @@ func blockedHeaderNames(headers map[string][]string) map[string]struct{} {
 	for key := range hopByHopHeaders {
 		blocked[key] = struct{}{}
 	}
+	blocked["host"] = struct{}{}
 	for key, values := range headers {
 		if !strings.EqualFold(key, "connection") {
 			continue
@@ -174,4 +187,12 @@ func firstHeader(headers map[string][]string, name string) string {
 		}
 	}
 	return ""
+}
+
+func applyLocalTargetHeaders(req *http.Request, source map[string][]string, previewID string, targetAuthority string) {
+	req.Host = targetAuthority
+	if previewHost := firstHeader(source, "host"); previewHost != "" {
+		req.Header.Set("X-Forwarded-Host", previewHost)
+	}
+	req.Header.Set("X-Gsd-Preview-Id", previewID)
 }

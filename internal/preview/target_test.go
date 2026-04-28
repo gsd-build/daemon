@@ -4,21 +4,22 @@ import "testing"
 
 func TestNormalizeTargetAcceptsLoopback(t *testing.T) {
 	cases := []struct {
-		host string
-		port int
+		host     string
+		port     int
+		wantHost string
 	}{
-		{"localhost", 3000},
-		{"127.0.0.1", 5173},
-		{"::1", 8080},
-		{"[::1]", 8080},
+		{"localhost", 3000, "localhost"},
+		{"127.0.0.1", 5173, "127.0.0.1"},
+		{"::1", 8080, "::1"},
+		{"[::1]", 8080, "::1"},
 	}
 	for _, tc := range cases {
 		target, err := NormalizeTarget(tc.host, tc.port)
 		if err != nil {
 			t.Fatalf("NormalizeTarget(%q,%d): %v", tc.host, tc.port, err)
 		}
-		if target.Host != "127.0.0.1" {
-			t.Fatalf("host = %q, want 127.0.0.1", target.Host)
+		if target.Host != tc.wantHost {
+			t.Fatalf("host = %q, want %q", target.Host, tc.wantHost)
 		}
 		if target.Port != tc.port {
 			t.Fatalf("port = %d, want %d", target.Port, tc.port)

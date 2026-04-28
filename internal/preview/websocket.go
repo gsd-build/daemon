@@ -58,15 +58,7 @@ func (b *WebSocketBridge) Open(ctx context.Context, msg *protocol.PreviewWebSock
 
 	header := http.Header{}
 	copyRequestHeaders(header, msg.Headers)
-	localURL := "ws://" + preview.Target.Addr() + msg.Path
-	conn, resp, err := websocket.Dial(mergedCtx, localURL, &websocket.DialOptions{
-		HTTPHeader:   header,
-		Host:         header.Get("Host"),
-		Subprotocols: msg.Protocols,
-	})
-	if resp != nil && resp.Body != nil {
-		_ = resp.Body.Close()
-	}
+	conn, err := b.openTargetWebSocket(mergedCtx, preview.Target, msg, header)
 	if err != nil {
 		closeStream()
 		b.Registry.UnregisterStream(msg.PreviewID, msg.StreamID)
@@ -93,6 +85,33 @@ func (b *WebSocketBridge) Open(ctx context.Context, msg *protocol.PreviewWebSock
 	go b.readLoop(mergedCtx, msg.StreamID, msg.PreviewID, conn)
 	go b.writeLoop(mergedCtx, msg.StreamID, stream)
 	return nil
+}
+
+func (b *WebSocketBridge) openTargetWebSocket(ctx context.Context, target Target, msg *protocol.PreviewWebSocketOpen, baseHeader http.Header) (*websocket.Conn, error) {
+	var lastErr error
+	for _, addr := range target.Addrs() {
+		header := baseHeader.Clone()
+		if previewHost := firstHeader(msg.Headers, "host"); previewHost != "" {
+			header.Set("X-Forwarded-Host", previewHost)
+		}
+		localURL := "ws://" + addr + msg.Path
+		conn, resp, err := websocket.Dial(ctx, localURL, &websocket.DialOptions{
+			HTTPHeader:   header,
+			Host:         addr,
+			Subprotocols: msg.Protocols,
+		})
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if err == nil {
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func (b *WebSocketBridge) Data(ctx context.Context, msg *protocol.PreviewWebSocketData) error {
