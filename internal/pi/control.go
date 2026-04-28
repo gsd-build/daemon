@@ -321,6 +321,9 @@ func (frame rawControlFrame) responseContextUsage(fallbackContextWindow int64) *
 	if usage := frame.Data.ContextUsage.toContextUsage(); usage != nil {
 		return usage.withFallbackWindow(fallbackContextWindow)
 	}
+	if frame.Command == string(ControlCommandGetSessionStats) {
+		return nil
+	}
 	if usage := frame.Data.Tokens.toContextUsage(fallbackContextWindow); usage != nil {
 		return usage
 	}

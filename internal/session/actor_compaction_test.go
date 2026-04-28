@@ -60,6 +60,52 @@ func TestActorHandlesContextStatsRequest(t *testing.T) {
 	}
 }
 
+func TestActorForwardsNullContextStats(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	relay := newFakeRelay()
+	actor := &Actor{
+		opts: Options{
+			SessionID: "session_123",
+			CWD:       t.TempDir(),
+			Relay:     relay,
+		},
+	}
+	actor.now = func() time.Time { return now }
+	actor.runPiControl = func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error) {
+		if command.Type != pi.ControlCommandGetSessionStats {
+			t.Fatalf("command type = %q", command.Type)
+		}
+		return pi.ControlResult{
+			OK: true,
+			ContextUsage: &pi.ContextUsage{
+				ContextWindow: 1000000,
+			},
+		}, nil
+	}
+
+	actor.handleContextStatsRequest(context.Background(), &protocol.ContextStatsRequest{
+		Type:      protocol.MsgTypeContextStatsRequest,
+		SessionID: "session_123",
+		ChannelID: "channel_123",
+		RequestID: "stats_123",
+	})
+
+	frames := relay.GetFrames()
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d", len(frames))
+	}
+	message := frames[0].(*protocol.ContextStats)
+	if message.Tokens != nil {
+		t.Fatalf("tokens = %+v", message.Tokens)
+	}
+	if message.Percent != nil {
+		t.Fatalf("percent = %+v", message.Percent)
+	}
+	if message.ContextWindow != 1000000 {
+		t.Fatalf("context window = %d", message.ContextWindow)
+	}
+}
+
 func TestActorHandlesCompactRequestLifecycle(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	relay := newFakeRelay()
