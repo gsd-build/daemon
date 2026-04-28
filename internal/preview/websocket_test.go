@@ -48,6 +48,55 @@ func TestWebSocketOpenPassesSubprotocol(t *testing.T) {
 	}
 }
 
+func TestWebSocketOpenPreservesPreviewHost(t *testing.T) {
+	type seenHeaders struct {
+		host          string
+		forwardedHost string
+	}
+	seen := make(chan seenHeaders, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- seenHeaders{
+			host:          r.Host,
+			forwardedHost: r.Header.Get("X-Forwarded-Host"),
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer target.Close()
+
+	registry := NewRegistry()
+	mustOpenPreview(t, registry, mustPort(t, target.URL))
+	bridge := NewWebSocketBridge(registry, &fakeSender{})
+	err := bridge.Open(context.Background(), &protocol.PreviewWebSocketOpen{
+		Type:      protocol.MsgTypePreviewWebSocketOpen,
+		StreamID:  "ws_1",
+		PreviewID: "preview_1",
+		Path:      "/_next/webpack-hmr",
+		Headers: map[string][]string{
+			"Host":             {"preview_1.preview.gsd.build"},
+			"X-Forwarded-Host": {"preview_1.preview.gsd.build"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	select {
+	case got := <-seen:
+		if got.host != "preview_1.preview.gsd.build" {
+			t.Fatalf("Host = %q, want preview host", got.host)
+		}
+		if got.forwardedHost != "preview_1.preview.gsd.build" {
+			t.Fatalf("X-Forwarded-Host = %q, want preview host", got.forwardedHost)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("target did not receive websocket open")
+	}
+}
+
 func TestWebSocketCloseClosesLocalTarget(t *testing.T) {
 	closed := make(chan struct{})
 	target := newPreviewEchoWebSocketServer(t, closed)
