@@ -90,8 +90,23 @@ type Actor struct {
 	// pidDir is the directory for PID files. Empty disables PID tracking.
 	pidDir string
 
+	// pendingFileToolStarts tracks pi write/edit tool_execution_start events
+	// awaiting their matching tool_execution_end. Keyed by toolCallID, value is
+	// pendingFileTool. Populated in capturePiToolStart, consumed in
+	// capturePiToolEnd.
+	pendingFileToolStarts sync.Map
+
 	runPiControl func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error)
 	now          func() time.Time
+}
+
+// pendingFileTool records a pi write/edit start event awaiting its matching
+// tool_execution_end so capturePiToolEnd can emit a file_activity stream event
+// with the path argument.
+type pendingFileTool struct {
+	toolName  string
+	args      map[string]any
+	startedAt time.Time
 }
 
 type taskContext struct {
@@ -396,15 +411,30 @@ func compactStatusFromPiEvent(request *protocol.CompactRequest, event pi.Control
 	}
 }
 
+// pendingFileToolSweepInterval is how often the actor scans pendingFileToolStarts
+// for stale entries. pendingFileToolMaxAge is the TTL beyond which an unmatched
+// start event is dropped. They are independent dials that happen to share a
+// value: pi tool executions are sub-second, so 60 seconds is a generous safety
+// margin against missing-end events (pi crash, abandoned tool call), not a
+// real timeout for any normal write/edit.
+const (
+	pendingFileToolSweepInterval = 60 * time.Second
+	pendingFileToolMaxAge        = 60 * time.Second
+)
+
 // Run is the actor's main loop. It waits for tasks, spawns executors, and
 // handles permission flows. Blocks until ctx is canceled or Stop is called.
 func (a *Actor) Run(ctx context.Context) error {
+	sweepTicker := time.NewTicker(pendingFileToolSweepInterval)
+	defer sweepTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-a.stopCh:
 			return nil
+		case <-sweepTicker.C:
+			a.sweepStalePendingFileTools(pendingFileToolMaxAge)
 		case task := <-a.taskCh:
 			if err := a.executeTask(ctx, task); err != nil {
 				slog.Error("task failed", "taskId", task.TaskID, "sessionId", a.opts.SessionID, "err", err)
@@ -625,6 +655,7 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 	coordinator := &structuredQuestionCoordinator{}
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
 	exec.OnToolExecutionStart = a.capturePiToolStart(coordinator)
+	exec.OnToolExecutionEnd = a.capturePiToolEnd(tc.ChannelID)
 
 	resultRaw, err := a.forwardExecutorEvents(ctx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
 		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
@@ -638,6 +669,16 @@ func (a *Actor) runPiExecutor(ctx context.Context, tc *taskContext, prompt strin
 
 func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {
 	return func(event pi.ToolExecutionStart) {
+		// Remember start args for write/edit so capturePiToolEnd can emit a
+		// file_activity stream event with the path argument on completion.
+		if event.ToolName == "write" || event.ToolName == "edit" {
+			a.pendingFileToolStarts.Store(event.ToolCallID, pendingFileTool{
+				toolName:  event.ToolName,
+				args:      event.Args,
+				startedAt: time.Now(),
+			})
+		}
+
 		if event.ToolName != "ask_user_questions" {
 			return
 		}
@@ -648,6 +689,81 @@ func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) f
 		}
 		coordinator.put(round)
 	}
+}
+
+// capturePiToolEnd returns a callback that emits a file_activity Stream event
+// when pi successfully writes or edits a file. Errored invocations and other
+// tool names are ignored. The pending start entry is removed once consumed.
+func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
+	return func(event pi.ToolExecutionEnd) {
+		if event.IsError {
+			return
+		}
+		if event.ToolName != "write" && event.ToolName != "edit" {
+			return
+		}
+		v, ok := a.pendingFileToolStarts.LoadAndDelete(event.ToolCallID)
+		if !ok {
+			return
+		}
+		started, ok := v.(pendingFileTool)
+		if !ok {
+			return
+		}
+
+		path, _ := started.args["path"].(string)
+		if path == "" {
+			return
+		}
+
+		firstChangedLine := 0
+		if d, ok := event.Result["details"].(map[string]any); ok {
+			if n, ok := d["firstChangedLine"].(float64); ok {
+				firstChangedLine = int(n)
+			}
+		}
+
+		payload, err := json.Marshal(map[string]any{
+			"type":             "file_activity",
+			"op":               event.ToolName,
+			"path":             path,
+			"cwd":              a.opts.CWD,
+			"firstChangedLine": firstChangedLine,
+			"ts":               time.Now().UnixMilli(),
+			"toolCallId":       event.ToolCallID,
+		})
+		if err != nil {
+			slog.Warn("file_activity marshal failed", "toolCallID", event.ToolCallID, "err", err)
+			return
+		}
+
+		next := atomic.AddInt64(&a.seq, 1)
+		frame := &protocol.Stream{
+			Type:           protocol.MsgTypeStream,
+			SessionID:      a.opts.SessionID,
+			ChannelID:      channelID,
+			SequenceNumber: next,
+			Event:          json.RawMessage(payload),
+		}
+		sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.opts.Relay.Send(sendCtx, frame); err != nil {
+			slog.Warn("file_activity send failed", "toolCallID", event.ToolCallID, "err", err)
+		}
+	}
+}
+
+// sweepStalePendingFileTools removes pendingFileToolStarts entries older than
+// maxAge. Called periodically to bound memory in case pi sends a write/edit
+// start event with no matching end (crash, abandoned tool call, etc.).
+func (a *Actor) sweepStalePendingFileTools(maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
+	a.pendingFileToolStarts.Range(func(k, v any) bool {
+		if v.(pendingFileTool).startedAt.Before(cutoff) {
+			a.pendingFileToolStarts.Delete(k)
+		}
+		return true
+	})
 }
 
 func normalizePiModel(model string) string {

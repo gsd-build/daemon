@@ -65,6 +65,7 @@ type Executor struct {
 	OnPIDStart           func(pid int)
 	OnPIDExit            func(pid int)
 	OnToolExecutionStart func(ToolExecutionStart)
+	OnToolExecutionEnd   func(ToolExecutionEnd)
 }
 
 // NewExecutor constructs an Executor. Call Run to spawn.
@@ -243,7 +244,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		model:  e.opts.Model,
 		taskID: e.opts.TaskID,
 	}
-	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, agentEndCh, true, state, startedAt)
+	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, e.OnToolExecutionEnd, agentEndCh, true, state, startedAt)
 	agentEnded := false
 	select {
 	case <-agentEndCh:
@@ -342,6 +343,7 @@ func streamPiEvents(
 	onEvent func(claude.Event) error,
 	onUIRequest UIRequestHandler,
 	onToolExecutionStart func(ToolExecutionStart),
+	onToolExecutionEnd func(ToolExecutionEnd),
 	agentEndCh chan<- struct{},
 	translate bool,
 	state *translatorState,
@@ -376,6 +378,7 @@ func streamPiEvents(
 		}
 
 		notifyToolExecutionStart(raw, onToolExecutionStart)
+		notifyToolExecutionEnd(raw, onToolExecutionEnd)
 
 		// Intercept extension_ui_request before translation; never forwarded.
 		if peek.Type == "extension_ui_request" {
@@ -448,6 +451,78 @@ func notifyToolExecutionStart(raw json.RawMessage, notify func(ToolExecutionStar
 		ToolName:   toolName,
 		Args:       event.Args,
 	})
+}
+
+// ToolExecutionEnd describes a pi tool execution that has completed.
+// Result is the raw pi result map (with content[] and optional details).
+// IsError is true when pi reported the tool errored.
+type ToolExecutionEnd struct {
+	ToolCallID string
+	ToolName   string
+	Result     map[string]any
+	IsError    bool
+}
+
+type piToolExecutionEnd struct {
+	Type            string         `json:"type"`
+	ToolCallID      string         `json:"tool_call_id"`
+	ToolCallIDCamel string         `json:"toolCallId"`
+	ToolName        string         `json:"tool_name"`
+	ToolNameCamel   string         `json:"toolName"`
+	Result          map[string]any `json:"result"`
+	IsError         bool           `json:"isError"`
+}
+
+func notifyToolExecutionEnd(raw json.RawMessage, notify func(ToolExecutionEnd)) {
+	if notify == nil {
+		return
+	}
+	var event piToolExecutionEnd
+	if err := json.Unmarshal(raw, &event); err != nil || event.Type != "tool_execution_end" {
+		return
+	}
+	toolCallID := event.ToolCallID
+	if toolCallID == "" {
+		toolCallID = event.ToolCallIDCamel
+	}
+	toolName := event.ToolName
+	if toolName == "" {
+		toolName = event.ToolNameCamel
+	}
+	notify(ToolExecutionEnd{
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+		Result:     event.Result,
+		IsError:    event.IsError,
+	})
+}
+
+// StreamFromReaderForTest drives the pi NDJSON parsing path from a synthetic
+// reader. It runs the same scanner loop as Run, firing OnToolExecutionStart /
+// OnToolExecutionEnd callbacks and emitting translated claude events. Intended
+// for cross-package integration tests that need to exercise the full
+// daemon emit path (executor → actor → relay) without spawning pi.
+func (e *Executor) StreamFromReaderForTest(
+	ctx context.Context,
+	r io.Reader,
+	onEvent func(claude.Event) error,
+	onUIRequest UIRequestHandler,
+) error {
+	state := &translatorState{}
+	agentEndCh := make(chan struct{}, 1)
+	return streamPiEvents(
+		ctx,
+		r,
+		io.Discard,
+		onEvent,
+		onUIRequest,
+		e.OnToolExecutionStart,
+		e.OnToolExecutionEnd,
+		agentEndCh,
+		true,
+		state,
+		time.Now(),
+	)
 }
 
 func (e *Executor) handlePiEventForTest(ctx context.Context, raw json.RawMessage, onEvent func(claude.Event) error) error {

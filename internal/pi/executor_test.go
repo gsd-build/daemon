@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -151,5 +152,89 @@ func assertToolExecutionStart(t *testing.T, got ToolExecutionStart) {
 	}
 	if question["id"] != "scope" {
 		t.Fatalf("question id = %#v, want scope", question["id"])
+	}
+}
+
+func TestNotifyToolExecutionEnd_ParsesWriteResult(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type":"tool_execution_end",
+		"toolCallId":"call_abc",
+		"toolName":"write",
+		"result":{"content":[{"type":"text","text":"Successfully wrote 12 bytes to a.txt"}]},
+		"isError":false
+	}`)
+	var got *ToolExecutionEnd
+	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { got = &ev })
+	if got == nil {
+		t.Fatalf("callback not fired")
+	}
+	if got.ToolCallID != "call_abc" || got.ToolName != "write" || got.IsError {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+	if got.Result == nil {
+		t.Fatalf("expected non-nil Result map")
+	}
+}
+
+func TestNotifyToolExecutionEnd_PreservesEditFirstChangedLine(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type":"tool_execution_end",
+		"toolCallId":"call_xyz",
+		"toolName":"edit",
+		"result":{"content":[{"type":"text","text":"ok"}],"details":{"firstChangedLine":42,"diff":"-1 a\n+1 b"}},
+		"isError":false
+	}`)
+	var got *ToolExecutionEnd
+	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { got = &ev })
+	if got == nil {
+		t.Fatalf("callback not fired")
+	}
+	details, _ := got.Result["details"].(map[string]any)
+	fcl, _ := details["firstChangedLine"].(float64)
+	if int(fcl) != 42 {
+		t.Fatalf("firstChangedLine: got %v want 42", fcl)
+	}
+}
+
+func TestNotifyToolExecutionEnd_NilCallbackIsNoop(t *testing.T) {
+	raw := json.RawMessage(`{"type":"tool_execution_end","toolName":"write"}`)
+	notifyToolExecutionEnd(raw, nil) // must not panic
+}
+
+func TestNotifyToolExecutionEnd_IgnoresWrongType(t *testing.T) {
+	raw := json.RawMessage(`{"type":"something_else"}`)
+	called := false
+	notifyToolExecutionEnd(raw, func(ev ToolExecutionEnd) { called = true })
+	if called {
+		t.Fatalf("callback should not fire on wrong type")
+	}
+}
+
+func TestStreamPiEvents_FiresOnToolExecutionEnd(t *testing.T) {
+	stream := strings.NewReader(`{"type":"tool_execution_end","toolCallId":"c1","toolName":"edit","result":{"details":{"firstChangedLine":7}},"isError":false}` + "\n")
+
+	var got *ToolExecutionEnd
+	state := &translatorState{}
+	err := streamPiEvents(
+		context.Background(),
+		stream,
+		io.Discard,
+		func(_ claude.Event) error { return nil },
+		nil,
+		nil,
+		func(ev ToolExecutionEnd) { got = &ev },
+		make(chan struct{}, 1),
+		false,
+		state,
+		time.Now(),
+	)
+	if err != nil && err != io.EOF {
+		t.Fatalf("streamPiEvents error: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("OnToolExecutionEnd callback never fired")
+	}
+	if got.ToolCallID != "c1" || got.ToolName != "edit" {
+		t.Fatalf("unexpected payload: %+v", got)
 	}
 }
