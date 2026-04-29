@@ -106,9 +106,9 @@ func (s *systemdPlatform) Stop() error {
 
 func (s *systemdPlatform) SyncEnvironment(keys []string) ([]string, error) {
 	return syncCurrentEnvironment(keys, func(key string, value string) error {
-		out, err := exec.Command("systemctl", "--user", "set-environment", key+"="+value).CombinedOutput()
+		_, err := exec.Command("systemctl", "--user", "set-environment", key+"="+value).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("systemctl set-environment %s: %w: %s", key, err, out)
+			return fmt.Errorf("systemctl set-environment %s: %w", key, err)
 		}
 		return nil
 	})

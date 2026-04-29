@@ -129,9 +129,9 @@ func (l *launchdPlatform) Stop() error {
 
 func (l *launchdPlatform) SyncEnvironment(keys []string) ([]string, error) {
 	return syncCurrentEnvironment(keys, func(key string, value string) error {
-		out, err := exec.Command("launchctl", "setenv", key, value).CombinedOutput()
+		_, err := exec.Command("launchctl", "setenv", key, value).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("launchctl setenv %s: %w: %s", key, err, out)
+			return fmt.Errorf("launchctl setenv %s: %w", key, err)
 		}
 		return nil
 	})
