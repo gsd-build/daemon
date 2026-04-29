@@ -49,6 +49,7 @@ type Options struct {
 	BrowserGrantID    string
 	BrowserID         string
 	RecordTouchedFile func(channelID string, cwd string, path string)
+	OnTaskIdle        func()
 }
 
 // Actor drives a single agent session using spawn-per-task execution.
@@ -94,6 +95,11 @@ type Actor struct {
 
 	// pidDir is the directory for PID files. Empty disables PID tracking.
 	pidDir string
+
+	piWorkerMu      sync.Mutex
+	piWorker        *pi.Worker
+	piWorkerKey     pi.WorkerKey
+	useWarmPiWorker bool
 
 	// pendingFileToolStarts tracks pi file tool_execution_start events awaiting
 	// their matching tool_execution_end. Keyed by toolCallID, value is
@@ -167,6 +173,7 @@ func NewActor(opts Options) (*Actor, error) {
 		interactionTimeout: defaultInteractionTimeout,
 		now:                time.Now,
 	}
+	actor.useWarmPiWorker = os.Getenv("GSD_WARM_PI_WORKERS") == "1"
 	actor.runPiControl = func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error) {
 		sessionFile, err := piSessionFileForSession(actor.opts.SessionID)
 		if err != nil {
@@ -227,6 +234,48 @@ func (a *Actor) Info() sockapi.SessionInfo {
 		info.IdleSince = a.idleSince
 	}
 	return info
+}
+
+func (a *Actor) workerPIDForTest() int {
+	a.piWorkerMu.Lock()
+	defer a.piWorkerMu.Unlock()
+	if a.piWorker == nil {
+		return 0
+	}
+	return a.piWorker.PID()
+}
+
+func (a *Actor) stopPiWorker(ctx context.Context) {
+	a.piWorkerMu.Lock()
+	worker := a.piWorker
+	a.piWorker = nil
+	a.piWorkerMu.Unlock()
+	if worker != nil {
+		_ = worker.Stop(ctx)
+	}
+}
+
+func (a *Actor) WorkerSnapshot() (pi.WorkerSnapshot, bool) {
+	a.piWorkerMu.Lock()
+	defer a.piWorkerMu.Unlock()
+	if a.piWorker == nil {
+		return pi.WorkerSnapshot{}, false
+	}
+	return a.piWorker.Snapshot(a.opts.SessionID), true
+}
+
+func (a *Actor) StopIdleWorker(ctx context.Context, reason string) bool {
+	a.piWorkerMu.Lock()
+	worker := a.piWorker
+	if worker == nil || !worker.IsIdle() {
+		a.piWorkerMu.Unlock()
+		return false
+	}
+	a.piWorker = nil
+	a.piWorkerMu.Unlock()
+	_ = worker.Stop(ctx)
+	slog.Info("pi_worker_evict", "sessionId", a.opts.SessionID, "reason", reason)
+	return true
 }
 
 // InFlightTaskID returns the ID of the currently executing task, or "" if idle.
@@ -506,6 +555,9 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		a.idleSince = &idleNow
 		a.lastActiveAt = idleNow
 		a.taskMu.Unlock()
+		if a.opts.OnTaskIdle != nil {
+			a.opts.OnTaskIdle()
+		}
 	}()
 
 	contextBlock := daemonfs.BuildContextRefBlock(task.CWD, task.ContextRefs, daemonfs.DefaultContextRefLimits())
@@ -644,7 +696,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		}
 	}
 
-	exec := pi.NewExecutor(pi.Options{
+	opts := pi.Options{
 		BinaryPath:         binaryPath,
 		CWD:                a.opts.CWD,
 		Model:              model,
@@ -660,9 +712,14 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		BrowserID:          tc.BrowserID,
 		BrowserSessionID:   a.opts.SessionID,
 		PlanCapability:     tc.PlanCapability,
-	})
+	}
 
 	coordinator := &structuredQuestionCoordinator{}
+	if a.useWarmPiWorker {
+		return a.runPiWorker(actorCtx, taskCtx, tc, prompt, opts, coordinator)
+	}
+
+	exec := pi.NewExecutor(opts)
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
 	exec.OnToolExecutionStart = a.capturePiToolStart(coordinator)
 	exec.OnToolExecutionEnd = a.capturePiToolEnd(tc.ChannelID)
@@ -671,6 +728,43 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
 	})
 	if err != nil {
+		return err
+	}
+
+	return a.handleResult(taskCtx, tc, resultRaw)
+}
+
+func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string, opts pi.Options, coordinator *structuredQuestionCoordinator) error {
+	key := pi.NewWorkerKey(opts)
+	a.piWorkerMu.Lock()
+	worker := a.piWorker
+	if worker != nil && worker.Key() != key {
+		a.piWorker = nil
+		a.piWorkerMu.Unlock()
+		_ = worker.Stop(actorCtx)
+		a.piWorkerMu.Lock()
+		worker = nil
+	}
+	if worker == nil {
+		worker = pi.NewWorker(opts)
+		a.attachPiWorkerPIDCallbacks(worker, tc.TaskID)
+		a.piWorker = worker
+		a.piWorkerKey = key
+	}
+	a.piWorkerMu.Unlock()
+
+	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
+		return worker.Prompt(ctx, pi.PromptRequest{
+			TaskID:               tc.TaskID,
+			Message:              prompt,
+			OnEvent:              onEvent,
+			OnUIRequest:          a.makePiUIHandler(ctx, tc, coordinator),
+			OnToolExecutionStart: a.capturePiToolStart(coordinator),
+			OnToolExecutionEnd:   a.capturePiToolEnd(tc.ChannelID),
+		})
+	})
+	if err != nil {
+		a.stopPiWorker(actorCtx)
 		return err
 	}
 
@@ -854,6 +948,22 @@ func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {
 		}
 	}
 	exec.OnPIDExit = func(pid int) {
+		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		pidfile.Remove(path)
+	}
+}
+
+func (a *Actor) attachPiWorkerPIDCallbacks(worker *pi.Worker, taskID string) {
+	if a.pidDir == "" {
+		return
+	}
+	worker.OnPIDStart = func(pid int) {
+		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		if err := pidfile.Write(path, pid); err != nil {
+			slog.Warn("write pid file failed", "taskId", taskID, "path", path, "err", err)
+		}
+	}
+	worker.OnPIDExit = func(pid int) {
 		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
 		pidfile.Remove(path)
 	}
@@ -1483,6 +1593,7 @@ func (a *Actor) GetClaudeSessionID() string {
 
 // Stop signals the actor to shut down.
 func (a *Actor) Stop() error {
+	a.stopPiWorker(context.Background())
 	select {
 	case <-a.stopCh:
 	default:
