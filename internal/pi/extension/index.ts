@@ -13,7 +13,6 @@ import os from "node:os";
 import path from "node:path";
 import {
   createSdkMcpServer,
-  getSessionMessages,
   query,
   tool,
   type Options as SdkOptions,
@@ -60,6 +59,13 @@ const SDK_SESSION_NAMESPACE = "gsd-pi-claude-sdk:v1";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type SdkPromptInputMessage = SDKUserMessage | SDKUserMessageReplay;
+
+type ActiveToolCall = {
+  idx: number;
+  id: string;
+  name: string;
+  jsonAcc: string;
+};
 
 type BrowserGrant = {
   grantId: string;
@@ -199,19 +205,51 @@ async function browserRpc(browserId: string, method: string, params: unknown, si
   });
 }
 
-class PiToolCallSurfacing extends Error {
-  toolName: string;
-  args: unknown;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
-  constructor(toolName: string, args: unknown) {
-    super(`pi-tool-call: ${toolName}`);
-    this.toolName = toolName;
-    this.args = args;
+function piToolNameFromSdk(name: string) {
+  return name.startsWith(MCP_PREFIX) ? name.slice(MCP_PREFIX.length) : name;
+}
+
+export function finalizeActivePiToolCall(activeToolCall: ActiveToolCall | null, existingArguments: unknown) {
+  if (!activeToolCall) return null;
+
+  let args = isRecord(existingArguments) ? existingArguments : {};
+  if (Object.keys(args).length === 0 && activeToolCall.jsonAcc.trim()) {
+    try {
+      const parsed = JSON.parse(activeToolCall.jsonAcc);
+      if (!isRecord(parsed)) {
+        throw new Error("tool_use input must be a JSON object");
+      }
+      args = parsed;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to parse tool_use input for ${activeToolCall.name}: ${reason}; input=${activeToolCall.jsonAcc}`);
+    }
   }
+
+  return {
+    type: "toolCall" as const,
+    id: activeToolCall.id,
+    name: activeToolCall.name,
+    arguments: args,
+  };
+}
+
+export function externalPiToolAcknowledgement() {
+  return {
+    content: [{
+      type: "text" as const,
+      text: "The GSD daemon accepted this tool call and will provide the actual tool result through Pi.",
+    }],
+    isError: false,
+  };
 }
 
 /** Build a Zod shape from pi's TypeBox/JSON-Schema-ish parameters, honoring required[]. */
-function piToolToSdkTool(piTool: PiTool, surface: (name: string, args: unknown) => never) {
+function piToolToSdkTool(piTool: PiTool) {
   const params = (piTool.parameters as any)?.properties ?? {};
   const required: string[] = (piTool.parameters as any)?.required ?? [];
 
@@ -226,10 +264,7 @@ function piToolToSdkTool(piTool: PiTool, surface: (name: string, args: unknown) 
     piTool.name,
     piTool.description || piTool.name,
     shape,
-    async (args: any) => {
-      surface(piTool.name, args);
-      return { content: [{ type: "text" as const, text: "unreachable" }] };
-    },
+    async () => externalPiToolAcknowledgement(),
   );
 }
 
@@ -325,8 +360,39 @@ function sdkMessageParamFromPiMessage(msg: Message) {
   };
 }
 
-function replayUuid(sdkSessionId: string, msg: Message, index: number): SDKUserMessageReplay["uuid"] {
-  return uuidFromStableKey(`${SDK_SESSION_NAMESPACE}:replay\0${sdkSessionId}\0${index}\0${msg.role}\0${msg.timestamp}`) as SDKUserMessageReplay["uuid"];
+function piTextContent(content: unknown) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block: any) => {
+    if (block?.type === "text") return [block.text ?? ""];
+    if (block?.type === "image") return [`[image: ${block.mimeType ?? "unknown"}]`];
+    return [];
+  }).join("");
+}
+
+function renderPiHistoryForClaude(messages: Message[]) {
+  const lines: string[] = [
+    "Conversation history from the GSD Pi session:",
+  ];
+
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      lines.push(`User: ${piTextContent(msg.content)}`);
+    } else if (msg.role === "assistant") {
+      const text = piTextContent((msg as any).content);
+      if (text.trim()) lines.push(`Assistant: ${text}`);
+      for (const block of (msg.content as any[]).filter((item) => item?.type === "toolCall")) {
+        lines.push(`Assistant tool call: ${block.name} ${JSON.stringify(block.arguments ?? {})}`);
+      }
+    } else if (msg.role === "toolResult") {
+      const status = msg.isError ? "error" : "success";
+      lines.push(`Tool result (${msg.toolName} ${status}):`);
+      lines.push(piTextContent(msg.content));
+    }
+  }
+
+  lines.push("Continue from the latest message. Use tool results as already completed work.");
+  return lines.join("\n");
 }
 
 export function buildClaudePromptMessages(
@@ -337,26 +403,27 @@ export function buildClaudePromptMessages(
   const lastIndex = messages.length - 1;
   if (lastIndex < 0) throw new Error("Claude SDK prompt requires at least one message");
 
-  const firstIndex = replayHistory ? 0 : lastIndex;
-  return messages.slice(firstIndex).map((msg, offset) => {
-    const index = firstIndex + offset;
-    const replay = replayHistory && index < lastIndex;
+  if (replayHistory) {
+    return [{
+      type: "user",
+      message: {
+        role: "user" as const,
+        content: renderPiHistoryForClaude(messages),
+      },
+      parent_tool_use_id: null,
+      session_id: sdkSessionId,
+    }];
+  }
+
+  return messages.slice(lastIndex).map((msg) => {
     const prompt: SDKUserMessage = {
       type: "user",
       message: sdkMessageParamFromPiMessage(msg) as any,
-      parent_tool_use_id: msg.role === "toolResult" ? msg.toolCallId : null,
+      parent_tool_use_id: null,
       session_id: sdkSessionId,
     };
 
-    if (!replay) return prompt;
-
-    return {
-      ...prompt,
-      uuid: replayUuid(sdkSessionId, msg, index),
-      session_id: sdkSessionId,
-      isReplay: true,
-      shouldQuery: false,
-    } as SDKUserMessageReplay;
+    return prompt;
   });
 }
 
@@ -371,19 +438,6 @@ function buildClaudePromptIterable(
       yield message;
     }
   })();
-}
-
-async function claudeSdkSessionExists(sdkSessionId: string) {
-  try {
-    const messages = await getSessionMessages(sdkSessionId, {
-      dir: process.cwd(),
-      limit: 1,
-      includeSystemMessages: true,
-    });
-    return messages.length > 0;
-  } catch {
-    return false;
-  }
 }
 
 function streamClaudeSdk(
@@ -408,22 +462,24 @@ function streamClaudeSdk(
       timestamp: Date.now(),
     };
 
-    let surfaced: PiToolCallSurfacing | null = null;
     const sdkAbort = new AbortController();
     options?.signal?.addEventListener("abort", () => sdkAbort.abort(), { once: true });
 
     let activeTextIndex: number | null = null;
-    let activeToolCall: { idx: number; id: string; name: string; jsonAcc: string } | null = null;
+    let activeToolCall: ActiveToolCall | null = null;
+    let streamEndedForToolUse = false;
+    let streamClosed = false;
+
+    const closeStreamForToolUse = () => {
+      if (streamClosed) return;
+      stream.push({ type: "done", reason: "toolUse", message: output });
+      stream.end();
+      streamClosed = true;
+    };
 
     const browserGrant = browserGrantFromEnv();
     const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
-    const sdkTools = piTools.map((t) =>
-      piToolToSdkTool(t, (name, args) => {
-        surfaced = new PiToolCallSurfacing(name, args);
-        sdkAbort.abort();
-        throw surfaced;
-      }),
-    );
+    const sdkTools = piTools.map((t) => piToolToSdkTool(t));
 
     const piMcp = createSdkMcpServer({
       name: "pi-tools",
@@ -438,7 +494,7 @@ function streamClaudeSdk(
     try {
       const sdkOptions: SdkOptions = {
         includePartialMessages: true,
-        persistSession: true,
+        persistSession: false,
         settingSources: [],
         allowedTools,
         disallowedTools: CLAUDE_BUILTINS,
@@ -452,19 +508,15 @@ function streamClaudeSdk(
       }
 
       const sdkSessionId = deriveClaudeSdkSessionId(options?.sessionId);
-      const resumeClaudeSession = await claudeSdkSessionExists(sdkSessionId);
-      const replayHistory = !resumeClaudeSession && context.messages.length > 1;
-      if (resumeClaudeSession) {
-        sdkOptions.resume = sdkSessionId;
-      } else {
-        sdkOptions.sessionId = sdkSessionId;
-      }
+      const replayHistory = context.messages.length > 1;
+      sdkOptions.sessionId = sdkSessionId;
 
       const promptIter = buildClaudePromptIterable(context.messages, sdkSessionId, replayHistory);
       const q = query({ prompt: promptIter, options: sdkOptions });
 
       for await (const msg of q as AsyncIterable<SDKMessage>) {
         applyUsageFromSdkMessage(output.usage, msg, (model as any).cost);
+        if (streamEndedForToolUse) continue;
         if (msg.type === "stream_event") {
           const ev = (msg as any).event;
           if (ev?.type === "content_block_start") {
@@ -503,37 +555,39 @@ function streamClaudeSdk(
               stream.push({ type: "text_end", contentIndex: activeTextIndex, content: finalText, partial: output });
               activeTextIndex = null;
             }
-            // tool_use content_block_stop: handled when sentinel fires inside the MCP handler.
+            if (activeToolCall) {
+              const blk = output.content[activeToolCall.idx] as any;
+              const toolCall = finalizeActivePiToolCall(activeToolCall, blk.arguments);
+              if (toolCall) {
+                blk.arguments = toolCall.arguments;
+                stream.push({
+                  type: "toolcall_end",
+                  contentIndex: activeToolCall.idx,
+                  toolCall,
+                  partial: output,
+                });
+                activeToolCall = null;
+                output.stopReason = "toolUse";
+                ensureNonZeroUsageForAbortedToolTurn(output.usage, output.content, (model as any).cost);
+                streamEndedForToolUse = true;
+              }
+            }
           }
         }
       }
 
-      // SDK iterator drained without sentinel; Claude finished a pure-text turn.
+      if (streamEndedForToolUse) {
+        closeStreamForToolUse();
+        return;
+      }
+
+      // SDK iterator drained without a Pi tool handoff; Claude finished a pure-text turn.
       output.stopReason = "stop";
       stream.push({ type: "done", reason: "stop", message: output });
       stream.end();
     } catch (err: any) {
-      // Sentinel: gracefully end with toolUse so pi runs the tool.
-      if (surfaced) {
-        if (activeToolCall) {
-          const blk = output.content[activeToolCall.idx] as any;
-          // Use the args we captured from the input_json deltas if available;
-          // otherwise fall back to the args the MCP handler received.
-          if (Object.keys(blk.arguments || {}).length === 0) {
-            blk.arguments = (surfaced as PiToolCallSurfacing).args;
-          }
-          stream.push({
-            type: "toolcall_end",
-            contentIndex: activeToolCall.idx,
-            toolCall: { type: "toolCall", id: activeToolCall.id, name: activeToolCall.name, arguments: blk.arguments },
-            partial: output,
-          });
-          activeToolCall = null;
-        }
-        output.stopReason = "toolUse";
-        ensureNonZeroUsageForAbortedToolTurn(output.usage, output.content, (model as any).cost);
-        stream.push({ type: "done", reason: "toolUse", message: output });
-        stream.end();
+      if (streamEndedForToolUse) {
+        closeStreamForToolUse();
         return;
       }
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";

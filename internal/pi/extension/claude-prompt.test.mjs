@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   buildClaudePromptMessages,
   deriveClaudeSdkSessionId,
+  externalPiToolAcknowledgement,
+  finalizeActivePiToolCall,
 } from "./index.ts";
 
 const userMessage = {
@@ -52,7 +54,7 @@ test("buildClaudePromptMessages sends only the latest message for a resumed SDK 
 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].message.role, "user");
-  assert.equal(messages[0].parent_tool_use_id, "toolu_123");
+  assert.equal(messages[0].parent_tool_use_id, null);
   assert.equal(messages[0].message.content[0].type, "tool_result");
   assert.equal(messages[0].message.content[0].tool_use_id, "toolu_123");
   assert.equal(messages[0].message.content[0].content[0].text, "/tmp/project");
@@ -66,17 +68,12 @@ test("buildClaudePromptMessages can bootstrap a missing SDK session from Pi hist
     true,
   );
 
-  assert.equal(messages.length, 3);
-  assert.equal(messages[0].isReplay, true);
-  assert.equal(messages[0].shouldQuery, false);
+  assert.equal(messages.length, 1);
   assert.equal(messages[0].message.role, "user");
-  assert.equal(messages[1].isReplay, true);
-  assert.equal(messages[1].shouldQuery, false);
-  assert.equal(messages[1].message.role, "assistant");
-  assert.equal(messages[1].message.content[0].type, "tool_use");
-  assert.equal(messages[1].message.content[0].id, "toolu_123");
-  assert.equal("isReplay" in messages[2], false);
-  assert.equal(messages[2].message.content[0].type, "tool_result");
+  assert.match(messages[0].message.content, /User: Inspect the project\./);
+  assert.match(messages[0].message.content, /Assistant tool call: bash/);
+  assert.match(messages[0].message.content, /Tool result \(bash success\):/);
+  assert.match(messages[0].message.content, /Continue from the latest message/);
 });
 
 test("deriveClaudeSdkSessionId is stable and scoped", () => {
@@ -87,4 +84,43 @@ test("deriveClaudeSdkSessionId is stable and scoped", () => {
   assert.equal(first, second);
   assert.notEqual(first, other);
   assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test("finalizeActivePiToolCall uses the completed streamed JSON arguments", () => {
+  assert.deepEqual(finalizeActivePiToolCall({
+    idx: 0,
+    id: "toolu_789",
+    name: "plan_update_item",
+    jsonAcc: "{\"status\":\"completed\"}",
+  }, {}), {
+    type: "toolCall",
+    id: "toolu_789",
+    name: "plan_update_item",
+    arguments: { status: "completed" },
+  });
+
+  assert.equal(finalizeActivePiToolCall(null, {}), null);
+});
+
+test("finalizeActivePiToolCall rejects malformed streamed JSON arguments", () => {
+  assert.throws(() => finalizeActivePiToolCall({
+    idx: 0,
+    id: "toolu_bad",
+    name: "plan_update_item",
+    jsonAcc: "{\"status\":",
+  }, {}), /Failed to parse tool_use input for plan_update_item/);
+
+  assert.throws(() => finalizeActivePiToolCall({
+    idx: 0,
+    id: "toolu_array",
+    name: "plan_update_item",
+    jsonAcc: "[\"completed\"]",
+  }, {}), /tool_use input must be a JSON object/);
+});
+
+test("externalPiToolAcknowledgement satisfies the SDK tool call without surfacing an error", () => {
+  const result = externalPiToolAcknowledgement();
+
+  assert.equal(result.isError, false);
+  assert.match(result.content[0].text, /daemon/);
 });
