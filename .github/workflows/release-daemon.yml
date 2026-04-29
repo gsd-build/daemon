@@ -134,18 +134,7 @@ jobs:
         # at install time so they get the right native binaries for their
         # platform via @anthropic-ai/claude-agent-sdk's optionalDependencies.
         run: |
-          cd internal/pi/extension
-          tar \
-            --sort=name \
-            --mtime="UTC 2020-01-01" \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            --dereference \
-            -czf "$GITHUB_WORKSPACE/dist/gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz" \
-            package.json package-lock.json index.ts ask-user-questions.js schema-to-zod.js usage-estimator.js plan-tools.js
-          cd "$GITHUB_WORKSPACE/dist"
-          sha256sum "gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz" > "gsd-cloud-pi-extension-${{ steps.version.outputs.version }}.tar.gz.sha256"
+          bash scripts/package-pi-extension.sh "${{ steps.version.outputs.version }}" "$GITHUB_WORKSPACE/dist"
 
       - name: List artifacts
         run: ls -la dist
