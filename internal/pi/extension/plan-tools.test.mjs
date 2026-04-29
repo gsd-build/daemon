@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -342,6 +342,7 @@ test("plan_update_item completion appends derived filesChanged", async () => {
   } finally {
     process.chdir(originalCwd);
     globalThis.fetch = originalFetch;
+    rmSync(repo, { recursive: true, force: true });
   }
 
   const patchCall = calls.find((call) => call.options?.method === "PATCH");
