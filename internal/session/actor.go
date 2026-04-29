@@ -131,6 +131,7 @@ type taskContext struct {
 	ImageURLs          []string
 	ContextRefs        []protocol.ContextRef
 	CustomInstructions string
+	DisableSkills      bool
 	BrowserGrantID     string
 	BrowserID          string
 	PlanCapability     *protocol.PlanCapability
@@ -526,6 +527,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		ImageURLs:          task.ImageURLs,
 		ContextRefs:        task.ContextRefs,
 		CustomInstructions: task.CustomInstructions,
+		DisableSkills:      task.DisableSkills,
 		BrowserGrantID:     a.opts.BrowserGrantID,
 		BrowserID:          a.opts.BrowserID,
 		PlanCapability:     task.PlanCapability,
@@ -630,7 +632,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		skillPrompt = prompt
 	}
 	skillPaths := []string(nil)
-	if skills.PromptHasClaudeSkillReference(skillPrompt) {
+	if !tc.DisableSkills && skills.PromptHasClaudeSkillReference(skillPrompt) {
 		availableSkills, err := skills.DiscoverClaudeSkills(a.opts.CWD)
 		if err != nil {
 			slog.Warn("discover claude skills failed", "cwd", a.opts.CWD, "err", err)
@@ -653,6 +655,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		ExtensionPath:      a.opts.PiExtensionPath,
 		Provider:           provider,
 		SkillPaths:         skillPaths,
+		DisableSkills:      tc.DisableSkills,
 		BrowserGrantID:     tc.BrowserGrantID,
 		BrowserID:          tc.BrowserID,
 		BrowserSessionID:   a.opts.SessionID,

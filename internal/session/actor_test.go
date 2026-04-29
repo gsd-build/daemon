@@ -431,6 +431,54 @@ func TestActorPiExecutorPassesReferencedClaudeSkillPaths(t *testing.T) {
 	}
 }
 
+func TestActorPiExecutorDisablesSkills(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projectDir := filepath.Join(home, "repo")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	skillPath := filepath.Join(projectDir, ".claude", "skills", "project-skill", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillPath, []byte("---\nname: project-skill\ndescription: Project skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-pi-disable-skills",
+		CWD:       projectDir,
+		Relay:     newFakeRelay(),
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:         "task-pi-disable-skills",
+		ChannelID:      "ch-pi-disable-skills",
+		Engine:         "pi",
+		OriginalPrompt: "/skill:project-skill use the project skill",
+		DisableSkills:  true,
+	}, "/skill:project-skill use the project skill")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	if argIndex(args, "--no-skills") < 0 {
+		t.Fatalf("pi args missing --no-skills: %v", args)
+	}
+	if skillPaths := argValues(args, "--skill"); len(skillPaths) != 0 {
+		t.Fatalf("pi skill paths = %+v, want none", skillPaths)
+	}
+}
+
 func TestActorPiExecutorSkipsSkillsWithoutPromptReference(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
