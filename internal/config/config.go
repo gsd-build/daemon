@@ -13,14 +13,16 @@ import (
 
 // Config is the on-disk daemon state.
 type Config struct {
-	MachineID          string `json:"machineId"`
-	AuthToken          string `json:"authToken"`
-	TokenExpiresAt     string `json:"tokenExpiresAt,omitempty"`
-	ServerURL          string `json:"serverUrl"`
-	RelayURL           string `json:"relayUrl"`
-	MaxConcurrentTasks int    `json:"maxConcurrentTasks,omitempty"` // 0 means unlimited
-	TaskTimeoutMinutes int    `json:"taskTimeoutMinutes,omitempty"`
-	LogLevel           string `json:"logLevel,omitempty"`
+	MachineID             string `json:"machineId"`
+	AuthToken             string `json:"authToken"`
+	TokenExpiresAt        string `json:"tokenExpiresAt,omitempty"`
+	ServerURL             string `json:"serverUrl"`
+	RelayURL              string `json:"relayUrl"`
+	MaxConcurrentTasks    int    `json:"maxConcurrentTasks,omitempty"` // 0 means runtime.NumCPU
+	TaskTimeoutMinutes    int    `json:"taskTimeoutMinutes,omitempty"`
+	WarmWorkerIdleMinutes int    `json:"warmWorkerIdleMinutes,omitempty"`
+	WarmWorkerIdleCap     *int   `json:"warmWorkerIdleCap,omitempty"`
+	LogLevel              string `json:"logLevel,omitempty"`
 }
 
 // DefaultServerURL is the production web app host.
@@ -31,6 +33,13 @@ const DefaultRelayURL = "wss://relay.gsd.build/ws/daemon"
 
 // DefaultTaskTimeoutMinutes is the default per-task timeout.
 const DefaultTaskTimeoutMinutes = 30
+
+const DefaultWarmWorkerIdleMinutes = 20
+const MinWarmWorkerIdleMinutes = 2
+const MaxWarmWorkerIdleMinutes = 60
+const DefaultWarmWorkerIdleCap = 4
+const MinWarmWorkerIdleCap = 0
+const MaxWarmWorkerIdleCap = 16
 
 // DefaultLogLevel is the default slog level string.
 const DefaultLogLevel = "info"
@@ -118,4 +127,32 @@ func (c *Config) EffectiveTaskTimeout() time.Duration {
 		return time.Duration(c.TaskTimeoutMinutes) * time.Minute
 	}
 	return 30 * time.Minute
+}
+
+func (c *Config) EffectiveWarmWorkerIdle() time.Duration {
+	minutes := c.WarmWorkerIdleMinutes
+	if minutes == 0 {
+		minutes = DefaultWarmWorkerIdleMinutes
+	}
+	if minutes < MinWarmWorkerIdleMinutes {
+		minutes = MinWarmWorkerIdleMinutes
+	}
+	if minutes > MaxWarmWorkerIdleMinutes {
+		minutes = MaxWarmWorkerIdleMinutes
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (c *Config) EffectiveWarmWorkerIdleCap() int {
+	if c.WarmWorkerIdleCap == nil {
+		return DefaultWarmWorkerIdleCap
+	}
+	cap := *c.WarmWorkerIdleCap
+	if cap < MinWarmWorkerIdleCap {
+		return MinWarmWorkerIdleCap
+	}
+	if cap > MaxWarmWorkerIdleCap {
+		return MaxWarmWorkerIdleCap
+	}
+	return cap
 }

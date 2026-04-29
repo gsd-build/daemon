@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSaveAndLoad(t *testing.T) {
@@ -11,10 +12,10 @@ func TestSaveAndLoad(t *testing.T) {
 	t.Setenv("HOME", dir)
 
 	cfg := &Config{
-		MachineID:    "m-123",
-		AuthToken:    "tok-abc",
-		ServerURL:    "https://app.gsd.build",
-		RelayURL:     "wss://relay.gsd.build/ws/daemon",
+		MachineID: "m-123",
+		AuthToken: "tok-abc",
+		ServerURL: "https://app.gsd.build",
+		RelayURL:  "wss://relay.gsd.build/ws/daemon",
 	}
 	if err := Save(cfg); err != nil {
 		t.Fatalf("save: %v", err)
@@ -110,3 +111,54 @@ func TestEffectiveTaskTimeout(t *testing.T) {
 		t.Errorf("expected 60m, got %v", cfg.EffectiveTaskTimeout())
 	}
 }
+
+func TestEffectiveWarmWorkerIdle(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.EffectiveWarmWorkerIdle(); got != 20*time.Minute {
+		t.Fatalf("default idle = %s, want 20m", got)
+	}
+
+	cfg.WarmWorkerIdleMinutes = 1
+	if got := cfg.EffectiveWarmWorkerIdle(); got != 2*time.Minute {
+		t.Fatalf("low clamp idle = %s, want 2m", got)
+	}
+
+	cfg.WarmWorkerIdleMinutes = 90
+	if got := cfg.EffectiveWarmWorkerIdle(); got != 60*time.Minute {
+		t.Fatalf("high clamp idle = %s, want 60m", got)
+	}
+
+	cfg.WarmWorkerIdleMinutes = 15
+	if got := cfg.EffectiveWarmWorkerIdle(); got != 15*time.Minute {
+		t.Fatalf("explicit idle = %s, want 15m", got)
+	}
+}
+
+func TestEffectiveWarmWorkerIdleCap(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.EffectiveWarmWorkerIdleCap(); got != 4 {
+		t.Fatalf("default cap = %d, want 4", got)
+	}
+
+	cfg.WarmWorkerIdleCap = ptr(-1)
+	if got := cfg.EffectiveWarmWorkerIdleCap(); got != 0 {
+		t.Fatalf("low clamp cap = %d, want 0", got)
+	}
+
+	cfg.WarmWorkerIdleCap = ptr(40)
+	if got := cfg.EffectiveWarmWorkerIdleCap(); got != 16 {
+		t.Fatalf("high clamp cap = %d, want 16", got)
+	}
+
+	cfg.WarmWorkerIdleCap = ptr(7)
+	if got := cfg.EffectiveWarmWorkerIdleCap(); got != 7 {
+		t.Fatalf("explicit cap = %d, want 7", got)
+	}
+
+	cfg.WarmWorkerIdleCap = ptr(0)
+	if got := cfg.EffectiveWarmWorkerIdleCap(); got != 0 {
+		t.Fatalf("explicit zero cap = %d, want 0", got)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
