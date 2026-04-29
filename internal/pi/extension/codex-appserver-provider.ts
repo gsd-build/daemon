@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createInterface, type Interface } from "node:readline";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
   type AssistantMessageEventStream,
   type Context,
+  type Message,
   type Model,
   type SimpleStreamOptions,
   type Tool as PiTool,
@@ -21,11 +23,20 @@ type ActiveRun = {
   stream: AssistantMessageEventStream;
   output: AssistantMessage;
   textIndex: number | null;
+  nativeTools: Map<string, NativeToolCall[]>;
 };
 
 type PendingBridge = {
   codexRequestId: string | number;
   toolCallId: string;
+};
+
+type NativeToolCall = {
+  itemId: string;
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  idx: number;
 };
 
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
@@ -92,6 +103,322 @@ export function codexDynamicToolsFromContext(context: Pick<Context, "tools">) {
   }));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function textFromPiContent(content: unknown) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((block: any) => {
+      if (block?.type === "text") return [block.text ?? ""];
+      if (block?.type === "image") return [`[image: ${block.mimeType ?? "unknown"}]`];
+      return [];
+    })
+    .join("");
+}
+
+function formatPiMessageForCodex(message: Message) {
+  if (message.role === "user") {
+    return `User:\n${textFromPiContent(message.content)}`;
+  }
+
+  if (message.role === "assistant") {
+    const lines: string[] = [];
+    const content = Array.isArray(message.content) ? message.content : [];
+    for (const block of content) {
+      if (block?.type === "text" && String(block.text ?? "").trim()) {
+        lines.push(`Assistant:\n${block.text ?? ""}`);
+      }
+      if (block?.type === "image") {
+        lines.push(`Assistant:\n[image: ${block.mimeType ?? "unknown"}]`);
+      }
+      if (block?.type === "toolCall") {
+        const args = isRecord(block.arguments) ? block.arguments : {};
+        lines.push(`Assistant tool call:\nname: ${block.name ?? "unknown"}\narguments: ${JSON.stringify(args)}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  if (message.role === "toolResult") {
+    const status = message.isError ? "error" : "success";
+    return `Tool result (${message.toolName ?? message.toolCallId ?? "unknown"} ${status}):\n${textFromPiContent(message.content)}`;
+  }
+
+  return "";
+}
+
+export function codexPromptTextFromContext(context: Pick<Context, "messages">) {
+  const messages = context.messages ?? [];
+  if (messages.length === 0) return "";
+
+  const rendered = messages.map(formatPiMessageForCodex).filter((text) => text.trim().length > 0);
+  if (rendered.length === 1) {
+    return rendered[0]!.replace(/^User:\n/, "");
+  }
+
+  return [
+    "Conversation history from the active GSD session:",
+    "",
+    ...rendered,
+    "",
+    "Continue from the latest user message.",
+  ].join("\n");
+}
+
+export function codexLatestUserTextFromContext(context: Pick<Context, "messages">) {
+  const latest = [...(context.messages ?? [])].reverse().find((message) => message.role === "user");
+  return latest ? textFromPiContent(latest.content) : "";
+}
+
+function stringField(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function itemID(item: Record<string, unknown>, prefix: string, _fallbackIndex: number) {
+  const id = stringField(item.id);
+  const fingerprint = stableItemFingerprint(item);
+  return id || (fingerprint ? `${prefix}_${fingerprint}` : `${prefix}_anonymous`);
+}
+
+function stableItemFingerprint(item: Record<string, unknown>) {
+  const type = stringField(item.type);
+  let payload: unknown;
+  if (type === "commandExecution") {
+    payload = { type, command: stringField(item.command), cwd: stringField(item.cwd) };
+  } else if (type === "fileChange") {
+    const firstChangePath = fileChangeSummaries(item)[0]?.path ?? "";
+    payload = { type, path: stringField(item.path) || firstChangePath };
+  } else if (type === "mcpToolCall") {
+    payload = {
+      type,
+      server: stringField(item.server),
+      tool: stringField(item.tool),
+      arguments: isRecord(item.arguments) ? item.arguments : {},
+    };
+  } else if (type === "collabToolCall") {
+    payload = {
+      type,
+      tool: stringField(item.tool),
+      senderThreadId: stringField(item.senderThreadId),
+      receiverThreadId: stringField(item.receiverThreadId),
+      prompt: stringField(item.prompt),
+    };
+  } else if (type === "webSearch") {
+    payload = { type, query: stringField(item.query) };
+  } else if (type === "imageView") {
+    payload = { type, path: stringField(item.path) };
+  } else {
+    return "";
+  }
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
+}
+
+function fileChangeSummaries(item: Record<string, unknown>) {
+  const changes = Array.isArray(item.changes) ? item.changes : [];
+  const summaries = changes
+    .filter(isRecord)
+    .map((change) => ({
+      path: stringField(change.path),
+      kind: stringField(change.kind),
+    }))
+    .filter((change) => change.path || change.kind);
+  const path = stringField(item.path);
+  return summaries.length > 0 || !path ? summaries : [{ path, kind: "" }];
+}
+
+function fileChangeDiffText(item: Record<string, unknown>) {
+  const changes = Array.isArray(item.changes) ? item.changes : [];
+  const diffs = changes
+    .filter(isRecord)
+    .map((change) => stringField(change.diff))
+    .filter(Boolean)
+    .join("\n");
+  return diffs || stringField(item.patch);
+}
+
+function statusIsError(status: string) {
+  return status === "failed" || status === "declined";
+}
+
+function pushNativeTool(run: ActiveRun, nativeTool: NativeToolCall) {
+  const calls = run.nativeTools.get(nativeTool.itemId) ?? [];
+  calls.push(nativeTool);
+  run.nativeTools.set(nativeTool.itemId, calls);
+}
+
+function uniqueToolCallID(run: ActiveRun, nativeTool: Omit<NativeToolCall, "idx">) {
+  const occurrence = run.nativeTools.get(nativeTool.itemId)?.length ?? 0;
+  return occurrence === 0 ? nativeTool.toolCallId : `${nativeTool.toolCallId}_${occurrence + 1}`;
+}
+
+function firstNativeTool(run: ActiveRun, itemId: string) {
+  return run.nativeTools.get(itemId)?.[0];
+}
+
+function shiftNativeTool(run: ActiveRun, itemId: string) {
+  const calls = run.nativeTools.get(itemId);
+  if (!calls) return;
+  calls.shift();
+  if (calls.length === 0) {
+    run.nativeTools.delete(itemId);
+  }
+}
+
+export function codexNativeToolStartFromItem(item: unknown, fallbackIndex = 0): Omit<NativeToolCall, "idx"> | null {
+  if (!isRecord(item)) return null;
+
+  if (item.type === "commandExecution") {
+    const args: Record<string, unknown> = { command: stringField(item.command) };
+    const cwd = stringField(item.cwd);
+    if (cwd) args.cwd = cwd;
+    return {
+      itemId: itemID(item, "cmd", fallbackIndex),
+      toolCallId: itemID(item, "cmd", fallbackIndex),
+      toolName: "shell",
+      args,
+    };
+  }
+
+  if (item.type === "fileChange") {
+    const changes = fileChangeSummaries(item);
+    return {
+      itemId: itemID(item, "file", fallbackIndex),
+      toolCallId: itemID(item, "file", fallbackIndex),
+      toolName: "file_change",
+      args: { changes },
+    };
+  }
+
+  if (item.type === "mcpToolCall") {
+    return {
+      itemId: itemID(item, "mcp", fallbackIndex),
+      toolCallId: itemID(item, "mcp", fallbackIndex),
+      toolName: stringField(item.tool) || "mcp_tool",
+      args: isRecord(item.arguments) ? item.arguments : {},
+    };
+  }
+
+  if (item.type === "collabToolCall") {
+    const args: Record<string, unknown> = {
+      senderThreadId: stringField(item.senderThreadId),
+    };
+    const receiverThreadId = stringField(item.receiverThreadId);
+    const newThreadId = stringField(item.newThreadId);
+    const prompt = stringField(item.prompt);
+    if (receiverThreadId) args.receiverThreadId = receiverThreadId;
+    if (newThreadId) args.newThreadId = newThreadId;
+    if (prompt) args.prompt = prompt;
+    return {
+      itemId: itemID(item, "collab", fallbackIndex),
+      toolCallId: itemID(item, "collab", fallbackIndex),
+      toolName: stringField(item.tool) || "collab_tool",
+      args,
+    };
+  }
+
+  if (item.type === "webSearch") {
+    const args: Record<string, unknown> = { query: stringField(item.query) };
+    if (isRecord(item.action)) args.action = item.action;
+    return {
+      itemId: itemID(item, "web", fallbackIndex),
+      toolCallId: itemID(item, "web", fallbackIndex),
+      toolName: "web_search",
+      args,
+    };
+  }
+
+  if (item.type === "imageView") {
+    return {
+      itemId: itemID(item, "image", fallbackIndex),
+      toolCallId: itemID(item, "image", fallbackIndex),
+      toolName: "view_image",
+      args: { path: stringField(item.path) },
+    };
+  }
+
+  return null;
+}
+
+export function codexNativeToolResultFromItem(item: unknown) {
+  if (!isRecord(item)) return null;
+
+  if (item.type === "commandExecution") {
+    const exitCode = typeof item.exitCode === "number" ? item.exitCode : null;
+    const status = stringField(item.status);
+    return {
+      resultText: stringField(item.aggregatedOutput),
+      details: {
+        exitCode,
+        durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
+        status,
+      },
+      isError: statusIsError(status) || (exitCode !== null && exitCode !== 0),
+    };
+  }
+
+  if (item.type === "fileChange") {
+    const status = stringField(item.status);
+    const changes = fileChangeSummaries(item);
+    return {
+      resultText: fileChangeDiffText(item),
+      details: { changes, status },
+      isError: statusIsError(status),
+    };
+  }
+
+  if (item.type === "mcpToolCall") {
+    const content = isRecord(item.result) && Array.isArray(item.result.content)
+      ? item.result.content
+      : [{ type: "text", text: "" }];
+    return {
+      resultText: content
+        .filter((part: any) => part?.type === "text")
+        .map((part: any) => part.text ?? "")
+        .join("\n"),
+      details: {
+        server: stringField(item.server),
+        durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
+        status: stringField(item.status),
+      },
+      isError: Boolean(item.error) || statusIsError(stringField(item.status)),
+    };
+  }
+
+  if (item.type === "collabToolCall") {
+    const status = stringField(item.status);
+    return {
+      resultText: stringField(item.agentStatus) || status,
+      details: {
+        status,
+        newThreadId: stringField(item.newThreadId),
+        receiverThreadId: stringField(item.receiverThreadId),
+      },
+      isError: statusIsError(status) || Boolean(item.error),
+    };
+  }
+
+  if (item.type === "webSearch") {
+    return {
+      resultText: isRecord(item.action) ? JSON.stringify(item.action) : stringField(item.query),
+      details: { query: stringField(item.query) },
+      isError: false,
+    };
+  }
+
+  if (item.type === "imageView") {
+    return {
+      resultText: stringField(item.path),
+      details: { path: stringField(item.path) },
+      isError: false,
+    };
+  }
+
+  return null;
+}
+
 export function registerCodexAppServerProvider(pi: ExtensionAPI) {
   let codex: ChildProcess | null = null;
   let rl: Interface | null = null;
@@ -99,6 +426,7 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
   let initPromise: Promise<void> | null = null;
   let requestId = 0;
   let threadId: string | null = null;
+  let threadHasGsdReplay = false;
   let activeTurnId: string | null = null;
   let activeRun: ActiveRun | null = null;
   let pendingBridge: PendingBridge | null = null;
@@ -127,6 +455,10 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
 
   function codexRespond(id: string | number, result: any) {
     sendToCodex({ id, result });
+  }
+
+  function emitSyntheticToolEvent(event: any) {
+    process.stdout.write(`${JSON.stringify({ ...event, _synthetic: true })}\n`);
   }
 
   function settleCodexResponse(message: any) {
@@ -168,6 +500,7 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
     rl?.close();
     rl = null;
     threadId = null;
+    threadHasGsdReplay = false;
     activeTurnId = null;
     pendingBridge = null;
     rejectPendingRequests(error);
@@ -218,6 +551,93 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
     activeRun = null;
   }
 
+  function surfaceNativeToolStart(run: ActiveRun, item: unknown) {
+    const start = codexNativeToolStartFromItem(item, run.output.content.length);
+    if (!start) return false;
+
+    const idx = run.output.content.length;
+    const nativeTool: NativeToolCall = { ...start, toolCallId: uniqueToolCallID(run, start), idx };
+    pushNativeTool(run, nativeTool);
+    run.output.content.push({
+      type: "toolCall",
+      id: nativeTool.toolCallId,
+      name: nativeTool.toolName,
+      arguments: nativeTool.args,
+    });
+
+    run.stream.push({ type: "toolcall_start", contentIndex: idx, partial: run.output });
+    run.stream.push({
+      type: "toolcall_delta",
+      contentIndex: idx,
+      delta: JSON.stringify(nativeTool.args),
+      partial: run.output,
+    });
+    emitSyntheticToolEvent({
+      type: "tool_execution_start",
+      toolCallId: nativeTool.toolCallId,
+      toolName: nativeTool.toolName,
+      args: nativeTool.args,
+    });
+    return true;
+  }
+
+  function surfaceNativeToolOutput(run: ActiveRun, itemId: unknown, delta: unknown) {
+    const id = stringField(itemId);
+    const nativeTool = id ? firstNativeTool(run, id) : undefined;
+    if (!nativeTool) return false;
+    const text = stringField(delta);
+    if (!text) return true;
+
+    emitSyntheticToolEvent({
+      type: "tool_execution_update",
+      toolCallId: nativeTool.toolCallId,
+      toolName: nativeTool.toolName,
+      partialResult: {
+        content: [{ type: "text", text }],
+        details: {},
+      },
+    });
+    return true;
+  }
+
+  function surfaceNativeToolEnd(run: ActiveRun, item: unknown) {
+    if (!isRecord(item)) return false;
+    const start = codexNativeToolStartFromItem(item, run.output.content.length);
+    if (!start) return false;
+    const id = start.itemId;
+    if (!firstNativeTool(run, id)) {
+      surfaceNativeToolStart(run, item);
+    }
+    const nativeTool = firstNativeTool(run, id);
+    if (!nativeTool) return false;
+    const result = codexNativeToolResultFromItem(item);
+    if (!result) return false;
+
+    run.stream.push({
+      type: "toolcall_end",
+      contentIndex: nativeTool.idx,
+      toolCall: {
+        type: "toolCall",
+        id: nativeTool.toolCallId,
+        name: nativeTool.toolName,
+        arguments: nativeTool.args,
+      },
+      partial: run.output,
+    });
+    emitSyntheticToolEvent({
+      type: "tool_execution_end",
+      toolCallId: nativeTool.toolCallId,
+      toolName: nativeTool.toolName,
+      result: {
+        content: [{ type: "text", text: result.resultText }],
+        details: result.details,
+      },
+      isError: result.isError,
+    });
+    shiftNativeTool(run, id);
+    return true;
+  }
+
   function handleCodexLine(line: string) {
     if (!line.trim()) return;
 
@@ -255,6 +675,8 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
           run.output.content.push({ type: "text", text: "" });
           run.textIndex = idx;
           run.stream.push({ type: "text_start", contentIndex: idx, partial: run.output });
+        } else {
+          surfaceNativeToolStart(run, params.item);
         }
         break;
       case "item/agentMessage/delta": {
@@ -279,7 +701,15 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
             partial: run.output,
           });
           run.textIndex = null;
+        } else {
+          surfaceNativeToolEnd(run, params.item);
         }
+        break;
+      case "item/commandExecution/outputDelta":
+        surfaceNativeToolOutput(run, params.itemId, params.delta || params.output);
+        break;
+      case "item/fileChange/outputDelta":
+        surfaceNativeToolOutput(run, params.itemId, params.delta || params.output);
         break;
       case "thread/tokenUsage/updated": {
         const total = params.tokenUsage?.total;
@@ -334,6 +764,7 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
           persistExtendedHistory: false,
         });
         threadId = result.thread?.id;
+        threadHasGsdReplay = false;
         initialized = true;
       } catch (error) {
         resetCodexState(error instanceof Error ? error : new Error(String(error)), true);
@@ -362,16 +793,6 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
     return true;
   }
 
-  function latestUserText(context: Context) {
-    const latest = [...context.messages].reverse().find((message: any) => message.role === "user") as any;
-    if (!latest) return "";
-    if (typeof latest.content === "string") return latest.content;
-    return (latest.content || [])
-      .filter((part: any) => part.type === "text")
-      .map((part: any) => part.text)
-      .join("\n");
-  }
-
   function streamCodexAppServer(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
     const stream = createAssistantMessageEventStream();
     const output = codexOutputForModel(model);
@@ -382,7 +803,7 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
       stream.end();
       return stream;
     }
-    activeRun = { stream, output, textIndex: null };
+    activeRun = { stream, output, textIndex: null, nativeTools: new Map() };
     const clearActiveRun = () => {
       if (activeRun?.stream === stream) {
         activeRun = null;
@@ -407,12 +828,16 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
       .then(() => continuePendingCodexTurn(context))
       .then((continued) => {
         if (continued) return;
+        const text = threadHasGsdReplay
+          ? codexLatestUserTextFromContext(context)
+          : codexPromptTextFromContext(context);
         return codexRequest("turn/start", {
           threadId,
-          input: [{ type: "text", text: latestUserText(context) }],
+          input: [{ type: "text", text }],
         });
       })
       .then((result) => {
+        if (result?.turn) threadHasGsdReplay = true;
         if (result?.turn?.id) activeTurnId = result.turn.id;
       })
       .catch((error) => {
