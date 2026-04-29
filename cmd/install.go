@@ -28,6 +28,9 @@ var installCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if err := syncServiceProviderEnvironment(platform); err != nil {
+			return err
+		}
 
 		if platform.IsInstalled() {
 			fmt.Println("Service already installed.")

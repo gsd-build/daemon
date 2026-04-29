@@ -134,6 +134,9 @@ func syncInstalledServiceAfterPair(platform service.Platform) (serviceAction, er
 	if !platform.IsInstalled() {
 		return serviceActionNotInstalled, nil
 	}
+	if err := syncServiceProviderEnvironment(platform); err != nil {
+		return "", err
+	}
 	if platform.IsRunning() {
 		if err := platform.Stop(); err != nil {
 			return "", fmt.Errorf("stop service: %w", err)

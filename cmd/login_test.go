@@ -11,6 +11,7 @@ type fakePlatform struct {
 	running   bool
 	starts    int
 	stops     int
+	syncs     int
 }
 
 func (f *fakePlatform) Install() error {
@@ -34,6 +35,11 @@ func (f *fakePlatform) Stop() error {
 	f.running = false
 	f.stops++
 	return nil
+}
+
+func (f *fakePlatform) SyncEnvironment(keys []string) ([]string, error) {
+	f.syncs++
+	return nil, nil
 }
 
 func (f *fakePlatform) Restart() error {
@@ -96,6 +102,9 @@ func TestSyncInstalledServiceAfterPairRestartsRunningService(t *testing.T) {
 	if platform.starts != 1 {
 		t.Fatalf("starts = %d, want 1", platform.starts)
 	}
+	if platform.syncs != 1 {
+		t.Fatalf("syncs = %d, want 1", platform.syncs)
+	}
 }
 
 func TestSyncInstalledServiceAfterPairStartsStoppedService(t *testing.T) {
@@ -115,6 +124,9 @@ func TestSyncInstalledServiceAfterPairStartsStoppedService(t *testing.T) {
 	if platform.starts != 1 {
 		t.Fatalf("starts = %d, want 1", platform.starts)
 	}
+	if platform.syncs != 1 {
+		t.Fatalf("syncs = %d, want 1", platform.syncs)
+	}
 }
 
 func TestSyncInstalledServiceAfterPairNoopsWithoutInstalledService(t *testing.T) {
@@ -133,5 +145,8 @@ func TestSyncInstalledServiceAfterPairNoopsWithoutInstalledService(t *testing.T)
 	}
 	if platform.starts != 0 {
 		t.Fatalf("starts = %d, want 0", platform.starts)
+	}
+	if platform.syncs != 0 {
+		t.Fatalf("syncs = %d, want 0", platform.syncs)
 	}
 }

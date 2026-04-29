@@ -15,6 +15,7 @@ type Platform interface {
 	Uninstall() error
 	Start() error
 	Stop() error
+	SyncEnvironment(keys []string) ([]string, error)
 	// Restart cycles the service atomically. Implementations use the
 	// platform-native restart (launchctl kickstart -k, systemctl restart) so
 	// the service supervisor doesn't race with us between Stop() and Start().

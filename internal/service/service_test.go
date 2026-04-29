@@ -1,8 +1,10 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -90,4 +92,70 @@ func TestSystemdUnitContent(t *testing.T) {
 	if !strings.Contains(unit, "WantedBy=default.target") {
 		t.Error("unit missing WantedBy=default.target")
 	}
+}
+
+func TestSyncCurrentEnvironmentSetsNonEmptyProviderKeys(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "  or-key  ")
+	t.Setenv("KIMI_API_KEY", "")
+	t.Setenv("ZAI_API_KEY", "zai-key")
+
+	calls := make(map[string]string)
+	synced, err := syncCurrentEnvironment([]string{
+		"OPENROUTER_API_KEY",
+		"KIMI_API_KEY",
+		"ZAI_API_KEY",
+	}, func(key string, value string) error {
+		calls[key] = value
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("syncCurrentEnvironment() error = %v", err)
+	}
+	wantSynced := []string{"OPENROUTER_API_KEY", "ZAI_API_KEY"}
+	if !reflect.DeepEqual(synced, wantSynced) {
+		t.Fatalf("synced = %#v, want %#v", synced, wantSynced)
+	}
+	if calls["OPENROUTER_API_KEY"] != "or-key" {
+		t.Errorf("OPENROUTER_API_KEY value = %q", calls["OPENROUTER_API_KEY"])
+	}
+	if calls["ZAI_API_KEY"] != "zai-key" {
+		t.Errorf("ZAI_API_KEY value = %q", calls["ZAI_API_KEY"])
+	}
+	if _, ok := calls["KIMI_API_KEY"]; ok {
+		t.Fatal("blank KIMI_API_KEY should not be synced")
+	}
+}
+
+func TestSyncCurrentEnvironmentReturnsKeyNameOnError(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "or-key")
+
+	_, err := syncCurrentEnvironment([]string{"OPENROUTER_API_KEY"}, func(key string, value string) error {
+		return errors.New("set failed")
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
+		t.Fatalf("error should name the failed key: %v", err)
+	}
+	if strings.Contains(err.Error(), "or-key") {
+		t.Fatalf("error must not include secret value: %v", err)
+	}
+}
+
+func TestProviderEnvironmentKeysIncludeOpenRouterAndDirectProviders(t *testing.T) {
+	for _, key := range []string{"OPENROUTER_API_KEY", "KIMI_API_KEY", "ZAI_API_KEY"} {
+		if !containsString(ProviderEnvironmentKeys, key) {
+			t.Fatalf("ProviderEnvironmentKeys missing %s", key)
+		}
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
