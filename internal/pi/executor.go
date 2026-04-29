@@ -111,6 +111,38 @@ func piRPCCommand(ctx context.Context, binaryPath string, cwd string, sessionFil
 	return cmd
 }
 
+func processArgs(opts Options) []string {
+	args := []string{
+		"-e", opts.ExtensionPath,
+		"--provider", ProviderOrDefault(opts.Provider),
+		"--no-extensions", "--no-prompt-templates",
+		"--offline",
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if customInstructions := strings.TrimSpace(opts.CustomInstructions); customInstructions != "" {
+		args = append(args, "--append-system-prompt", customInstructions)
+	}
+	if opts.DisableSkills {
+		args = append(args, "--no-skills")
+	} else {
+		for _, path := range opts.SkillPaths {
+			if path != "" {
+				args = append(args, "--skill", path)
+			}
+		}
+	}
+	return args
+}
+
+func processEnv(base []string, opts Options) []string {
+	return planCapabilityEnv(
+		browserEnv(base, opts.BrowserGrantID, opts.BrowserID, opts.BrowserSessionID),
+		opts.PlanCapability,
+	)
+}
+
 // UIRequest is a question or prompt the agent issued through pi's UI APIs.
 type UIRequest struct {
 	ID          string
@@ -150,27 +182,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		return fmt.Errorf("pi extension not found at %s: %w", e.opts.ExtensionPath, err)
 	}
 
-	args := []string{
-		"-e", e.opts.ExtensionPath,
-		"--provider", e.opts.Provider,
-		"--no-extensions", "--no-prompt-templates",
-		"--offline",
-	}
-	if e.opts.Model != "" {
-		args = append(args, "--model", e.opts.Model)
-	}
-	if customInstructions := strings.TrimSpace(e.opts.CustomInstructions); customInstructions != "" {
-		args = append(args, "--append-system-prompt", customInstructions)
-	}
-	if e.opts.DisableSkills {
-		args = append(args, "--no-skills")
-	} else {
-		for _, path := range e.opts.SkillPaths {
-			if path != "" {
-				args = append(args, "--skill", path)
-			}
-		}
-	}
+	args := processArgs(e.opts)
 
 	slog.Info("starting pi",
 		"binary", e.opts.BinaryPath,
@@ -186,10 +198,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	)
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
-	cmd.Env = planCapabilityEnv(
-		browserEnv(os.Environ(), e.opts.BrowserGrantID, e.opts.BrowserID, e.opts.BrowserSessionID),
-		e.opts.PlanCapability,
-	)
+	cmd.Env = processEnv(os.Environ(), e.opts)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()

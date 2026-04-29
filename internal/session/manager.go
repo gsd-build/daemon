@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/sockapi"
 )
 
@@ -128,6 +130,9 @@ func (m *Manager) Spawn(
 	if opts.Uploader == nil {
 		opts.Uploader = m.uploader
 	}
+	opts.OnTaskIdle = func() {
+		m.ReapIdleWorkers(m.cfg.EffectiveWarmWorkerIdle(), m.cfg.EffectiveWarmWorkerIdleCap())
+	}
 
 	actor, err := NewActor(opts)
 	if err != nil {
@@ -193,6 +198,76 @@ func (m *Manager) StopAll() {
 	m.actors = make(map[string]*Actor)
 }
 
+func selectIdleWorkerVictims(snapshots []pi.WorkerSnapshot, now time.Time, maxIdle time.Duration, idleCap int, memoryPressure bool) map[string]string {
+	victims := make(map[string]string)
+	idle := make([]pi.WorkerSnapshot, 0, len(snapshots))
+	for _, snap := range snapshots {
+		if snap.State != "idle" {
+			continue
+		}
+		if memoryPressure {
+			victims[snap.SessionID] = "memory"
+			continue
+		}
+		if now.Sub(snap.LastUsedAt) >= maxIdle {
+			victims[snap.SessionID] = "ttl"
+			continue
+		}
+		idle = append(idle, snap)
+	}
+	sort.Slice(idle, func(i, j int) bool {
+		return idle[i].LastUsedAt.Before(idle[j].LastUsedAt)
+	})
+	for len(idle) > idleCap {
+		victim := idle[0]
+		idle = idle[1:]
+		victims[victim.SessionID] = "lru"
+	}
+	return victims
+}
+
+func (m *Manager) WorkerSnapshots() []pi.WorkerSnapshot {
+	m.mu.Lock()
+	actors := make([]*Actor, 0, len(m.actors))
+	for _, a := range m.actors {
+		actors = append(actors, a)
+	}
+	m.mu.Unlock()
+
+	var out []pi.WorkerSnapshot
+	for _, a := range actors {
+		if snap, ok := a.WorkerSnapshot(); ok {
+			out = append(out, snap)
+		}
+	}
+	return out
+}
+
+func (m *Manager) ReapIdleWorkers(maxIdle time.Duration, idleCap int) int {
+	m.mu.Lock()
+	actors := make(map[string]*Actor, len(m.actors))
+	for id, a := range m.actors {
+		actors[id] = a
+	}
+	m.mu.Unlock()
+
+	snaps := make([]pi.WorkerSnapshot, 0, len(actors))
+	for _, a := range actors {
+		if snap, ok := a.WorkerSnapshot(); ok {
+			snaps = append(snaps, snap)
+		}
+	}
+	victims := selectIdleWorkerVictims(snaps, time.Now(), maxIdle, idleCap, memoryTooLow())
+	reaped := 0
+	for sessionID, reason := range victims {
+		actor := actors[sessionID]
+		if actor != nil && actor.StopIdleWorker(context.Background(), reason) {
+			reaped++
+		}
+	}
+	return reaped
+}
+
 // memoryTooLow returns true if available system memory is below 10% of total.
 func memoryTooLow() bool {
 	total, avail, err := systemMemory()
@@ -238,6 +313,23 @@ func (m *Manager) StartReaper(ctx context.Context, tick time.Duration, maxIdle t
 			case <-ticker.C:
 				if n := m.ReapIdleActors(maxIdle); n > 0 {
 					slog.Info("reaped idle actors", "count", n)
+				}
+			}
+		}
+	}()
+}
+
+func (m *Manager) StartWorkerReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration, idleCap int) {
+	go func() {
+		ticker := time.NewTicker(tick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n := m.ReapIdleWorkers(maxIdle, idleCap); n > 0 {
+					slog.Info("reaped idle pi workers", "count", n)
 				}
 			}
 		}

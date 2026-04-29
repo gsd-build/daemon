@@ -31,6 +31,28 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	return destPath
 }
 
+func writeWarmFakePi(t *testing.T, destDir string) string {
+	t.Helper()
+	path := filepath.Join(destDir, "fake-pi-warm")
+	body := `#!/bin/sh
+count=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      count=$((count + 1))
+      printf '%s\n' '{"type":"response","command":"prompt","success":true}'
+      printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"warm-$count\"},\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"warm-$count\"}],\"api\":\"anthropic-messages\",\"provider\":\"claude-cli\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"total\":0}}}}"
+      printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"warm-$count\"}],\"usage\":{\"input\":2,\"output\":3,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0.001}}}]}"
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(path, []byte(body), 0700); err != nil {
+		t.Fatalf("write warm fake pi: %v", err)
+	}
+	return path
+}
+
 func writeFakePiExtension(t *testing.T, destDir string) string {
 	t.Helper()
 	path := filepath.Join(destDir, "pi-extension", "index.ts")

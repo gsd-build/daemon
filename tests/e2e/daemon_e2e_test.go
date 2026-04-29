@@ -135,6 +135,101 @@ func TestE2EHappyPath(t *testing.T) {
 	}
 }
 
+func TestDaemonWarmPiWorkerReusesProcessAcrossTasks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e integration test in short mode")
+	}
+
+	const (
+		machineID = "test-machine-warm"
+		authToken = "test-token-warm"
+		sessionID = "test-session-warm"
+		channelID = "ch-warm"
+	)
+
+	relay := NewStubRelay(t)
+	home := makeTestHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("GSD_WARM_PI_WORKERS", "1")
+	t.Setenv("GSD_PI_EXTENSION_PATH", writeFakePiExtension(t, home))
+	fakePi := writeWarmFakePi(t, home)
+
+	cfg := makeTestConfig(relay.URL(), machineID, authToken)
+	cwd := t.TempDir()
+
+	daemon, err := loop.NewWithPiBinaryPath(cfg, "test-version", fakePi)
+	if err != nil {
+		t.Fatalf("loop.NewWithPiBinaryPath: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- daemon.Run(ctx)
+	}()
+
+	if err := relay.WaitForConnection(5 * time.Second); err != nil {
+		t.Fatalf("waiting for daemon connection: %v", err)
+	}
+	if _, err := relay.WaitForFrame(protocol.MsgTypeHello, 3*time.Second); err != nil {
+		t.Fatalf("waiting for Hello: %v", err)
+	}
+	if err := relay.Send(&protocol.Welcome{Type: protocol.MsgTypeWelcome}); err != nil {
+		t.Fatalf("send Welcome: %v", err)
+	}
+
+	waitForTaskFrame := func(msgType string, taskID string, timeout time.Duration) {
+		t.Helper()
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			for _, env := range relay.Received() {
+				if env.Type != msgType {
+					continue
+				}
+				switch payload := env.Payload.(type) {
+				case *protocol.TaskStarted:
+					if payload.TaskID == taskID {
+						return
+					}
+				case *protocol.TaskComplete:
+					if payload.TaskID == taskID {
+						return
+					}
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("waiting for %s %s", msgType, taskID)
+	}
+
+	for _, taskID := range []string{"task-warm-1", "task-warm-2"} {
+		if err := relay.Send(&protocol.Task{
+			Type: protocol.MsgTypeTask, TaskID: taskID, SessionID: sessionID,
+			ChannelID: channelID, Prompt: taskID, CWD: cwd, Engine: "pi",
+		}); err != nil {
+			t.Fatalf("send Task %s: %v", taskID, err)
+		}
+		waitForTaskFrame(protocol.MsgTypeTaskStarted, taskID, 5*time.Second)
+		waitForTaskFrame(protocol.MsgTypeTaskComplete, taskID, 15*time.Second)
+	}
+
+	workers := daemon.Workers()
+	if len(workers) != 1 {
+		t.Fatalf("workers = %d, want 1", len(workers))
+	}
+	if workers[0].State != "idle" {
+		t.Fatalf("worker state = %q, want idle", workers[0].State)
+	}
+
+	cancel()
+	select {
+	case <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("daemon did not shut down within 5s after cancel")
+	}
+}
+
 func TestE2EQuestionFlow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e integration test in short mode")

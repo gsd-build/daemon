@@ -52,6 +52,29 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":[{"type"
 	return path
 }
 
+func writeWarmFakePi(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "fake-pi-warm")
+	script := `#!/bin/sh
+count=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      count=$((count + 1))
+      printf '%s\n' '{"type":"response","command":"prompt","success":true}'
+      printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"turn-$count\"},\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"turn-$count\"}],\"api\":\"anthropic-messages\",\"provider\":\"claude-cli\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":0,\"cost\":{\"total\":0}}}}"
+      printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"turn-$count\"}],\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"cost\":{\"total\":0.001}}}]}"
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write warm fake pi: %v", err)
+	}
+	return path
+}
+
 func writeFakePiExtension(t *testing.T) string {
 	t.Helper()
 	extensionPath := filepath.Join(t.TempDir(), "index.ts")
@@ -657,6 +680,17 @@ func (r *fakeRelay) waitForTaskComplete(t *testing.T, timeout time.Duration) boo
 	})
 }
 
+func (r *fakeRelay) waitForTaskCompleteID(t *testing.T, taskID string, timeout time.Duration) bool {
+	return r.waitFor(t, timeout, func(frames []any) bool {
+		for _, f := range frames {
+			if complete, ok := f.(*protocol.TaskComplete); ok && complete.TaskID == taskID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func (r *fakeRelay) waitForType(t *testing.T, msgType string, timeout time.Duration) bool {
 	return r.waitFor(t, timeout, func(frames []any) bool {
 		for _, f := range frames {
@@ -745,6 +779,49 @@ func TestCancelTask_ActorStaysAlive(t *testing.T) {
 		t.Fatalf("actor.Run() should not have returned, got: %v", err)
 	default:
 		// good — still running
+	}
+}
+
+func TestActorReusesWarmPiWorkerForMatchingTasks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	relay := newFakeRelay()
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID:    "sess-warm",
+		CWD:          t.TempDir(),
+		Relay:        relay,
+		PiBinaryPath: writeWarmFakePi(t),
+	}))
+	if err != nil {
+		t.Fatalf("NewActor: %v", err)
+	}
+	actor.useWarmPiWorker = true
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		_ = actor.Run(ctx)
+	}()
+
+	if err := actor.SendTask(protocol.Task{TaskID: "t1", SessionID: "sess-warm", ChannelID: "ch", Prompt: "first", Engine: "pi"}); err != nil {
+		t.Fatalf("send t1: %v", err)
+	}
+	if !relay.waitForTaskCompleteID(t, "t1", 5*time.Second) {
+		t.Fatal("t1 did not complete")
+	}
+	firstPID := actor.workerPIDForTest()
+	if firstPID == 0 {
+		t.Fatal("expected warm worker PID after first task")
+	}
+
+	if err := actor.SendTask(protocol.Task{TaskID: "t2", SessionID: "sess-warm", ChannelID: "ch", Prompt: "second", Engine: "pi"}); err != nil {
+		t.Fatalf("send t2: %v", err)
+	}
+	if !relay.waitForTaskCompleteID(t, "t2", 5*time.Second) {
+		t.Fatal("t2 did not complete")
+	}
+	if got := actor.workerPIDForTest(); got != firstPID {
+		t.Fatalf("worker PID = %d, want reused PID %d", got, firstPID)
 	}
 }
 
