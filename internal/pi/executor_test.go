@@ -156,6 +156,48 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
+func TestExecutorPassesNoSkillsWhenDisabled(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	fakePi := writeFakePi(t, `
+: > "`+argsFile+`"
+for arg in "$@"; do
+  printf '%s\000' "$arg" >> "`+argsFile+`"
+done
+IFS= read -r prompt_frame || true
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`)
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write extension: %v", err)
+	}
+
+	exec := NewExecutor(Options{
+		BinaryPath:    fakePi,
+		CWD:           t.TempDir(),
+		ExtensionPath: extensionPath,
+		Provider:      "claude-cli",
+		Prompt:        "hello",
+		DisableSkills: true,
+		SkillPaths:    []string{"/tmp/should-not-be-used/SKILL.md"},
+	})
+
+	if err := exec.Run(context.Background(), func(claude.Event) error { return nil }, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	if !strings.Contains(string(data), "--no-skills\x00") {
+		t.Fatalf("pi args missing --no-skills: %q", string(data))
+	}
+	if strings.Contains(string(data), "--skill\x00") {
+		t.Fatalf("pi args should not include --skill when disabled: %q", string(data))
+	}
+}
+
 func TestExecutorPassesPlanCapabilityEnv(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "pi.env")
 	fakePi := writeFakePi(t, `

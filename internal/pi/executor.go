@@ -63,6 +63,7 @@ type Options struct {
 	ExtensionPath      string // forwarded as -e <path>
 	Provider           string // forwarded as --provider <name>
 	SkillPaths         []string
+	DisableSkills      bool
 	BrowserGrantID     string
 	BrowserID          string
 	BrowserSessionID   string
@@ -161,9 +162,13 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	if customInstructions := strings.TrimSpace(e.opts.CustomInstructions); customInstructions != "" {
 		args = append(args, "--append-system-prompt", customInstructions)
 	}
-	for _, path := range e.opts.SkillPaths {
-		if path != "" {
-			args = append(args, "--skill", path)
+	if e.opts.DisableSkills {
+		args = append(args, "--no-skills")
+	} else {
+		for _, path := range e.opts.SkillPaths {
+			if path != "" {
+				args = append(args, "--skill", path)
+			}
 		}
 	}
 
@@ -173,6 +178,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"model", e.opts.Model,
 		"provider", e.opts.Provider,
 		"extension", e.opts.ExtensionPath,
+		"disableSkills", e.opts.DisableSkills,
 		"skillCount", len(e.opts.SkillPaths),
 		"promptLen", len(e.opts.Prompt),
 		"customInstructionsLen", len(strings.TrimSpace(e.opts.CustomInstructions)),
