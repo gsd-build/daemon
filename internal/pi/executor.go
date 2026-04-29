@@ -42,6 +42,9 @@ func piExitError(code int, stderr string) error {
 			stderr,
 		)
 	}
+	if strings.Contains(stderr, "Unknown provider") {
+		return fmt.Errorf("pi provider is not registered by the daemon extension. Raw error: %s", stderr)
+	}
 	if stderr != "" {
 		return fmt.Errorf("pi exited with code %d: %s", code, stderr)
 	}
@@ -79,6 +82,9 @@ type Executor struct {
 func NewExecutor(opts Options) *Executor {
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = "pi"
+	}
+	if strings.TrimSpace(opts.Provider) == "" {
+		opts.Provider = "claude-cli"
 	}
 	return &Executor{opts: opts}
 }
