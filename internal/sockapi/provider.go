@@ -11,6 +11,18 @@ type SessionInfo struct {
 	IdleSince *time.Time `json:"idleSince"` // when actor became idle; nil when executing
 }
 
+type WorkerInfo struct {
+	SessionID  string     `json:"sessionID"`
+	Provider   string     `json:"provider"`
+	Model      string     `json:"model"`
+	PID        int        `json:"pid"`
+	KeyHash    string     `json:"keyHash"`
+	State      string     `json:"state"`
+	StartedAt  time.Time  `json:"startedAt"`
+	LastUsedAt time.Time  `json:"lastUsedAt"`
+	IdleSince  *time.Time `json:"idleSince"`
+}
+
 // StatusData is the full daemon status snapshot.
 type StatusData struct {
 	Version            string `json:"version"`
@@ -21,6 +33,10 @@ type StatusData struct {
 	ActiveSessions     int    `json:"activeSessions"`
 	InFlightTasks      int    `json:"inFlightTasks"`
 	MaxConcurrentTasks int    `json:"maxConcurrentTasks"`
+	WarmWorkerIdleTTL  string `json:"warmWorkerIdleTTL"`
+	WarmWorkerIdleCap  int    `json:"warmWorkerIdleCap"`
+	ActiveWarmWorkers  int    `json:"activeWarmWorkers"`
+	IdleWarmWorkers    int    `json:"idleWarmWorkers"`
 	LogLevel           string `json:"logLevel"`
 }
 
@@ -34,4 +50,5 @@ type StatusProvider interface {
 	Health() HealthData
 	Status() StatusData
 	Sessions() []SessionInfo
+	Workers() []WorkerInfo
 }

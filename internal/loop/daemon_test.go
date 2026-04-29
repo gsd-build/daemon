@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/preview"
 	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
@@ -748,12 +749,15 @@ func (m *mockManager) ActiveTaskIDs() []string                                  
 func (m *mockManager) ActiveCount() (total int, executing int)                                    { return 0, 0 }
 func (m *mockManager) InFlightCount() int                                                         { return 0 }
 func (m *mockManager) StartReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration) {}
+func (m *mockManager) StartWorkerReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration, idleCap int) {
+}
 func (m *mockManager) StopAll() {
 	if m.stopAllFn != nil {
 		m.stopAllFn()
 	}
 }
-func (m *mockManager) SessionInfos() []sockapi.SessionInfo { return nil }
+func (m *mockManager) SessionInfos() []sockapi.SessionInfo  { return nil }
+func (m *mockManager) WorkerSnapshots() []pi.WorkerSnapshot { return nil }
 
 type loopBrowserService struct{}
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/pi"
 	protocol "github.com/gsd-build/protocol-go"
 )
 
@@ -281,6 +282,63 @@ func TestStartReaper(t *testing.T) {
 
 	if mgr.Get("s1") != nil {
 		t.Error("expected reaper to remove idle actor s1")
+	}
+}
+
+func TestSelectIdleWorkerVictimsStopsExpiredWorkers(t *testing.T) {
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	victims := selectIdleWorkerVictims([]pi.WorkerSnapshot{
+		{SessionID: "s1", State: "idle", LastUsedAt: now.Add(-25 * time.Minute)},
+		{SessionID: "s2", State: "idle", LastUsedAt: now.Add(-5 * time.Minute)},
+		{SessionID: "s3", State: "executing", LastUsedAt: now.Add(-30 * time.Minute)},
+	}, now, 20*time.Minute, 4, false)
+
+	if got := victims["s1"]; got != "ttl" {
+		t.Fatalf("victims[s1] = %q, want ttl", got)
+	}
+	if _, ok := victims["s2"]; ok {
+		t.Fatal("fresh idle worker selected as victim")
+	}
+	if _, ok := victims["s3"]; ok {
+		t.Fatal("executing worker selected as victim")
+	}
+}
+
+func TestSelectIdleWorkerVictimsUsesLRUCap(t *testing.T) {
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	victims := selectIdleWorkerVictims([]pi.WorkerSnapshot{
+		{SessionID: "oldest", State: "idle", LastUsedAt: now.Add(-3 * time.Minute)},
+		{SessionID: "middle", State: "idle", LastUsedAt: now.Add(-2 * time.Minute)},
+		{SessionID: "newest", State: "idle", LastUsedAt: now.Add(-1 * time.Minute)},
+	}, now, 20*time.Minute, 1, false)
+
+	if got := victims["oldest"]; got != "lru" {
+		t.Fatalf("victims[oldest] = %q, want lru", got)
+	}
+	if got := victims["middle"]; got != "lru" {
+		t.Fatalf("victims[middle] = %q, want lru", got)
+	}
+	if _, ok := victims["newest"]; ok {
+		t.Fatal("newest idle worker selected as victim")
+	}
+}
+
+func TestSelectIdleWorkerVictimsEvictsAllIdleUnderMemoryPressure(t *testing.T) {
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	victims := selectIdleWorkerVictims([]pi.WorkerSnapshot{
+		{SessionID: "idle-1", State: "idle", LastUsedAt: now.Add(-1 * time.Minute)},
+		{SessionID: "idle-2", State: "idle", LastUsedAt: now.Add(-2 * time.Minute)},
+		{SessionID: "busy", State: "executing", LastUsedAt: now.Add(-30 * time.Minute)},
+	}, now, 20*time.Minute, 4, true)
+
+	if got := victims["idle-1"]; got != "memory" {
+		t.Fatalf("victims[idle-1] = %q, want memory", got)
+	}
+	if got := victims["idle-2"]; got != "memory" {
+		t.Fatalf("victims[idle-2] = %q, want memory", got)
+	}
+	if _, ok := victims["busy"]; ok {
+		t.Fatal("executing worker selected under memory pressure")
 	}
 }
 

@@ -12,11 +12,13 @@ type mockProvider struct {
 	health   HealthData
 	status   StatusData
 	sessions []SessionInfo
+	workers  []WorkerInfo
 }
 
 func (m *mockProvider) Health() HealthData      { return m.health }
 func (m *mockProvider) Status() StatusData      { return m.status }
 func (m *mockProvider) Sessions() []SessionInfo { return m.sessions }
+func (m *mockProvider) Workers() []WorkerInfo   { return m.workers }
 
 func TestHealthReturnsOK(t *testing.T) {
 	p := &mockProvider{health: HealthData{Status: "ok"}}
@@ -72,6 +74,10 @@ func TestStatusReturnsFullData(t *testing.T) {
 			ActiveSessions:     2,
 			InFlightTasks:      1,
 			MaxConcurrentTasks: 5,
+			WarmWorkerIdleTTL:  "20m0s",
+			WarmWorkerIdleCap:  4,
+			ActiveWarmWorkers:  1,
+			IdleWarmWorkers:    1,
 			LogLevel:           "info",
 		},
 	}
@@ -111,6 +117,18 @@ func TestStatusReturnsFullData(t *testing.T) {
 	}
 	if got.MaxConcurrentTasks != 5 {
 		t.Errorf("expected maxConcurrentTasks 5, got %d", got.MaxConcurrentTasks)
+	}
+	if got.WarmWorkerIdleTTL != "20m0s" {
+		t.Errorf("expected warmWorkerIdleTTL 20m0s, got %s", got.WarmWorkerIdleTTL)
+	}
+	if got.WarmWorkerIdleCap != 4 {
+		t.Errorf("expected warmWorkerIdleCap 4, got %d", got.WarmWorkerIdleCap)
+	}
+	if got.ActiveWarmWorkers != 1 {
+		t.Errorf("expected activeWarmWorkers 1, got %d", got.ActiveWarmWorkers)
+	}
+	if got.IdleWarmWorkers != 1 {
+		t.Errorf("expected idleWarmWorkers 1, got %d", got.IdleWarmWorkers)
 	}
 	if got.LogLevel != "info" {
 		t.Errorf("expected logLevel info, got %s", got.LogLevel)
@@ -175,5 +193,47 @@ func TestSessionsReturnsEmptyArray(t *testing.T) {
 	body := w.Body.String()
 	if body != "[]\n" {
 		t.Fatalf("expected body to be []\\n, got %q", body)
+	}
+}
+
+func TestWorkersReturnsActiveList(t *testing.T) {
+	now := time.Now().UTC()
+	idle := now.Add(-30 * time.Second)
+	p := &mockProvider{
+		workers: []WorkerInfo{
+			{
+				SessionID:  "sess-1",
+				Provider:   "claude-cli",
+				Model:      "claude-sonnet-4-6",
+				PID:        1234,
+				KeyHash:    "abc123",
+				State:      "idle",
+				StartedAt:  now,
+				LastUsedAt: idle,
+				IdleSince:  &idle,
+			},
+		},
+	}
+	h := newHandler(p)
+
+	req := httptest.NewRequest(http.MethodGet, "/workers", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var got []WorkerInfo
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 worker, got %d", len(got))
+	}
+	if got[0].SessionID != "sess-1" || got[0].Provider != "claude-cli" || got[0].PID != 1234 {
+		t.Fatalf("unexpected worker: %+v", got[0])
+	}
+	if got[0].State != "idle" || got[0].KeyHash != "abc123" {
+		t.Fatalf("unexpected worker state: %+v", got[0])
 	}
 }

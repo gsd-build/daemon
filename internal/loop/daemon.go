@@ -20,6 +20,7 @@ import (
 	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/fs"
+	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/preview"
 	"github.com/gsd-build/daemon/internal/relay"
@@ -40,8 +41,10 @@ type SessionManager interface {
 	ActiveCount() (total int, executing int)
 	InFlightCount() int
 	StartReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration)
+	StartWorkerReaper(ctx context.Context, tick time.Duration, maxIdle time.Duration, idleCap int)
 	StopAll()
 	SessionInfos() []sockapi.SessionInfo
+	WorkerSnapshots() []pi.WorkerSnapshot
 }
 
 // Daemon is the running daemon state.
@@ -438,6 +441,17 @@ func (d *Daemon) Health() sockapi.HealthData {
 // Status implements sockapi.StatusProvider.
 func (d *Daemon) Status() sockapi.StatusData {
 	total, executing := d.manager.ActiveCount()
+	workerSnapshots := d.manager.WorkerSnapshots()
+	activeWorkers := 0
+	idleWorkers := 0
+	for _, snap := range workerSnapshots {
+		switch snap.State {
+		case "executing":
+			activeWorkers++
+		case "idle":
+			idleWorkers++
+		}
+	}
 	return sockapi.StatusData{
 		Version:            d.version,
 		Uptime:             time.Since(d.startedAt).Truncate(time.Second).String(),
@@ -447,6 +461,10 @@ func (d *Daemon) Status() sockapi.StatusData {
 		ActiveSessions:     total,
 		InFlightTasks:      executing,
 		MaxConcurrentTasks: d.cfg.EffectiveMaxConcurrentTasks(),
+		WarmWorkerIdleTTL:  d.cfg.EffectiveWarmWorkerIdle().String(),
+		WarmWorkerIdleCap:  d.cfg.EffectiveWarmWorkerIdleCap(),
+		ActiveWarmWorkers:  activeWorkers,
+		IdleWarmWorkers:    idleWorkers,
 		LogLevel:           d.cfg.LogLevel,
 	}
 }
@@ -454,6 +472,25 @@ func (d *Daemon) Status() sockapi.StatusData {
 // Sessions implements sockapi.StatusProvider.
 func (d *Daemon) Sessions() []sockapi.SessionInfo {
 	return d.manager.SessionInfos()
+}
+
+func (d *Daemon) Workers() []sockapi.WorkerInfo {
+	snapshots := d.manager.WorkerSnapshots()
+	out := make([]sockapi.WorkerInfo, 0, len(snapshots))
+	for _, snap := range snapshots {
+		out = append(out, sockapi.WorkerInfo{
+			SessionID:  snap.SessionID,
+			Provider:   snap.Provider,
+			Model:      snap.Model,
+			PID:        snap.PID,
+			KeyHash:    snap.KeyHash,
+			State:      snap.State,
+			StartedAt:  snap.StartedAt,
+			LastUsedAt: snap.LastUsedAt,
+			IdleSince:  snap.IdleSince,
+		})
+	}
+	return out
 }
 
 // Run connects to the relay and blocks until ctx is canceled.
@@ -490,6 +527,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.runAgentTouchedFileSweep(ctx)
 	go d.runHeartbeat(ctx)
 	d.manager.StartReaper(ctx, 5*time.Minute, 30*time.Minute)
+	d.manager.StartWorkerReaper(ctx, time.Minute, d.cfg.EffectiveWarmWorkerIdle(), d.cfg.EffectiveWarmWorkerIdleCap())
 	defer d.gracefulShutdown(ctx)
 
 	slog.Info("connecting to relay", "url", d.cfg.RelayURL, "machine", d.cfg.MachineID)
