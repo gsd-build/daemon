@@ -719,6 +719,15 @@ export default function (pi: ExtensionAPI) {
         contextWindow: 1_000_000,
         maxTokens: 8_192,
       },
+      {
+        id: "claude-haiku-4-5-20251001",
+        name: "Claude Haiku 4.5 (via SDK)",
+        reasoning: false,
+        input: ["text", "image"],
+        cost: { input: 1.0, output: 5.0, cacheRead: 0.10, cacheWrite: 1.25 },
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+      },
     ],
     streamSimple: streamClaudeSdk,
   });
