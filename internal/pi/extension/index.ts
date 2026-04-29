@@ -57,6 +57,7 @@ const CLAUDE_BUILTINS = [
 const MCP_PREFIX = "mcp__pi-tools__";
 const SDK_SESSION_NAMESPACE = "gsd-pi-claude-sdk:v1";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EPIPE_GUARD_KEY = "__gsdPiClaudeSdkEpipeGuardInstalled";
 
 type SdkPromptInputMessage = SDKUserMessage | SDKUserMessageReplay;
 
@@ -72,6 +73,22 @@ type BrowserGrant = {
   browserId: string;
   sessionId: string;
 };
+
+function isWriteEpipe(err: unknown) {
+  return isRecord(err) && err.code === "EPIPE" && err.syscall === "write";
+}
+
+function installClaudeSdkPipeGuard() {
+  const state = globalThis as any;
+  if (state[EPIPE_GUARD_KEY]) return;
+  state[EPIPE_GUARD_KEY] = true;
+  process.on("uncaughtException", (err) => {
+    if (isWriteEpipe(err)) return;
+    throw err;
+  });
+}
+
+installClaudeSdkPipeGuard();
 
 const BrowserToolParams = Type.Object({
   method: Type.String({ description: "Browser operation to execute." }),
@@ -507,7 +524,7 @@ function streamClaudeSdk(
         sdkOptions.systemPrompt = context.systemPrompt;
       }
 
-      const sdkSessionId = deriveClaudeSdkSessionId(options?.sessionId);
+      const sdkSessionId = crypto.randomUUID();
       const replayHistory = context.messages.length > 1;
       sdkOptions.sessionId = sdkSessionId;
 
