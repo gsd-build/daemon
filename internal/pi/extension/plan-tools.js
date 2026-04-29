@@ -1,4 +1,8 @@
 import { Type } from "@sinclair/typebox";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const MutationMetaParams = {
   expectedRevision: Type.Integer({ minimum: 0 }),
@@ -14,6 +18,24 @@ const PlanItemStatus = Type.Union([
   Type.Literal("cancelled"),
 ]);
 
+const PlanSubTask = Type.Object({
+  id: Type.String(),
+  text: Type.String(),
+  done: Type.Boolean(),
+});
+
+const PlanCriterion = Type.Object({
+  id: Type.String(),
+  text: Type.String(),
+  met: Type.Boolean(),
+});
+
+const PlanItemResult = Type.Object({
+  summary: Type.String(),
+  filesChanged: Type.Optional(Type.Array(Type.String())),
+  blockers: Type.Optional(Type.Array(Type.String())),
+});
+
 export function hasPlanCapability(env = process.env) {
   return Boolean(
     env.GSD_PLAN_API_BASE_URL &&
@@ -26,7 +48,7 @@ function endpoint(path, env = process.env) {
   return `${env.GSD_PLAN_API_BASE_URL.replace(/\/$/, "")}/api/agent-plan${path}`;
 }
 
-async function requestPlan(path, { method = "GET", body, signal } = {}, env = process.env) {
+async function fetchPlanJson(path, { method = "GET", body, signal } = {}, env = process.env) {
   const res = await fetch(endpoint(path, env), {
     method,
     headers: {
@@ -37,6 +59,11 @@ async function requestPlan(path, { method = "GET", body, signal } = {}, env = pr
     signal,
   });
   const json = await res.json().catch(() => ({}));
+  return { res, json };
+}
+
+async function requestPlan(path, { method = "GET", body, signal } = {}, env = process.env) {
+  const { res, json } = await fetchPlanJson(path, { method, body, signal }, env);
   return {
     content: [{ type: "text", text: JSON.stringify(json) }],
     isError: !res.ok || Boolean(json.error),
@@ -153,6 +180,49 @@ export function compactProjectState(json) {
 
 function encodePath(value) {
   return encodeURIComponent(value);
+}
+
+async function projectPlanItemStartedAt(planId, itemId, signal, env) {
+  try {
+    const { res, json } = await fetchPlanJson("/project-state", { signal }, env);
+    if (!res.ok || json?.error) return null;
+    const activePlan = json?.snapshot?.activePlan;
+    if (!activePlan || activePlan.id !== planId) return null;
+    const item = activePlan.items?.find((candidate) => candidate.id === itemId);
+    return item?.startedAt ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deriveFilesChanged({ startedAt, cwd = process.cwd(), signal } = {}) {
+  if (!startedAt) return [];
+  try {
+    const baseRef = startedAt.includes("T") ? `HEAD@{${startedAt}}` : startedAt;
+    const { stdout } = await execFileAsync("git", ["diff", "--name-only", baseRef, "HEAD"], {
+      cwd,
+      signal,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    return [...new Set(stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
+async function updateItemBody(params, signal, env) {
+  if (params.status !== "completed" || !params.result) return params;
+  const startedAt = await projectPlanItemStartedAt(params.planId, params.itemId, signal, env);
+  const filesChanged = await deriveFilesChanged({ startedAt, signal });
+  return {
+    ...params,
+    result: {
+      ...params.result,
+      filesChanged,
+      blockers: params.result.blockers ?? [],
+    },
+  };
 }
 
 export function registerPlanTools(pi, env = process.env) {
@@ -296,7 +366,8 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_update_item",
     label: "Update project plan item",
-    description: "Update a project plan item title, description, status, notes, or result.",
+    description:
+      "Update a project plan item title, description, status, notes, dependencies, or completion result.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -304,12 +375,87 @@ export function registerPlanTools(pi, env = process.env) {
       description: Type.Optional(Type.String()),
       status: Type.Optional(PlanItemStatus),
       agentNotes: Type.Optional(Type.String()),
-      result: Type.Optional(Type.String()),
+      dependsOn: Type.Optional(Type.Array(Type.String())),
+      result: Type.Optional(PlanItemResult),
+      ...MutationMetaParams,
+    }),
+    execute: async (_id, params, signal) =>
+      requestPlan(
+        `/plans/${encodePath(params.planId)}/items/${encodePath(params.itemId)}`,
+        { method: "PATCH", body: await updateItemBody(params, signal, env), signal },
+        env,
+      ),
+  });
+
+  pi.registerTool({
+    name: "plan_update_sub_tasks",
+    label: "Update project plan sub-tasks",
+    description: "Replace all agent-owned execution sub-tasks for a project plan item.",
+    parameters: Type.Object({
+      planId: Type.String(),
+      itemId: Type.String(),
+      subTasks: Type.Array(PlanSubTask),
       ...MutationMetaParams,
     }),
     execute: (_id, params, signal) =>
       requestPlan(
-        `/plans/${encodePath(params.planId)}/items/${encodePath(params.itemId)}`,
+        `/plans/${encodePath(params.planId)}/items/${encodePath(params.itemId)}/sub-tasks`,
+        { method: "PATCH", body: params, signal },
+        env,
+      ),
+  });
+
+  pi.registerTool({
+    name: "plan_update_agent_criteria",
+    label: "Update project plan agent criteria",
+    description: "Replace all agent-owned acceptance criteria for a project plan item.",
+    parameters: Type.Object({
+      planId: Type.String(),
+      itemId: Type.String(),
+      agentCriteria: Type.Array(PlanCriterion),
+      ...MutationMetaParams,
+    }),
+    execute: (_id, params, signal) =>
+      requestPlan(
+        `/plans/${encodePath(params.planId)}/items/${encodePath(params.itemId)}/agent-criteria`,
+        { method: "PATCH", body: params, signal },
+        env,
+      ),
+  });
+
+  pi.registerTool({
+    name: "plan_check_sub_task",
+    label: "Check project plan sub-task",
+    description: "Mark one project plan sub-task done or open.",
+    parameters: Type.Object({
+      planId: Type.String(),
+      itemId: Type.String(),
+      subTaskId: Type.String(),
+      done: Type.Boolean(),
+      ...MutationMetaParams,
+    }),
+    execute: (_id, params, signal) =>
+      requestPlan(
+        `/plans/${encodePath(params.planId)}/items/${encodePath(params.itemId)}/sub-tasks/${encodePath(params.subTaskId)}`,
+        { method: "PATCH", body: params, signal },
+        env,
+      ),
+  });
+
+  pi.registerTool({
+    name: "plan_check_criterion",
+    label: "Check project plan criterion",
+    description: "Mark one agent-owned project plan criterion met or open.",
+    parameters: Type.Object({
+      planId: Type.String(),
+      itemId: Type.String(),
+      criterionId: Type.String(),
+      met: Type.Boolean(),
+      ...MutationMetaParams,
+    }),
+    execute: (_id, params, signal) =>
+      requestPlan(
+        `/plans/${encodePath(params.planId)}/items/${encodePath(params.itemId)}/criteria/${encodePath(params.criterionId)}`,
         { method: "PATCH", body: params, signal },
         env,
       ),

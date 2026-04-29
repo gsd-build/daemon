@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { compactProjectState, hasPlanCapability, registerPlanTools } from "./plan-tools.js";
 
@@ -30,6 +34,8 @@ test("registerPlanTools registers project state and mutation tools", () => {
       "plan_add_item",
       "plan_archive",
       "plan_cancel_item",
+      "plan_check_criterion",
+      "plan_check_sub_task",
       "plan_create",
       "plan_get_archived_plan",
       "plan_get_project_state",
@@ -37,7 +43,9 @@ test("registerPlanTools registers project state and mutation tools", () => {
       "plan_rename",
       "plan_reorder_items",
       "plan_resume",
+      "plan_update_agent_criteria",
       "plan_update_item",
+      "plan_update_sub_tasks",
       "plan_update_user_context",
     ].sort(),
   );
@@ -267,4 +275,61 @@ test("plan_get_project_state returns compact state by default and full state on 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("plan_update_item completion appends derived filesChanged", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "gsd-plan-tools-"));
+  execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "a.txt"), "one\n");
+  execFileSync("git", ["add", "a.txt"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "base"], { cwd: repo, stdio: "ignore" });
+  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  writeFileSync(join(repo, "a.txt"), "two\n");
+  execFileSync("git", ["add", "a.txt"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "change"], { cwd: repo, stdio: "ignore" });
+
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const update = tools.find((tool) => tool.name === "plan_update_item");
+  assert.ok(update);
+
+  const originalFetch = globalThis.fetch;
+  const originalCwd = process.cwd();
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (String(url).endsWith("/project-state")) {
+      return Response.json({
+        snapshot: {
+          activePlan: {
+            id: "plan-1",
+            items: [{ id: "item-1", startedAt: base }],
+          },
+        },
+      });
+    }
+    return Response.json({ snapshot: { revision: 2 } });
+  };
+  try {
+    process.chdir(repo);
+    const result = await update.execute("toolu_1", {
+      planId: "plan-1",
+      itemId: "item-1",
+      status: "completed",
+      result: { summary: "Done", blockers: [] },
+      expectedRevision: 1,
+      mutationId: "mut_1",
+      toolCallId: "toolu_1",
+    });
+    assert.equal(result.isError, false);
+  } finally {
+    process.chdir(originalCwd);
+    globalThis.fetch = originalFetch;
+  }
+
+  const patchCall = calls.find((call) => call.options?.method === "PATCH");
+  assert.ok(patchCall);
+  assert.deepEqual(JSON.parse(patchCall.options.body).result.filesChanged, ["a.txt"]);
 });
