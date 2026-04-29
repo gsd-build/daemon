@@ -461,6 +461,7 @@ func (d *Daemon) Status() sockapi.StatusData {
 		ActiveSessions:     total,
 		InFlightTasks:      executing,
 		MaxConcurrentTasks: d.cfg.EffectiveMaxConcurrentTasks(),
+		WarmWorkersEnabled: d.cfg.EffectiveWarmWorkersEnabled(),
 		WarmWorkerIdleTTL:  d.cfg.EffectiveWarmWorkerIdle().String(),
 		WarmWorkerIdleCap:  d.cfg.EffectiveWarmWorkerIdleCap(),
 		ActiveWarmWorkers:  activeWorkers,

@@ -69,6 +69,22 @@ func QuerySessions(sockPath string) ([]SessionInfo, error) {
 	return data, nil
 }
 
+// QueryWorkers fetches warm provider worker snapshots via the Unix socket.
+func QueryWorkers(sockPath string) ([]WorkerInfo, error) {
+	client := unixHTTPClient(sockPath)
+	resp, err := client.Get("http://daemon/workers")
+	if err != nil {
+		return nil, fmt.Errorf("connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var data []WorkerInfo
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("decode workers: %w", err)
+	}
+	return data, nil
+}
+
 // IsDaemonRunning checks whether the daemon is reachable on the socket.
 func IsDaemonRunning(sockPath string) bool {
 	conn, err := net.DialTimeout("unix", sockPath, 1*time.Second)

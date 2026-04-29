@@ -42,6 +42,8 @@ type Options struct {
 	Model             string
 	Effort            string
 	PermissionMode    string
+	WarmPiWorkers     bool
+	WarmClaudeSDK     bool
 	ResumeSession     string
 	PiBinaryPath      string
 	PiExtensionPath   string
@@ -173,7 +175,8 @@ func NewActor(opts Options) (*Actor, error) {
 		interactionTimeout: defaultInteractionTimeout,
 		now:                time.Now,
 	}
-	actor.useWarmPiWorker = os.Getenv("GSD_WARM_PI_WORKERS") == "1"
+	actor.useWarmPiWorker = warmPiWorkersEnabled(opts.WarmPiWorkers)
+	actor.opts.WarmClaudeSDK = warmClaudeSDKEnabled(opts.WarmClaudeSDK && actor.useWarmPiWorker)
 	actor.runPiControl = func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error) {
 		sessionFile, err := piSessionFileForSession(actor.opts.SessionID)
 		if err != nil {
@@ -193,6 +196,28 @@ func NewActor(opts Options) (*Actor, error) {
 		})
 	}
 	return actor, nil
+}
+
+func warmPiWorkersEnabled(defaultEnabled bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GSD_WARM_PI_WORKERS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultEnabled
+	}
+}
+
+func warmClaudeSDKEnabled(defaultEnabled bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GSD_WARM_CLAUDE_SDK"))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultEnabled
+	}
 }
 
 // LastActiveAt returns the time of the actor's last task completion or creation.
@@ -711,6 +736,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		BrowserGrantID:     tc.BrowserGrantID,
 		BrowserID:          tc.BrowserID,
 		BrowserSessionID:   a.opts.SessionID,
+		WarmClaudeSDK:      a.opts.WarmClaudeSDK,
 		PlanCapability:     tc.PlanCapability,
 	}
 

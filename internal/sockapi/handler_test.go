@@ -74,6 +74,7 @@ func TestStatusReturnsFullData(t *testing.T) {
 			ActiveSessions:     2,
 			InFlightTasks:      1,
 			MaxConcurrentTasks: 5,
+			WarmWorkersEnabled: true,
 			WarmWorkerIdleTTL:  "20m0s",
 			WarmWorkerIdleCap:  4,
 			ActiveWarmWorkers:  1,
@@ -117,6 +118,9 @@ func TestStatusReturnsFullData(t *testing.T) {
 	}
 	if got.MaxConcurrentTasks != 5 {
 		t.Errorf("expected maxConcurrentTasks 5, got %d", got.MaxConcurrentTasks)
+	}
+	if !got.WarmWorkersEnabled {
+		t.Error("expected warmWorkersEnabled true")
 	}
 	if got.WarmWorkerIdleTTL != "20m0s" {
 		t.Errorf("expected warmWorkerIdleTTL 20m0s, got %s", got.WarmWorkerIdleTTL)

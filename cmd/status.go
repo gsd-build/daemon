@@ -45,21 +45,36 @@ func formatLiveStatus(s *sockapi.StatusData, sessions []sockapi.SessionInfo) str
 	fmt.Fprintf(&b, "uptime:     %s\n", s.Uptime)
 	fmt.Fprintf(&b, "sessions:   %d active (%d executing, %d idle)\n", s.ActiveSessions, executing, idle)
 	fmt.Fprintf(&b, "tasks:      %d in-flight (max %d)\n", s.InFlightTasks, s.MaxConcurrentTasks)
+	fmt.Fprintf(&b, "warm:       %s (%d active, %d idle, ttl %s, cap %d)\n",
+		onOff(s.WarmWorkersEnabled),
+		s.ActiveWarmWorkers,
+		s.IdleWarmWorkers,
+		s.WarmWorkerIdleTTL,
+		s.WarmWorkerIdleCap,
+	)
 
 	return b.String()
 }
 
 // formatStaticStatus formats output when the daemon is not running.
-func formatStaticStatus(version, machineID, relayURL string) string {
+func formatStaticStatus(version, machineID, relayURL string, warmWorkersEnabled bool) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "gsd-cloud v%s\n", version)
 	fmt.Fprintf(&b, "status:     not running\n")
 	fmt.Fprintf(&b, "machine:    %s\n", machineID)
 	fmt.Fprintf(&b, "relay:      %s\n", relayURL)
+	fmt.Fprintf(&b, "warm:       %s\n", onOff(warmWorkersEnabled))
 	fmt.Fprintf(&b, "\nRun 'gsd-cloud start' to connect.\n")
 
 	return b.String()
+}
+
+func onOff(enabled bool) string {
+	if enabled {
+		return "on"
+	}
+	return "off"
 }
 
 var statusCmd = &cobra.Command{
@@ -93,7 +108,7 @@ var statusCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Print(formatStaticStatus(Version, cfg.MachineID, cfg.RelayURL))
+		fmt.Print(formatStaticStatus(Version, cfg.MachineID, cfg.RelayURL, cfg.EffectiveWarmWorkersEnabled()))
 		return nil
 	},
 }

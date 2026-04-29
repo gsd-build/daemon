@@ -20,6 +20,7 @@ type Config struct {
 	RelayURL              string `json:"relayUrl"`
 	MaxConcurrentTasks    int    `json:"maxConcurrentTasks,omitempty"` // 0 means runtime.NumCPU
 	TaskTimeoutMinutes    int    `json:"taskTimeoutMinutes,omitempty"`
+	WarmWorkersEnabled    *bool  `json:"warmWorkersEnabled,omitempty"`
 	WarmWorkerIdleMinutes int    `json:"warmWorkerIdleMinutes,omitempty"`
 	WarmWorkerIdleCap     *int   `json:"warmWorkerIdleCap,omitempty"`
 	LogLevel              string `json:"logLevel,omitempty"`
@@ -127,6 +128,10 @@ func (c *Config) EffectiveTaskTimeout() time.Duration {
 		return time.Duration(c.TaskTimeoutMinutes) * time.Minute
 	}
 	return 30 * time.Minute
+}
+
+func (c *Config) EffectiveWarmWorkersEnabled() bool {
+	return c.WarmWorkersEnabled == nil || *c.WarmWorkersEnabled
 }
 
 func (c *Config) EffectiveWarmWorkerIdle() time.Duration {
