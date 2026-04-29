@@ -22,6 +22,8 @@ test("claude-cli provider registers Claude Haiku 4.5 model metadata", () => {
 
   assert.ok(haiku, "Claude Haiku 4.5 should be selectable by model id");
   assert.equal(haiku.name, "Claude Haiku 4.5 (via SDK)");
+  assert.equal(haiku.reasoning, false);
+  assert.deepEqual(haiku.input, ["text", "image"]);
   assert.deepEqual(haiku.cost, { input: 1.0, output: 5.0, cacheRead: 0.10, cacheWrite: 1.25 });
   assert.equal(haiku.contextWindow, 200_000);
   assert.equal(haiku.maxTokens, 64_000);
