@@ -52,6 +52,12 @@ const CLAUDE_BUILTINS = [
 
 const MCP_PREFIX = "mcp__pi-tools__";
 
+type BrowserGrant = {
+  grantId: string;
+  browserId: string;
+  sessionId: string;
+};
+
 const BrowserToolParams = Type.Object({
   method: Type.String({ description: "Browser operation to execute." }),
   params: Type.Optional(Type.Record(Type.String(), Type.Any())),
@@ -75,8 +81,29 @@ function browserToolDefinition() {
   };
 }
 
-export function buildClaudeCliToolsForTest(context: { browserGrant?: { grantId: string; browserId: string; sessionId: string } }) {
+export function buildClaudeCliBrowserTools(context: { browserGrant?: BrowserGrant }) {
   return context.browserGrant ? [browserToolDefinition()] : [];
+}
+
+function piToolName(toolDef: PiTool | ReturnType<typeof browserToolDefinition>) {
+  return typeof toolDef.name === "string" ? toolDef.name : undefined;
+}
+
+export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserGrant?: BrowserGrant) {
+  const merged: PiTool[] = [];
+  const seenNames = new Set<string>();
+  const browserTools = buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[];
+
+  for (const toolDef of [...(contextTools ?? []), ...browserTools]) {
+    const name = piToolName(toolDef);
+    if (name) {
+      if (seenNames.has(name)) continue;
+      seenNames.add(name);
+    }
+    merged.push(toolDef);
+  }
+
+  return merged;
 }
 
 function browserGrantFromEnv() {
@@ -278,8 +305,7 @@ function streamClaudeSdk(
     let activeToolCall: { idx: number; id: string; name: string; jsonAcc: string } | null = null;
 
     const browserGrant = browserGrantFromEnv();
-    const browserTools = buildClaudeCliToolsForTest({ browserGrant }) as unknown as PiTool[];
-    const piTools = [...((context.tools as PiTool[] | undefined) ?? []), ...browserTools];
+    const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
     const sdkTools = piTools.map((t) =>
       piToolToSdkTool(t, (name, args) => {
         surfaced = new PiToolCallSurfacing(name, args);
