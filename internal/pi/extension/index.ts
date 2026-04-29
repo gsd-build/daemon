@@ -41,6 +41,7 @@ import { askUserQuestionsTool } from "./ask-user-questions.js";
 import { registerPlanTools } from "./plan-tools.js";
 import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
+import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
 import { Type } from "@sinclair/typebox";
 
 const CLAUDE_BUILTINS = [
@@ -60,6 +61,9 @@ const MCP_PREFIX = "mcp__pi-tools__";
 const SDK_SESSION_NAMESPACE = "gsd-pi-claude-sdk:v1";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EPIPE_GUARD_KEY = "__gsdPiClaudeSdkEpipeGuardInstalled";
+
+let warmClaudeWorker: WarmClaudeSdkWorker | null = null;
+let warmClaudeOptionsSignature = "";
 
 type SdkPromptInputMessage = SDKUserMessage | SDKUserMessageReplay;
 
@@ -141,11 +145,27 @@ export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserG
 }
 
 function browserGrantFromEnv() {
-  const grantId = process.env.GSD_BROWSER_GRANT_ID;
-  const browserId = process.env.GSD_BROWSER_ID;
-  const sessionId = process.env.GSD_BROWSER_SESSION_ID;
-  if (!grantId || !browserId || !sessionId) return undefined;
-  return { grantId, browserId, sessionId };
+	const grantId = process.env.GSD_BROWSER_GRANT_ID;
+	const browserId = process.env.GSD_BROWSER_ID;
+	const sessionId = process.env.GSD_BROWSER_SESSION_ID;
+	if (!grantId || !browserId || !sessionId) return undefined;
+	return { grantId, browserId, sessionId };
+}
+
+function warmClaudeOptionsKey(model: Model<any>, context: Context) {
+  const tools = ((context.tools as PiTool[] | undefined) ?? []).map((toolDef) => toolDef.name).sort();
+  return JSON.stringify({
+    model: model.id,
+    systemPrompt: context.systemPrompt ?? "",
+    tools,
+    browserGrant: browserGrantFromEnv() ?? null,
+  });
+}
+
+function resetWarmClaudeWorker() {
+  void warmClaudeWorker?.stop();
+  warmClaudeWorker = null;
+  warmClaudeOptionsSignature = "";
 }
 
 async function browserRpc(browserId: string, method: string, params: unknown, signal?: AbortSignal) {
@@ -464,6 +484,10 @@ function streamClaudeSdk(
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+  if (process.env.GSD_WARM_CLAUDE_SDK === "1") {
+    return streamWarmClaudeSdk(model, context, options);
+  }
+
   const stream = createAssistantMessageEventStream();
 
   (async () => {
@@ -484,18 +508,6 @@ function streamClaudeSdk(
     const sdkAbort = new AbortController();
     options?.signal?.addEventListener("abort", () => sdkAbort.abort(), { once: true });
 
-    let activeTextIndex: number | null = null;
-    let activeToolCall: ActiveToolCall | null = null;
-    let streamEndedForToolUse = false;
-    let streamClosed = false;
-
-    const closeStreamForToolUse = () => {
-      if (streamClosed) return;
-      stream.push({ type: "done", reason: "toolUse", message: output });
-      stream.end();
-      streamClosed = true;
-    };
-
     const browserGrant = browserGrantFromEnv();
     const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
     const sdkTools = piTools.map((t) => piToolToSdkTool(t));
@@ -509,6 +521,7 @@ function streamClaudeSdk(
     const allowedTools = sdkTools.map((t: any) => `${MCP_PREFIX}${(t as any).name}`);
 
     stream.push({ type: "start", partial: output });
+    const handlers = createClaudeSdkRunHandlers(stream, output, model, options);
 
     try {
       const sdkOptions: SdkOptions = {
@@ -534,87 +547,178 @@ function streamClaudeSdk(
       const q = query({ prompt: promptIter, options: sdkOptions });
 
       for await (const msg of q as AsyncIterable<SDKMessage>) {
-        applyUsageFromSdkMessage(output.usage, msg, (model as any).cost);
-        if (streamEndedForToolUse) continue;
-        if (msg.type === "stream_event") {
-          const ev = (msg as any).event;
-          if (ev?.type === "content_block_start") {
-            const block = ev.content_block;
-            if (block?.type === "text") {
-              output.content.push({ type: "text", text: "" });
-              activeTextIndex = output.content.length - 1;
-              stream.push({ type: "text_start", contentIndex: activeTextIndex, partial: output });
-            } else if (block?.type === "tool_use") {
-              const fullName = block.name as string;
-              const piName = fullName.startsWith(MCP_PREFIX) ? fullName.slice(MCP_PREFIX.length) : fullName;
-              const id = block.id as string;
-              output.content.push({ type: "toolCall", id, name: piName, arguments: {} });
-              activeToolCall = { idx: output.content.length - 1, id, name: piName, jsonAcc: "" };
-              stream.push({ type: "toolcall_start", contentIndex: activeToolCall.idx, partial: output });
-            }
-          } else if (ev?.type === "content_block_delta") {
-            const delta = ev.delta;
-            if (delta?.type === "text_delta" && activeTextIndex !== null) {
-              const text = delta.text as string;
-              const blk = output.content[activeTextIndex] as any;
-              blk.text += text;
-              stream.push({ type: "text_delta", contentIndex: activeTextIndex, delta: text, partial: output });
-            } else if (delta?.type === "input_json_delta" && activeToolCall) {
-              const chunk = delta.partial_json as string;
-              activeToolCall.jsonAcc += chunk;
-              try {
-                const parsed = JSON.parse(activeToolCall.jsonAcc);
-                (output.content[activeToolCall.idx] as any).arguments = parsed;
-              } catch {}
-              stream.push({ type: "toolcall_delta", contentIndex: activeToolCall.idx, delta: chunk, partial: output });
-            }
-          } else if (ev?.type === "content_block_stop") {
-            if (activeTextIndex !== null) {
-              const finalText = (output.content[activeTextIndex] as any).text;
-              stream.push({ type: "text_end", contentIndex: activeTextIndex, content: finalText, partial: output });
-              activeTextIndex = null;
-            }
-            if (activeToolCall) {
-              const blk = output.content[activeToolCall.idx] as any;
-              const toolCall = finalizeActivePiToolCall(activeToolCall, blk.arguments);
-              if (toolCall) {
-                blk.arguments = toolCall.arguments;
-                stream.push({
-                  type: "toolcall_end",
-                  contentIndex: activeToolCall.idx,
-                  toolCall,
-                  partial: output,
-                });
-                activeToolCall = null;
-                output.stopReason = "toolUse";
-                ensureNonZeroUsageForAbortedToolTurn(output.usage, output.content, (model as any).cost);
-                streamEndedForToolUse = true;
-              }
-            }
-          }
-        }
+        handlers.handleMessage(msg);
       }
 
-      if (streamEndedForToolUse) {
-        closeStreamForToolUse();
-        return;
-      }
-
-      // SDK iterator drained without a Pi tool handoff; Claude finished a pure-text turn.
-      output.stopReason = "stop";
-      stream.push({ type: "done", reason: "stop", message: output });
-      stream.end();
+      handlers.finish();
     } catch (err: any) {
-      if (streamEndedForToolUse) {
-        closeStreamForToolUse();
-        return;
-      }
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = err instanceof Error ? err.message : String(err);
-      stream.push({ type: "error", reason: output.stopReason as any, error: output });
-      stream.end();
+      handlers.fail(err);
     }
   })();
+
+  return stream;
+}
+
+function createClaudeSdkRunHandlers(
+  stream: AssistantMessageEventStream,
+  output: AssistantMessage,
+  model: Model<any>,
+  options?: SimpleStreamOptions,
+) {
+  let activeTextIndex: number | null = null;
+  let activeToolCall: ActiveToolCall | null = null;
+  let streamEndedForToolUse = false;
+  let streamClosed = false;
+
+  const closeStreamForToolUse = () => {
+    if (streamClosed) return;
+    stream.push({ type: "done", reason: "toolUse", message: output });
+    stream.end();
+    streamClosed = true;
+  };
+
+  const handleMessage = (msg: SDKMessage) => {
+    applyUsageFromSdkMessage(output.usage, msg, (model as any).cost);
+    if (streamEndedForToolUse) return;
+    if (msg.type !== "stream_event") return;
+    const ev = (msg as any).event;
+    if (ev?.type === "content_block_start") {
+      const block = ev.content_block;
+      if (block?.type === "text") {
+        output.content.push({ type: "text", text: "" });
+        activeTextIndex = output.content.length - 1;
+        stream.push({ type: "text_start", contentIndex: activeTextIndex, partial: output });
+      } else if (block?.type === "tool_use") {
+        const fullName = block.name as string;
+        const piName = fullName.startsWith(MCP_PREFIX) ? fullName.slice(MCP_PREFIX.length) : fullName;
+        const id = block.id as string;
+        output.content.push({ type: "toolCall", id, name: piName, arguments: {} });
+        activeToolCall = { idx: output.content.length - 1, id, name: piName, jsonAcc: "" };
+        stream.push({ type: "toolcall_start", contentIndex: activeToolCall.idx, partial: output });
+      }
+    } else if (ev?.type === "content_block_delta") {
+      const delta = ev.delta;
+      if (delta?.type === "text_delta" && activeTextIndex !== null) {
+        const text = delta.text as string;
+        const blk = output.content[activeTextIndex] as any;
+        blk.text += text;
+        stream.push({ type: "text_delta", contentIndex: activeTextIndex, delta: text, partial: output });
+      } else if (delta?.type === "input_json_delta" && activeToolCall) {
+        const chunk = delta.partial_json as string;
+        activeToolCall.jsonAcc += chunk;
+        try {
+          const parsed = JSON.parse(activeToolCall.jsonAcc);
+          (output.content[activeToolCall.idx] as any).arguments = parsed;
+        } catch {}
+        stream.push({ type: "toolcall_delta", contentIndex: activeToolCall.idx, delta: chunk, partial: output });
+      }
+    } else if (ev?.type === "content_block_stop") {
+      if (activeTextIndex !== null) {
+        const finalText = (output.content[activeTextIndex] as any).text;
+        stream.push({ type: "text_end", contentIndex: activeTextIndex, content: finalText, partial: output });
+        activeTextIndex = null;
+      }
+      if (activeToolCall) {
+        const blk = output.content[activeToolCall.idx] as any;
+        const toolCall = finalizeActivePiToolCall(activeToolCall, blk.arguments);
+        if (toolCall) {
+          blk.arguments = toolCall.arguments;
+          stream.push({ type: "toolcall_end", contentIndex: activeToolCall.idx, toolCall, partial: output });
+          activeToolCall = null;
+          output.stopReason = "toolUse";
+          ensureNonZeroUsageForAbortedToolTurn(output.usage, output.content, (model as any).cost);
+          streamEndedForToolUse = true;
+        }
+      }
+    }
+  };
+
+  const finish = () => {
+    if (streamEndedForToolUse) {
+      closeStreamForToolUse();
+      return;
+    }
+    output.stopReason = "stop";
+    stream.push({ type: "done", reason: "stop", message: output });
+    stream.end();
+  };
+
+  const fail = (err: unknown) => {
+    if (streamEndedForToolUse) {
+      closeStreamForToolUse();
+      return;
+    }
+    output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+    output.errorMessage = err instanceof Error ? err.message : String(err);
+    stream.push({ type: "error", reason: output.stopReason as any, error: output });
+    stream.end();
+  };
+
+  return { handleMessage, finish, fail };
+}
+
+function streamWarmClaudeSdk(
+  model: Model<any>,
+  context: Context,
+  options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+  const output: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+  stream.push({ type: "start", partial: output });
+
+  const browserGrant = browserGrantFromEnv();
+  const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
+  const sdkTools = piTools.map((t) => piToolToSdkTool(t));
+  const allowedTools = sdkTools.map((t: any) => `${MCP_PREFIX}${(t as any).name}`);
+  const piMcp = createSdkMcpServer({ name: "pi-tools", version: "0.0.1", tools: sdkTools });
+  const sdkAbort = new AbortController();
+  options?.signal?.addEventListener("abort", () => sdkAbort.abort(), { once: true });
+
+  const sdkOptions: SdkOptions = {
+    includePartialMessages: true,
+    persistSession: false,
+    settingSources: [],
+    allowedTools,
+    disallowedTools: CLAUDE_BUILTINS,
+    mcpServers: { "pi-tools": piMcp },
+    abortController: sdkAbort,
+    permissionMode: "bypassPermissions",
+    stderr: () => {},
+  };
+  if (context.systemPrompt) sdkOptions.systemPrompt = context.systemPrompt;
+
+  const signature = warmClaudeOptionsKey(model, context);
+  if (warmClaudeOptionsSignature && warmClaudeOptionsSignature !== signature) {
+    resetWarmClaudeWorker();
+  }
+  if (!warmClaudeWorker) {
+    warmClaudeOptionsSignature = signature;
+    warmClaudeWorker = new WarmClaudeSdkWorker(query, () => sdkOptions);
+  }
+
+  const handlers = createClaudeSdkRunHandlers(stream, output, model, options);
+  const sdkSessionId = deriveClaudeSdkSessionId(undefined, process.cwd());
+  const replayHistory = context.messages.length > 1 && !warmClaudeWorker.hasStarted();
+  const messages = buildClaudePromptMessages(context.messages, sdkSessionId, replayHistory);
+
+  warmClaudeWorker.turn({ messages, onMessage: handlers.handleMessage })
+    .then(() => handlers.finish())
+    .catch((err) => {
+      resetWarmClaudeWorker();
+      handlers.fail(err);
+    });
 
   return stream;
 }
