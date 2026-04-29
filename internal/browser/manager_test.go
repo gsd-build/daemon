@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -51,6 +52,12 @@ type recordingSender struct {
 func (r *recordingSender) Send(ctx context.Context, msg any) error {
 	r.msgs = append(r.msgs, msg)
 	return nil
+}
+
+type failingSender struct{}
+
+func (failingSender) Send(ctx context.Context, msg any) error {
+	return errors.New("send failed")
 }
 
 func TestManagerPausesToolCallsWhileLexControlsBrowser(t *testing.T) {
@@ -127,6 +134,74 @@ func TestManagerTearsDownExpiredSessionOnFrame(t *testing.T) {
 	m.mu.Unlock()
 	if hasBrowser || hasTask {
 		t.Fatal("expected expired browser session to be removed")
+	}
+	if !hasCall(svc.calls, "close:browser_1") {
+		t.Fatalf("expected browser close call, got %v", svc.calls)
+	}
+}
+
+func TestManagerIndexesTasklessGrantBySession(t *testing.T) {
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+
+	if err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	if _, ok := m.GrantForTask("task_1"); ok {
+		t.Fatal("taskless grant should not be indexed by task")
+	}
+	grant, ok := m.GrantForSession("session_1")
+	if !ok {
+		t.Fatal("expected session grant")
+	}
+	if grant.GrantID != "grant_1" || grant.BrowserID != "browser_1" || grant.SessionID != "session_1" {
+		t.Fatalf("grant = %+v", grant)
+	}
+
+	if err := m.Close(context.Background(), &protocol.BrowserSessionClose{
+		Type:      protocol.MsgTypeBrowserSessionClose,
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Reason:    "test",
+	}); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, ok := m.GrantForSession("session_1"); ok {
+		t.Fatal("expected session grant to be removed after close")
+	}
+}
+
+func TestManagerRollsBackIndexedStateWhenOpenSendFails(t *testing.T) {
+	svc := &fakeService{}
+	m := NewManager(ManagerOptions{Service: svc, Sender: failingSender{}, FrameInterval: time.Hour})
+
+	err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		TaskID:    "task_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	})
+	if err == nil {
+		t.Fatal("expected open to fail")
+	}
+	if _, ok := m.GrantForTask("task_1"); ok {
+		t.Fatal("expected task grant rollback")
+	}
+	if _, ok := m.GrantForSession("session_1"); ok {
+		t.Fatal("expected session grant rollback")
 	}
 	if !hasCall(svc.calls, "close:browser_1") {
 		t.Fatalf("expected browser close call, got %v", svc.calls)
