@@ -34,6 +34,26 @@ done
 	return path
 }
 
+func writeWarmFakePiAgentError(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pi")
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"response","command":"prompt","success":true}'
+      printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openrouter","model":"z-ai/glm-4.7-flash","stopReason":"error","errorMessage":"401 Missing Authentication header"}]}'
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	return path
+}
+
 func TestWorkerReusesOnePiProcessForTwoPrompts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -87,5 +107,39 @@ func TestWorkerReusesOnePiProcessForTwoPrompts(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(second, "\n"), "turn-2") {
 		t.Fatalf("second prompt did not stream turn-2: %#v", second)
+	}
+}
+
+func TestWorkerStopsProcessAfterAgentEndError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	worker := NewWorker(Options{
+		BinaryPath:    writeWarmFakePiAgentError(t),
+		CWD:           t.TempDir(),
+		ExtensionPath: filepath.Join(t.TempDir(), "index.ts"),
+		Provider:      "openrouter",
+		Model:         "z-ai/glm-4.7-flash",
+	})
+	if err := os.WriteFile(worker.opts.ExtensionPath, []byte("// fake"), 0600); err != nil {
+		t.Fatalf("write extension: %v", err)
+	}
+	defer worker.Stop(context.Background())
+
+	err := worker.Prompt(ctx, PromptRequest{
+		TaskID:  "task-error",
+		Message: "hello",
+		OnEvent: func(claude.Event) error {
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected prompt error")
+	}
+	if !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
+		t.Fatalf("error = %q, want OPENROUTER_API_KEY hint", err.Error())
+	}
+	if pid := worker.PID(); pid != 0 {
+		t.Fatalf("worker PID = %d, want stopped worker", pid)
 	}
 }

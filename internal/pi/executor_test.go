@@ -248,6 +248,52 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
+func TestExecutorUsesServiceManagerOpenRouterEnv(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "pi.env")
+	fakePi := writeFakePi(t, `
+{
+  printf 'OPENROUTER_API_KEY=%s\n' "${OPENROUTER_API_KEY:-}"
+} > "`+envFile+`"
+IFS= read -r prompt_frame || true
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`)
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write extension: %v", err)
+	}
+
+	t.Setenv(openRouterAPIKeyEnv, " ")
+	oldLookup := lookupServiceManagerEnv
+	lookupServiceManagerEnv = func(_ context.Context, key string) string {
+		if key == openRouterAPIKeyEnv {
+			return "sk-or-service-manager"
+		}
+		return ""
+	}
+	t.Cleanup(func() { lookupServiceManagerEnv = oldLookup })
+
+	exec := NewExecutor(Options{
+		BinaryPath:    fakePi,
+		CWD:           t.TempDir(),
+		ExtensionPath: extensionPath,
+		Provider:      "openrouter",
+		Prompt:        "hello",
+	})
+
+	if err := exec.Run(context.Background(), func(claude.Event) error { return nil }, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "OPENROUTER_API_KEY=sk-or-service-manager\n") {
+		t.Fatalf("env missing service manager key: %s", got)
+	}
+}
+
 func TestExecutorReportsToolExecutionStart(t *testing.T) {
 	t.Run("snake case", func(t *testing.T) {
 		var got ToolExecutionStart
@@ -382,5 +428,43 @@ func TestStreamPiEvents_FiresOnToolExecutionEnd(t *testing.T) {
 	}
 	if got.ToolCallID != "c1" || got.ToolName != "edit" {
 		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestStreamPiEvents_ReturnsAgentEndError(t *testing.T) {
+	stream := strings.NewReader(strings.Join([]string{
+		`{"type":"agent_start"}`,
+		`{"type":"message_end","message":{"role":"assistant","content":[],"provider":"openrouter","model":"z-ai/glm-4.7-flash","stopReason":"error","errorMessage":"401 Missing Authentication header"}}`,
+		`{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]},{"role":"assistant","content":[],"provider":"openrouter","model":"z-ai/glm-4.7-flash","stopReason":"error","errorMessage":"401 Missing Authentication header"}]}`,
+		"",
+	}, "\n"))
+
+	events := []string{}
+	err := streamPiEvents(
+		context.Background(),
+		stream,
+		io.Discard,
+		func(e claude.Event) error {
+			events = append(events, e.Type)
+			return nil
+		},
+		nil,
+		nil,
+		nil,
+		make(chan struct{}, 1),
+		true,
+		&translatorState{},
+		time.Now(),
+	)
+	if err == nil {
+		t.Fatal("expected agent_end error")
+	}
+	if !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
+		t.Fatalf("error = %q, want OPENROUTER_API_KEY hint", err.Error())
+	}
+	for _, eventType := range events {
+		if eventType == "result" {
+			t.Fatal("error agent_end emitted result event")
+		}
 	}
 }

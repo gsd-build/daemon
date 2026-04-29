@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,10 @@ import (
 	"github.com/gsd-build/daemon/internal/claude"
 	protocol "github.com/gsd-build/protocol-go"
 )
+
+const openRouterAPIKeyEnv = "OPENROUTER_API_KEY"
+
+var lookupServiceManagerEnv = serviceManagerEnv
 
 // piExitError wraps pi's exit code + stderr into a user-friendly error.
 // Detects the "extension dependencies missing" signature and returns a
@@ -136,9 +141,14 @@ func processArgs(opts Options) []string {
 	return args
 }
 
-func processEnv(base []string, opts Options) []string {
+func processEnv(ctx context.Context, base []string, opts Options) []string {
 	return planCapabilityEnv(
-		browserEnv(base, opts.BrowserGrantID, opts.BrowserID, opts.BrowserSessionID),
+		browserEnv(
+			providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
+			opts.BrowserGrantID,
+			opts.BrowserID,
+			opts.BrowserSessionID,
+		),
 		opts.PlanCapability,
 	)
 }
@@ -198,7 +208,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	)
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
-	cmd.Env = processEnv(os.Environ(), e.opts)
+	cmd.Env = processEnv(ctx, os.Environ(), e.opts)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()
@@ -349,6 +359,60 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	return nil
 }
 
+func providerEnv(ctx context.Context, base []string, provider string) []string {
+	if provider != "openrouter" || envHasKey(base, openRouterAPIKeyEnv) {
+		return base
+	}
+	if value := strings.TrimSpace(lookupServiceManagerEnv(ctx, openRouterAPIKeyEnv)); value != "" {
+		env := make([]string, 0, len(base)+1)
+		prefix := openRouterAPIKeyEnv + "="
+		for _, entry := range base {
+			if strings.HasPrefix(entry, prefix) {
+				continue
+			}
+			env = append(env, entry)
+		}
+		return append(env, prefix+value)
+	}
+	return base
+}
+
+func envHasKey(env []string, key string) bool {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) && strings.TrimSpace(strings.TrimPrefix(entry, prefix)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceManagerEnv(ctx context.Context, key string) string {
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.CommandContext(lookupCtx, "launchctl", "getenv", key).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	case "linux":
+		out, err := exec.CommandContext(lookupCtx, "systemctl", "--user", "show-environment").Output()
+		if err != nil {
+			return ""
+		}
+		prefix := key + "="
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
+		}
+	}
+	return ""
+}
+
 func browserEnv(base []string, grantID string, browserID string, sessionID string) []string {
 	env := make([]string, 0, len(base)+3)
 	for _, entry := range base {
@@ -488,6 +552,9 @@ func streamPiEvents(
 		// On agent_end synthesize a stream-json result event so handleResult fires,
 		// then signal the caller so it can shut pi down.
 		if peek.Type == "agent_end" {
+			if err := agentEndError(raw); err != nil {
+				return err
+			}
 			durationMs := int(time.Since(startedAt).Milliseconds())
 			synth, err := synthesizeResultEvent(raw, state.sessionID, durationMs)
 			if err != nil {
@@ -504,6 +571,43 @@ func streamPiEvents(
 		}
 	}
 	return scanner.Err()
+}
+
+func agentEndError(agentEndRaw json.RawMessage) error {
+	var ae struct {
+		Type     string `json:"type"`
+		Messages []struct {
+			Role         string `json:"role"`
+			Provider     string `json:"provider"`
+			Model        string `json:"model"`
+			StopReason   string `json:"stopReason"`
+			ErrorMessage string `json:"errorMessage"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(agentEndRaw, &ae); err != nil {
+		return fmt.Errorf("parse agent_end: %w", err)
+	}
+	for i := len(ae.Messages) - 1; i >= 0; i-- {
+		msg := ae.Messages[i]
+		if msg.Role != "assistant" || msg.StopReason != "error" {
+			continue
+		}
+		message := strings.TrimSpace(msg.ErrorMessage)
+		if message == "" {
+			message = "assistant stopped with error"
+		}
+		if msg.Provider == "openrouter" && strings.Contains(message, "Missing Authentication header") {
+			return fmt.Errorf("openrouter request failed: %s (check OPENROUTER_API_KEY in the daemon service environment)", message)
+		}
+		if msg.Provider != "" && msg.Model != "" {
+			return fmt.Errorf("%s/%s request failed: %s", msg.Provider, msg.Model, message)
+		}
+		if msg.Provider != "" {
+			return fmt.Errorf("%s request failed: %s", msg.Provider, message)
+		}
+		return fmt.Errorf("pi agent failed: %s", message)
+	}
+	return nil
 }
 
 type piToolExecutionStart struct {
