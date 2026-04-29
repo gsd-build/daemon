@@ -7,15 +7,19 @@
  * tool calls to pi for execution.
  */
 
+import crypto from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import {
   createSdkMcpServer,
+  getSessionMessages,
   query,
   tool,
   type Options as SdkOptions,
   type SDKMessage,
+  type SDKUserMessage,
+  type SDKUserMessageReplay,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   type AssistantMessage,
@@ -52,6 +56,10 @@ const CLAUDE_BUILTINS = [
 ];
 
 const MCP_PREFIX = "mcp__pi-tools__";
+const SDK_SESSION_NAMESPACE = "gsd-pi-claude-sdk:v1";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type SdkPromptInputMessage = SDKUserMessage | SDKUserMessageReplay;
 
 type BrowserGrant = {
   grantId: string;
@@ -164,7 +172,7 @@ async function browserRpc(browserId: string, method: string, params: unknown, si
       });
     });
     socket.on("data", (chunk) => {
-      chunks.push(chunk);
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       const all = Buffer.concat(chunks);
       if (expected === 0 && all.length >= 4) expected = all.readUInt32BE(0);
       if (expected > 16 * 1024 * 1024) {
@@ -225,60 +233,157 @@ function piToolToSdkTool(piTool: PiTool, surface: (name: string, args: unknown) 
   );
 }
 
-/**
- * Convert pi's Message[] history into a stream of SDKUserMessage prompts.
- */
-function buildClaudePromptIterable(messages: Message[], systemPrompt?: string): AsyncIterable<any> {
-  const transcript: string[] = [];
-  if (systemPrompt) transcript.push(`(system: ${systemPrompt})\n`);
+function sessionArgFromProcess() {
+  const idx = process.argv.indexOf("--session");
+  if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1];
+  return undefined;
+}
 
-  for (const msg of messages) {
-    if (msg.role === "user") {
-      const text =
-        typeof msg.content === "string"
-          ? msg.content
-          : (msg.content as any[]).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-      if (text.trim()) transcript.push(`User: ${text}`);
-    } else if (msg.role === "assistant") {
-      for (const block of msg.content as any[]) {
-        if (block.type === "text" && block.text.trim()) {
-          transcript.push(`Assistant: ${block.text}`);
-        } else if (block.type === "toolCall") {
-          transcript.push(
-            `[Tool call by you]\nname: ${block.name}\nid: ${block.id}\narguments: ${JSON.stringify(block.arguments)}`,
-          );
-        }
-      }
-    } else if (msg.role === "toolResult") {
-      const tr: any = msg;
-      const text = (tr.content as any[]).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-      transcript.push(
-        `[Result from your tool call]\nname: ${tr.toolName}\nid: ${tr.toolCallId}\nresult:\n${text}`,
-      );
+function uuidFromStableKey(key: string) {
+  const bytes = crypto.createHash("sha256").update(key).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function deriveClaudeSdkSessionId(piSessionId?: string, cwd = process.cwd()) {
+  const sessionKey = piSessionId?.trim() || process.env.GSD_PI_SESSION_ID || sessionArgFromProcess() || "no-pi-session";
+  const key = `${SDK_SESSION_NAMESPACE}\0${cwd}\0${sessionKey}`;
+  const sessionId = uuidFromStableKey(key);
+  if (!UUID_RE.test(sessionId)) {
+    throw new Error("derived Claude SDK session id is not a UUID");
+  }
+  return sessionId;
+}
+
+function sdkContentBlocks(blocks: any[]): any[] {
+  return blocks.flatMap((block): any[] => {
+    if (block.type === "text") return [{ type: "text", text: block.text ?? "" }];
+    if (block.type === "image") {
+      return [{
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: block.mimeType,
+          data: block.data,
+        },
+      }];
     }
-  }
+    return [];
+  });
+}
 
-  // Determine the latest user request. If the last actionable message is a
-  // toolResult, instruct Claude to continue. Otherwise the last user message
-  // is the request.
-  const lastMsg = messages[messages.length - 1];
-  let instruction: string;
-  if (lastMsg?.role === "toolResult") {
-    instruction = "(continue based on the tool result above; do not repeat the tool call)";
-  } else {
-    instruction = "(respond to the latest user message; you may call tools as needed)";
-  }
+function sdkAssistantContent(blocks: any[]): any[] {
+  return blocks.flatMap((block): any[] => {
+    if (block.type === "text") return [{ type: "text", text: block.text ?? "" }];
+    if (block.type === "thinking") {
+      if (block.redacted) {
+        return [{ type: "redacted_thinking", data: block.thinkingSignature ?? "" }];
+      }
+      if (block.thinkingSignature) {
+        return [{ type: "thinking", thinking: block.thinking ?? "", signature: block.thinkingSignature }];
+      }
+      // SDK message input requires a signature for thinking content.
+      return [{ type: "text", text: block.thinking ?? "" }];
+    }
+    if (block.type === "toolCall") {
+      return [{
+        type: "tool_use",
+        id: block.id,
+        name: block.name,
+        input: block.arguments ?? {},
+      }];
+    }
+    return [];
+  });
+}
 
-  const finalPrompt = transcript.join("\n\n") + "\n\n" + instruction;
-
-  return (async function* () {
-    yield {
-      type: "user" as const,
-      message: { role: "user" as const, content: finalPrompt },
-      parent_tool_use_id: null,
-      session_id: "pi-rpc-extension",
+function sdkMessageParamFromPiMessage(msg: Message) {
+  if (msg.role === "assistant") {
+    return {
+      role: "assistant" as const,
+      content: sdkAssistantContent(msg.content as any[]),
     };
+  }
+
+  if (msg.role === "toolResult") {
+    return {
+      role: "user" as const,
+      content: [{
+        type: "tool_result",
+        tool_use_id: msg.toolCallId,
+        content: sdkContentBlocks(msg.content as any[]),
+        is_error: msg.isError,
+      }],
+    };
+  }
+
+  return {
+    role: "user" as const,
+    content: typeof msg.content === "string" ? msg.content : sdkContentBlocks(msg.content as any[]),
+  };
+}
+
+function replayUuid(sdkSessionId: string, msg: Message, index: number): SDKUserMessageReplay["uuid"] {
+  return uuidFromStableKey(`${SDK_SESSION_NAMESPACE}:replay\0${sdkSessionId}\0${index}\0${msg.role}\0${msg.timestamp}`) as SDKUserMessageReplay["uuid"];
+}
+
+export function buildClaudePromptMessages(
+  messages: Message[],
+  sdkSessionId: string,
+  replayHistory = false,
+): SdkPromptInputMessage[] {
+  const lastIndex = messages.length - 1;
+  if (lastIndex < 0) throw new Error("Claude SDK prompt requires at least one message");
+
+  const firstIndex = replayHistory ? 0 : lastIndex;
+  return messages.slice(firstIndex).map((msg, offset) => {
+    const index = firstIndex + offset;
+    const replay = replayHistory && index < lastIndex;
+    const prompt: SDKUserMessage = {
+      type: "user",
+      message: sdkMessageParamFromPiMessage(msg) as any,
+      parent_tool_use_id: msg.role === "toolResult" ? msg.toolCallId : null,
+      session_id: sdkSessionId,
+    };
+
+    if (!replay) return prompt;
+
+    return {
+      ...prompt,
+      uuid: replayUuid(sdkSessionId, msg, index),
+      session_id: sdkSessionId,
+      isReplay: true,
+      shouldQuery: false,
+    } as SDKUserMessageReplay;
+  });
+}
+
+function buildClaudePromptIterable(
+  messages: Message[],
+  sdkSessionId: string,
+  replayHistory = false,
+): AsyncIterable<SdkPromptInputMessage> {
+  const promptMessages = buildClaudePromptMessages(messages, sdkSessionId, replayHistory);
+  return (async function* () {
+    for (const message of promptMessages) {
+      yield message;
+    }
   })();
+}
+
+async function claudeSdkSessionExists(sdkSessionId: string) {
+  try {
+    const messages = await getSessionMessages(sdkSessionId, {
+      dir: process.cwd(),
+      limit: 1,
+      includeSystemMessages: true,
+    });
+    return messages.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function streamClaudeSdk(
@@ -333,7 +438,7 @@ function streamClaudeSdk(
     try {
       const sdkOptions: SdkOptions = {
         includePartialMessages: true,
-        persistSession: false,
+        persistSession: true,
         settingSources: [],
         allowedTools,
         disallowedTools: CLAUDE_BUILTINS,
@@ -342,8 +447,20 @@ function streamClaudeSdk(
         permissionMode: "bypassPermissions",
         stderr: () => {},
       };
+      if (context.systemPrompt) {
+        sdkOptions.systemPrompt = context.systemPrompt;
+      }
 
-      const promptIter = buildClaudePromptIterable(context.messages, context.systemPrompt);
+      const sdkSessionId = deriveClaudeSdkSessionId(options?.sessionId);
+      const resumeClaudeSession = await claudeSdkSessionExists(sdkSessionId);
+      const replayHistory = !resumeClaudeSession && context.messages.length > 1;
+      if (resumeClaudeSession) {
+        sdkOptions.resume = sdkSessionId;
+      } else {
+        sdkOptions.sessionId = sdkSessionId;
+      }
+
+      const promptIter = buildClaudePromptIterable(context.messages, sdkSessionId, replayHistory);
       const q = query({ prompt: promptIter, options: sdkOptions });
 
       for await (const msg of q as AsyncIterable<SDKMessage>) {
@@ -475,7 +592,7 @@ function registerBrowserTool(pi: ExtensionAPI) {
     label: definition.label,
     description: definition.description,
     parameters: definition.parameters,
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
       const browserGrant = browserGrantFromEnv();
       if (!browserGrant) {
         return {
@@ -499,7 +616,7 @@ function registerBrowserTool(pi: ExtensionAPI) {
         };
       }
     },
-  });
+  } as any);
 }
 
 export default function (pi: ExtensionAPI) {
