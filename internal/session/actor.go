@@ -122,6 +122,7 @@ type taskContext struct {
 	OriginalPrompt     string
 	ExecutionPrompt    string
 	Engine             string
+	Provider           string
 	Model              string
 	Effort             string
 	PermissionMode     string
@@ -516,6 +517,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		OriginalPrompt:     task.Prompt,
 		ExecutionPrompt:    executionPrompt,
 		Engine:             task.Engine,
+		Provider:           task.Provider,
 		Model:              task.Model,
 		Effort:             task.Effort,
 		PermissionMode:     task.PermissionMode,
@@ -614,6 +616,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 	model = normalizePiModel(model)
 	a.setPiModel(model)
+	provider := pi.ProviderOrDefault(tc.Provider)
 	binaryPath := a.opts.PiBinaryPath
 	if binaryPath == "" {
 		binaryPath = "pi"
@@ -648,7 +651,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		Prompt:             prompt,
 		CustomInstructions: tc.CustomInstructions,
 		ExtensionPath:      a.opts.PiExtensionPath,
-		Provider:           "claude-cli",
+		Provider:           provider,
 		SkillPaths:         skillPaths,
 		BrowserGrantID:     tc.BrowserGrantID,
 		BrowserID:          tc.BrowserID,
