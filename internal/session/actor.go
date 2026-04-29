@@ -132,6 +132,7 @@ type taskContext struct {
 	CustomInstructions string
 	BrowserGrantID     string
 	BrowserID          string
+	PlanCapability     *protocol.PlanCapability
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -525,6 +526,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		CustomInstructions: task.CustomInstructions,
 		BrowserGrantID:     a.opts.BrowserGrantID,
 		BrowserID:          a.opts.BrowserID,
+		PlanCapability:     task.PlanCapability,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -651,6 +653,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		BrowserGrantID:     tc.BrowserGrantID,
 		BrowserID:          tc.BrowserID,
 		BrowserSessionID:   a.opts.SessionID,
+		PlanCapability:     tc.PlanCapability,
 	})
 
 	coordinator := &structuredQuestionCoordinator{}
