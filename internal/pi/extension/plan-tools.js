@@ -44,6 +44,113 @@ async function requestPlan(path, { method = "GET", body, signal } = {}, env = pr
   };
 }
 
+function pickDefined(fields) {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function objectArrayOrEmpty(value) {
+  return arrayOrEmpty(value).filter(
+    (item) => item !== null && typeof item === "object" && !Array.isArray(item),
+  );
+}
+
+function objectOrNull(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function truncateText(value, maxLength = 4000) {
+  if (typeof value !== "string") return value;
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...[truncated ${value.length - maxLength} chars]`;
+}
+
+function compactPlanItemSummary(item) {
+  return pickDefined({
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    position: item.position,
+    startedAt: item.startedAt,
+    blockedAt: item.blockedAt,
+    completedAt: item.completedAt,
+    cancelledAt: item.cancelledAt,
+    updatedAt: item.updatedAt,
+  });
+}
+
+function compactPlanItemDetail(item) {
+  if (!item) return null;
+  return pickDefined({
+    ...compactPlanItemSummary(item),
+    description: truncateText(item.description, 6000),
+    userContext: truncateText(item.userContext, 4000),
+    agentNotes: truncateText(item.agentNotes, 4000),
+    result: truncateText(item.result, 4000),
+  });
+}
+
+function compactPlanSummary(plan) {
+  if (!plan) return null;
+  return pickDefined({
+    id: plan.id,
+    projectId: plan.projectId,
+    title: plan.title,
+    status: plan.status,
+    revision: plan.revision,
+    progress: plan.progress,
+    nextItemTitle: plan.nextItemTitle,
+    currentItemId: plan.currentItemId,
+    updatedAt: plan.updatedAt,
+    archivedAt: plan.archivedAt,
+  });
+}
+
+export function compactProjectState(json) {
+  const snapshot = objectOrNull(json?.snapshot);
+  if (!snapshot) return json;
+
+  const activePlan = objectOrNull(snapshot.activePlan);
+  const activeItems = objectArrayOrEmpty(activePlan?.items);
+  const sortedItems = [...activeItems].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const currentItem =
+    sortedItems.find((item) => item.id === activePlan?.currentItemId) ??
+    sortedItems.find((item) => item.status === "in_progress") ??
+    null;
+  const nextItem = sortedItems.find((item) => item.status === "pending") ?? null;
+  const blockedItems = sortedItems.filter((item) => item.status === "blocked").map(compactPlanItemDetail);
+
+  return {
+    snapshot: pickDefined({
+      projectId: snapshot.projectId,
+      planModeEnabled: snapshot.planModeEnabled,
+      revision: snapshot.revision,
+      activePlan: activePlan
+        ? pickDefined({
+            ...compactPlanSummary(activePlan),
+            userContext: truncateText(activePlan.userContext, 4000),
+            agentNotes: truncateText(activePlan.agentNotes, 4000),
+            currentItem: compactPlanItemDetail(currentItem),
+            nextItem: compactPlanItemDetail(nextItem),
+            blockedItems,
+            items: sortedItems.map(compactPlanItemSummary),
+          })
+        : null,
+      pausedPlans: objectArrayOrEmpty(snapshot.pausedPlans).map(compactPlanSummary),
+      archivedPlans: objectArrayOrEmpty(snapshot.archivedPlans).map(compactPlanSummary),
+      supportedActions: snapshot.supportedActions,
+      updatedAt: snapshot.updatedAt,
+      updatedBySessionId: snapshot.updatedBySessionId,
+      updatedByTaskId: snapshot.updatedByTaskId,
+    }),
+    detail: "compact",
+    fullDetail: 'Call plan_get_project_state with {"detail":"full"} for complete item descriptions and plan bodies.',
+  };
+}
+
 function encodePath(value) {
   return encodeURIComponent(value);
 }
@@ -55,9 +162,20 @@ export function registerPlanTools(pi, env = process.env) {
     name: "plan_get_project_state",
     label: "Get project plan state",
     description:
-      "Read the active project plan, paused summaries, archive summaries, Plan Mode state, and supported actions.",
-    parameters: Type.Object({}),
-    execute: (_id, _params, signal) => requestPlan("/project-state", { signal }, env),
+      "Read compact project plan state by default. Request detail full only when complete item descriptions and plan bodies are needed.",
+    parameters: Type.Object({
+      detail: Type.Optional(Type.Union([Type.Literal("compact"), Type.Literal("full")])),
+    }),
+    execute: async (_id, params, signal) => {
+      const result = await requestPlan("/project-state", { signal }, env);
+      if (params?.detail === "full" || result.isError) return result;
+      const compact = compactProjectState(result.details);
+      return {
+        ...result,
+        content: [{ type: "text", text: JSON.stringify(compact) }],
+        details: compact,
+      };
+    },
   });
 
   pi.registerTool({
