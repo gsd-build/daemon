@@ -34,6 +34,7 @@ type Manager struct {
 	mu            sync.Mutex
 	byID          map[string]*sessionState
 	byTask        map[string]*sessionState
+	bySession     map[string]*sessionState
 }
 
 func NewManager(opts ManagerOptions) *Manager {
@@ -47,6 +48,7 @@ func NewManager(opts ManagerOptions) *Manager {
 		frameInterval: frameInterval,
 		byID:          map[string]*sessionState{},
 		byTask:        map[string]*sessionState{},
+		bySession:     map[string]*sessionState{},
 	}
 }
 
@@ -89,6 +91,9 @@ func (m *Manager) Open(ctx context.Context, msg *protocol.BrowserSessionOpen) er
 	m.byID[result.BrowserID] = state
 	if msg.TaskID != "" {
 		m.byTask[msg.TaskID] = state
+	}
+	if msg.SessionID != "" {
+		m.bySession[msg.SessionID] = state
 	}
 	m.mu.Unlock()
 	if err := m.sender.Send(ctx, &protocol.BrowserSessionOpened{
@@ -188,8 +193,20 @@ func (m *Manager) GrantForTask(taskID string) (Grant, bool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	state, ok := m.byTask[taskID]
-	if !ok || time.Now().After(state.expiresAt) {
+	return m.grantForStateLocked(m.byTask[taskID])
+}
+
+func (m *Manager) GrantForSession(sessionID string) (Grant, bool) {
+	if sessionID == "" {
+		return Grant{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.grantForStateLocked(m.bySession[sessionID])
+}
+
+func (m *Manager) grantForStateLocked(state *sessionState) (Grant, bool) {
+	if state == nil || time.Now().After(state.expiresAt) {
 		return Grant{}, false
 	}
 	return Grant{
@@ -277,6 +294,9 @@ func (m *Manager) removeStateLocked(state *sessionState) {
 	delete(m.byID, state.browserID)
 	if state.openRequest.TaskID != "" {
 		delete(m.byTask, state.openRequest.TaskID)
+	}
+	if state.openRequest.SessionID != "" && m.bySession[state.openRequest.SessionID] == state {
+		delete(m.bySession, state.openRequest.SessionID)
 	}
 	if state.frameCancel != nil {
 		state.frameCancel()

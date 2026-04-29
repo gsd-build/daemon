@@ -133,6 +133,47 @@ func TestManagerTearsDownExpiredSessionOnFrame(t *testing.T) {
 	}
 }
 
+func TestManagerIndexesTasklessGrantBySession(t *testing.T) {
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+
+	if err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	if _, ok := m.GrantForTask("task_1"); ok {
+		t.Fatal("taskless grant should not be indexed by task")
+	}
+	grant, ok := m.GrantForSession("session_1")
+	if !ok {
+		t.Fatal("expected session grant")
+	}
+	if grant.GrantID != "grant_1" || grant.BrowserID != "browser_1" || grant.SessionID != "session_1" {
+		t.Fatalf("grant = %+v", grant)
+	}
+
+	if err := m.Close(context.Background(), &protocol.BrowserSessionClose{
+		Type:      protocol.MsgTypeBrowserSessionClose,
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Reason:    "test",
+	}); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, ok := m.GrantForSession("session_1"); ok {
+		t.Fatal("expected session grant to be removed after close")
+	}
+}
+
 func TestManagerRejectsExpiredUserInput(t *testing.T) {
 	svc := &fakeService{}
 	sent := &recordingSender{}

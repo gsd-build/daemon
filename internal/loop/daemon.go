@@ -736,6 +736,9 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		if browserGrant, ok := d.browserManager.GrantForTask(msg.TaskID); ok {
 			browserGrantID = browserGrant.GrantID
 			browserID = browserGrant.BrowserID
+		} else if browserGrant, ok := d.browserManager.GrantForSession(msg.SessionID); ok {
+			browserGrantID = browserGrant.GrantID
+			browserID = browserGrant.BrowserID
 		}
 	}
 	if actor == nil {
