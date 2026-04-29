@@ -127,8 +127,8 @@ func processArgs(opts Options) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
-	if customInstructions := strings.TrimSpace(opts.CustomInstructions); customInstructions != "" {
-		args = append(args, "--append-system-prompt", customInstructions)
+	if systemPrompt := appendedSystemPrompt(opts); systemPrompt != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
 	}
 	if opts.DisableSkills {
 		args = append(args, "--no-skills")
@@ -140,6 +140,58 @@ func processArgs(opts Options) []string {
 		}
 	}
 	return args
+}
+
+func appendedSystemPrompt(opts Options) string {
+	sections := make([]string, 0, 2)
+	if customInstructions := strings.TrimSpace(opts.CustomInstructions); customInstructions != "" {
+		sections = append(sections, customInstructions)
+	}
+	sections = append(sections, runtimeIdentityPrompt(opts, time.Now()))
+	return strings.Join(sections, "\n\n")
+}
+
+func runtimeIdentityPrompt(opts Options, now time.Time) string {
+	provider := cleanRuntimeValue(ProviderOrDefault(opts.Provider))
+	model := cleanRuntimeValue(strings.TrimSpace(opts.Model))
+	if model == "" {
+		model = "default"
+	}
+	cwd := cleanRuntimeValue(strings.TrimSpace(opts.CWD))
+	if cwd == "" {
+		cwd = "unspecified"
+	}
+	zone, _ := now.Zone()
+	if zone == "" {
+		zone = "local"
+	}
+
+	return fmt.Sprintf(`<runtime_context>
+Provider: %s
+Model: %s
+Local OS/arch: %s/%s
+Working directory: %s
+Local date: %s
+Local UTC offset: %s
+Local timezone name: %s
+</runtime_context>
+
+Use the provider and model values in runtime_context when asked what model or provider you are using. These facts describe the current daemon task and preserve all other system, developer, and project instructions.`,
+		provider,
+		model,
+		runtime.GOOS,
+		runtime.GOARCH,
+		cwd,
+		now.Format("2006-01-02"),
+		now.Format("-07:00"),
+		cleanRuntimeValue(zone),
+	)
+}
+
+func cleanRuntimeValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.TrimSpace(value)
 }
 
 func processEnv(ctx context.Context, base []string, opts Options) []string {

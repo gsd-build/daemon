@@ -151,8 +151,43 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	if flag < 0 || flag+1 >= len(args) {
 		t.Fatalf("pi args missing --append-system-prompt value: %v", args)
 	}
-	if args[flag+1] != "Always talk like a pirate." {
-		t.Fatalf("append system prompt = %q", args[flag+1])
+	systemPrompt := args[flag+1]
+	if !strings.Contains(systemPrompt, "Always talk like a pirate.") {
+		t.Fatalf("append system prompt missing custom instructions: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "<runtime_context>") {
+		t.Fatalf("append system prompt missing runtime context: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Provider: claude-cli") {
+		t.Fatalf("append system prompt missing provider: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Model: default") {
+		t.Fatalf("append system prompt missing default model: %q", systemPrompt)
+	}
+}
+
+func TestRuntimeIdentityPromptIncludesTaskFacts(t *testing.T) {
+	now := time.Date(2026, 4, 29, 15, 41, 0, 0, time.FixedZone("America/Costa_Rica", -6*60*60))
+	prompt := runtimeIdentityPrompt(Options{
+		Provider: "openrouter",
+		Model:    "z-ai/glm-4.7-flash",
+		CWD:      "/tmp/gsd\nbad",
+	}, now)
+
+	for _, want := range []string{
+		"<runtime_context>",
+		"Provider: openrouter",
+		"Model: z-ai/glm-4.7-flash",
+		"Local OS/arch: " + runtime.GOOS + "/" + runtime.GOARCH,
+		"Working directory: /tmp/gsd bad",
+		"Local date: 2026-04-29",
+		"Local UTC offset: -06:00",
+		"Local timezone name: America/Costa_Rica",
+		"</runtime_context>",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("runtime identity prompt missing %q: %q", want, prompt)
+		}
 	}
 }
 

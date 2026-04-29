@@ -355,8 +355,12 @@ func TestActorPiExecutorPassesCustomInstructions(t *testing.T) {
 	if flag < 0 || flag+1 >= len(args) {
 		t.Fatalf("pi args missing --append-system-prompt value: %v", args)
 	}
-	if args[flag+1] != "Always talk like a pirate." {
-		t.Fatalf("append system prompt = %q", args[flag+1])
+	systemPrompt := args[flag+1]
+	if !strings.Contains(systemPrompt, "Always talk like a pirate.") {
+		t.Fatalf("append system prompt missing custom instructions: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "<runtime_context>") {
+		t.Fatalf("append system prompt missing runtime context: %q", systemPrompt)
 	}
 }
 
