@@ -105,7 +105,7 @@ func (w *Worker) startLocked() error {
 	}
 
 	cmd := piRPCCommand(context.Background(), w.opts.BinaryPath, w.opts.CWD, w.opts.ResumeSession, processArgs(w.opts)...)
-	cmd.Env = processEnv(os.Environ(), w.opts)
+	cmd.Env = processEnv(context.Background(), os.Environ(), w.opts)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()
@@ -210,8 +210,7 @@ func (w *Worker) Prompt(ctx context.Context, req PromptRequest) error {
 		"message": req.Message,
 	})
 	if _, err := stdin.Write(append(frame, '\n')); err != nil {
-		w.markBroken()
-		return fmt.Errorf("write prompt frame: %w", err)
+		return w.stopAfterFailure(fmt.Errorf("write prompt frame: %w", err))
 	}
 
 	agentEndCh := make(chan struct{}, 1)
@@ -234,24 +233,22 @@ func (w *Worker) Prompt(ctx context.Context, req PromptRequest) error {
 		startedAt,
 	)
 	if err != nil {
-		w.markBroken()
-		return err
+		return w.stopAfterFailure(err)
 	}
 	select {
 	case <-agentEndCh:
 		return nil
 	default:
-		w.markBroken()
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return w.stopAfterFailure(ctx.Err())
 		}
 		w.mu.Lock()
 		stderr := string(w.stderrBuf)
 		w.mu.Unlock()
 		if stderr != "" {
-			return fmt.Errorf("pi stream ended before agent_end (pi stderr: %s)", stderr)
+			return w.stopAfterFailure(fmt.Errorf("pi stream ended before agent_end (pi stderr: %s)", stderr))
 		}
-		return fmt.Errorf("pi stream ended before agent_end")
+		return w.stopAfterFailure(fmt.Errorf("pi stream ended before agent_end"))
 	}
 }
 
@@ -260,6 +257,15 @@ func (w *Worker) markBroken() {
 	w.broken = true
 	w.idleSince = nil
 	w.mu.Unlock()
+}
+
+func (w *Worker) stopAfterFailure(err error) error {
+	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if stopErr := w.Stop(stopCtx); stopErr != nil {
+		return fmt.Errorf("%w; stop worker after failure: %v", err, stopErr)
+	}
+	return err
 }
 
 func (w *Worker) Stop(ctx context.Context) error {

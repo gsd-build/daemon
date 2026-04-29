@@ -43,6 +43,12 @@ if [ "$FAKE_PI_INVALID_AGENT_END" = "1" ]; then
   printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","usage":{"input":"not-a-number"}}]}'
   exit 0
 fi
+if [ "$FAKE_PI_AGENT_ERROR" = "1" ]; then
+  printf '%s\n' '{"type":"agent_start"}'
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"provider":"openrouter","model":"z-ai/glm-4.7-flash","stopReason":"error","errorMessage":"401 Missing Authentication header"}}'
+  printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]},{"role":"assistant","content":[],"provider":"openrouter","model":"z-ai/glm-4.7-flash","stopReason":"error","errorMessage":"401 Missing Authentication header"}]}'
+  exit 0
+fi
 printf '%s\n' '{"type":"agent_start"}'
 printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"remember this"}]},{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
 	`
@@ -1045,6 +1051,56 @@ func TestActorMalformedFinalResultEmitsTaskError(t *testing.T) {
 	for _, frame := range relay.GetFrames() {
 		if tc, ok := frame.(*protocol.TaskComplete); ok && tc.TaskID == "task-invalid-result" {
 			t.Fatal("expected malformed final result to avoid TaskComplete")
+		}
+	}
+}
+
+func TestActorPiAgentErrorEmitsTaskError(t *testing.T) {
+	relay := newFakeRelay()
+
+	t.Setenv("FAKE_PI_AGENT_ERROR", "1")
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-agent-error",
+		Relay:     relay,
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = actor.Run(ctx) }()
+
+	if err := actor.SendTask(protocol.Task{
+		TaskID:    "task-agent-error",
+		SessionID: "sess-agent-error",
+		ChannelID: "ch-agent-error",
+		Prompt:    "hello",
+		Provider:  "openrouter",
+		Model:     "z-ai/glm-4.7-flash",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	gotError := relay.waitFor(t, 10*time.Second, func(frames []any) bool {
+		for _, f := range frames {
+			te, ok := f.(*protocol.TaskError)
+			if !ok || te.TaskID != "task-agent-error" {
+				continue
+			}
+			return strings.Contains(te.Error, "OPENROUTER_API_KEY")
+		}
+		return false
+	})
+	if !gotError {
+		t.Fatal("timed out waiting for OpenRouter TaskError frame")
+	}
+
+	for _, frame := range relay.GetFrames() {
+		if tc, ok := frame.(*protocol.TaskComplete); ok && tc.TaskID == "task-agent-error" {
+			t.Fatal("expected agent error to avoid TaskComplete")
 		}
 	}
 }
