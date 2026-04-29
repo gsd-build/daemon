@@ -84,6 +84,52 @@ func TestManagerSpawnUsesPiDefaults(t *testing.T) {
 	}
 }
 
+func TestManagerEnablesWarmPiWorkersFromConfig(t *testing.T) {
+	m := NewManager(ManagerOptions{
+		Relay:  nullRelay{},
+		Config: &config.Config{MaxConcurrentTasks: 10},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := m.Spawn(ctx, Options{SessionID: "s-warm", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer m.StopAll()
+
+	if !a.useWarmPiWorker {
+		t.Fatal("spawned actor should use warm pi workers when config is unset")
+	}
+	if !a.opts.WarmClaudeSDK {
+		t.Fatal("spawned actor should enable warm Claude SDK when config is unset")
+	}
+}
+
+func TestManagerDisablesWarmPiWorkersFromConfig(t *testing.T) {
+	m := NewManager(ManagerOptions{
+		Relay:  nullRelay{},
+		Config: &config.Config{MaxConcurrentTasks: 10, WarmWorkersEnabled: ptr(false)},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := m.Spawn(ctx, Options{SessionID: "s-cold", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer m.StopAll()
+
+	if a.useWarmPiWorker {
+		t.Fatal("spawned actor should not use warm pi workers when disabled")
+	}
+	if a.opts.WarmClaudeSDK {
+		t.Fatal("spawned actor should not enable warm Claude SDK when disabled")
+	}
+}
+
 func TestManagerRejectAtCapacity(t *testing.T) {
 	relay := newFakeRelay()
 	cfg := &config.Config{MaxConcurrentTasks: 1}
@@ -225,6 +271,8 @@ func TestReaperRemovesIdleActors(t *testing.T) {
 		t.Error("expected s2 to remain")
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
 
 func TestReaperSkipsActorsWithInFlightTasks(t *testing.T) {
 	relay := newFakeRelay()

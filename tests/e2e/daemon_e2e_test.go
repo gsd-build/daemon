@@ -150,7 +150,6 @@ func TestDaemonWarmPiWorkerReusesProcessAcrossTasks(t *testing.T) {
 	relay := NewStubRelay(t)
 	home := makeTestHome(t)
 	t.Setenv("HOME", home)
-	t.Setenv("GSD_WARM_PI_WORKERS", "1")
 	t.Setenv("GSD_PI_EXTENSION_PATH", writeFakePiExtension(t, home))
 	fakePi := writeWarmFakePi(t, home)
 

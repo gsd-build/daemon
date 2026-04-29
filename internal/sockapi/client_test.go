@@ -78,6 +78,47 @@ func TestQueryStatusFromSocket(t *testing.T) {
 	}
 }
 
+func TestQueryWorkersFromSocket(t *testing.T) {
+	sockPath := tempSockPath(t)
+	now := time.Now().UTC()
+	idle := now.Add(-5 * time.Second)
+
+	p := &mockProvider{
+		workers: []WorkerInfo{
+			{
+				SessionID:  "sess-1",
+				Provider:   "claude-cli",
+				Model:      "claude-sonnet-4-6",
+				PID:        4242,
+				KeyHash:    "hash-a",
+				State:      "idle",
+				StartedAt:  now,
+				LastUsedAt: idle,
+				IdleSince:  &idle,
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(sockPath, p)
+	go srv.ListenAndServe(ctx) //nolint:errcheck
+
+	waitForSocket(t, sockPath)
+
+	got, err := QueryWorkers(sockPath)
+	if err != nil {
+		t.Fatalf("QueryWorkers: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("workers len = %d, want 1", len(got))
+	}
+	if got[0].SessionID != "sess-1" || got[0].PID != 4242 || got[0].State != "idle" {
+		t.Fatalf("unexpected worker: %+v", got[0])
+	}
+}
+
 func TestQueryHealthConnected(t *testing.T) {
 	sockPath := tempSockPath(t)
 

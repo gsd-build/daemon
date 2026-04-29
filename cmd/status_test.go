@@ -17,6 +17,11 @@ func TestFormatLiveStatus(t *testing.T) {
 		ActiveSessions:     3,
 		InFlightTasks:      1,
 		MaxConcurrentTasks: 10,
+		WarmWorkersEnabled: true,
+		WarmWorkerIdleTTL:  "20m0s",
+		WarmWorkerIdleCap:  4,
+		ActiveWarmWorkers:  1,
+		IdleWarmWorkers:    2,
 		LogLevel:           "info",
 	}
 	sessions := []sockapi.SessionInfo{
@@ -42,10 +47,13 @@ func TestFormatLiveStatus(t *testing.T) {
 	if !strings.Contains(out, "1 in-flight") {
 		t.Errorf("missing task count in:\n%s", out)
 	}
+	if !strings.Contains(out, "warm:") || !strings.Contains(out, "1 active, 2 idle") {
+		t.Errorf("missing warm worker status in:\n%s", out)
+	}
 }
 
 func TestFormatStaticStatus(t *testing.T) {
-	out := formatStaticStatus("0.1.13", "m-1", "wss://relay.gsd.build/ws/daemon")
+	out := formatStaticStatus("0.1.13", "m-1", "wss://relay.gsd.build/ws/daemon", true)
 
 	if !strings.Contains(out, "gsd-cloud v0.1.13") {
 		t.Errorf("missing version in:\n%s", out)

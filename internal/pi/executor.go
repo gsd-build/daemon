@@ -72,6 +72,7 @@ type Options struct {
 	BrowserGrantID     string
 	BrowserID          string
 	BrowserSessionID   string
+	WarmClaudeSDK      bool
 	PlanCapability     *protocol.PlanCapability
 }
 
@@ -142,15 +143,32 @@ func processArgs(opts Options) []string {
 }
 
 func processEnv(ctx context.Context, base []string, opts Options) []string {
-	return planCapabilityEnv(
-		browserEnv(
-			providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
-			opts.BrowserGrantID,
-			opts.BrowserID,
-			opts.BrowserSessionID,
+	return warmClaudeSDKEnv(
+		planCapabilityEnv(
+			browserEnv(
+				providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
+				opts.BrowserGrantID,
+				opts.BrowserID,
+				opts.BrowserSessionID,
+			),
+			opts.PlanCapability,
 		),
-		opts.PlanCapability,
+		opts.WarmClaudeSDK,
 	)
+}
+
+func warmClaudeSDKEnv(base []string, enabled bool) []string {
+	out := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GSD_WARM_CLAUDE_SDK=") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	if enabled {
+		out = append(out, "GSD_WARM_CLAUDE_SDK=1")
+	}
+	return out
 }
 
 // UIRequest is a question or prompt the agent issued through pi's UI APIs.

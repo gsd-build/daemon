@@ -33,6 +33,7 @@ type StatusData struct {
 	ActiveSessions     int    `json:"activeSessions"`
 	InFlightTasks      int    `json:"inFlightTasks"`
 	MaxConcurrentTasks int    `json:"maxConcurrentTasks"`
+	WarmWorkersEnabled bool   `json:"warmWorkersEnabled"`
 	WarmWorkerIdleTTL  string `json:"warmWorkerIdleTTL"`
 	WarmWorkerIdleCap  int    `json:"warmWorkerIdleCap"`
 	ActiveWarmWorkers  int    `json:"activeWarmWorkers"`

@@ -130,6 +130,9 @@ func (m *Manager) Spawn(
 	if opts.Uploader == nil {
 		opts.Uploader = m.uploader
 	}
+	warmWorkersEnabled := m.cfg.EffectiveWarmWorkersEnabled()
+	opts.WarmPiWorkers = warmWorkersEnabled
+	opts.WarmClaudeSDK = warmWorkersEnabled
 	opts.OnTaskIdle = func() {
 		m.ReapIdleWorkers(m.cfg.EffectiveWarmWorkerIdle(), m.cfg.EffectiveWarmWorkerIdleCap())
 	}

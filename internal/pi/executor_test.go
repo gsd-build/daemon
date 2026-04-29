@@ -248,6 +248,31 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
+func TestExecutorControlsWarmClaudeSDKEnv(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"GSD_WARM_CLAUDE_SDK=1",
+	}
+
+	cold := processEnv(context.Background(), base, Options{Provider: "claude-cli"})
+	for _, entry := range cold {
+		if strings.HasPrefix(entry, "GSD_WARM_CLAUDE_SDK=") {
+			t.Fatalf("cold env should not contain warm SDK flag: %v", cold)
+		}
+	}
+
+	warm := processEnv(context.Background(), base, Options{Provider: "claude-cli", WarmClaudeSDK: true})
+	found := false
+	for _, entry := range warm {
+		if entry == "GSD_WARM_CLAUDE_SDK=1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warm env missing SDK flag: %v", warm)
+	}
+}
+
 func TestExecutorUsesServiceManagerOpenRouterEnv(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "pi.env")
 	fakePi := writeFakePi(t, `

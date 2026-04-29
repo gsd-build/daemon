@@ -161,4 +161,21 @@ func TestEffectiveWarmWorkerIdleCap(t *testing.T) {
 	}
 }
 
+func TestEffectiveWarmWorkersEnabled(t *testing.T) {
+	cfg := &Config{}
+	if !cfg.EffectiveWarmWorkersEnabled() {
+		t.Fatal("warm workers should be enabled when unset")
+	}
+
+	cfg.WarmWorkersEnabled = ptr(false)
+	if cfg.EffectiveWarmWorkersEnabled() {
+		t.Fatal("warm workers should be disabled when explicitly false")
+	}
+
+	cfg.WarmWorkersEnabled = ptr(true)
+	if !cfg.EffectiveWarmWorkersEnabled() {
+		t.Fatal("warm workers should be enabled when explicitly true")
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
