@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   codexDynamicToolsFromContext,
@@ -8,6 +11,7 @@ import {
   codexNativeToolStartFromItem,
   codexOutputForModel,
   codexPromptTextFromContext,
+  registerCodexAppServerProvider,
 } from "./codex-appserver-provider.ts";
 
 test("codexModelDefinitions exposes GPT-5.5 and GPT-5.4", () => {
@@ -247,4 +251,126 @@ test("codexNativeToolResultFromItem maps MCP text results", () => {
     details: { server: "node_repl", durationMs: 12, status: "completed" },
     isError: false,
   });
+});
+
+async function collectStream(stream) {
+  const events = [];
+  for await (const event of stream) {
+    events.push(event);
+  }
+  return events;
+}
+
+function summarizeFakeCodexStats(contents) {
+  const records = contents
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const count = (event) => records.filter((record) => record.event === event).length;
+  return {
+    processStarts: count("processStart"),
+    initializes: count("initialize"),
+    threadStarts: count("threadStart"),
+    turnStarts: count("turnStart"),
+    threadIds: [...new Set(records.filter((record) => record.event === "threadStart").map((record) => record.threadId))],
+  };
+}
+
+test("codex appserver provider keeps one process and thread across two turns", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "fake-codex-appserver-"));
+  const statsFile = path.join(dir, "stats.ndjson");
+  const codexBin = path.join(dir, "codex");
+  await writeFile(statsFile, "");
+  await writeFile(codexBin, `#!/usr/bin/env node
+const { appendFileSync } = await import("node:fs");
+const { createInterface } = await import("node:readline");
+
+const statsFile = process.env.FAKE_CODEX_STATS_FILE;
+let turnCount = 0;
+const threadId = "thread_fake_warm";
+const record = (event, data = {}) => {
+  appendFileSync(statsFile, JSON.stringify({ event, ...data }) + "\\n");
+};
+const send = (message) => {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+};
+
+record("processStart");
+
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    record("initialize");
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "initialized") {
+    return;
+  }
+  if (message.method === "thread/start") {
+    record("threadStart", { threadId });
+    send({ id: message.id, result: { thread: { id: threadId } } });
+    return;
+  }
+  if (message.method === "turn/start") {
+    turnCount += 1;
+    const turnId = "turn_" + turnCount;
+    const itemId = "item_" + turnCount;
+    record("turnStart", { threadId: message.params.threadId, turnId });
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    send({ method: "turn/started", params: { turn: { id: turnId } } });
+    send({ method: "item/started", params: { item: { id: itemId, type: "agentMessage" } } });
+    send({ method: "item/agentMessage/delta", params: { itemId, delta: "reply-" + turnCount } });
+    send({ method: "item/completed", params: { item: { id: itemId, type: "agentMessage" } } });
+    send({ method: "turn/completed", params: { turn: { id: turnId, status: "completed" } } });
+    if (turnCount === 2) {
+      setTimeout(() => process.exit(0), 20);
+    }
+  }
+});
+`);
+  await chmod(codexBin, 0o700);
+
+  const previousPath = process.env.PATH;
+  const previousStats = process.env.FAKE_CODEX_STATS_FILE;
+  process.env.PATH = `${dir}${path.delimiter}${previousPath ?? ""}`;
+  process.env.FAKE_CODEX_STATS_FILE = statsFile;
+  try {
+    let provider;
+    registerCodexAppServerProvider({
+      registerProvider(name, definition) {
+        if (name === "codex-appserver") provider = definition;
+      },
+    });
+
+    const model = { id: "gpt-5.5", api: "openai-responses", provider: "codex-appserver" };
+    const firstEvents = await collectStream(provider.streamSimple(model, {
+      messages: [{ role: "user", content: [{ type: "text", text: "first" }] }],
+      tools: [],
+    }));
+    const secondEvents = await collectStream(provider.streamSimple(model, {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply-1" }] },
+        { role: "user", content: [{ type: "text", text: "second" }] },
+      ],
+      tools: [],
+    }));
+
+    assert.equal(firstEvents.at(-1)?.type, "done");
+    assert.equal(secondEvents.at(-1)?.type, "done");
+
+    const summary = summarizeFakeCodexStats(await readFile(statsFile, "utf8"));
+    assert.equal(summary.processStarts, 1);
+    assert.equal(summary.initializes, 1);
+    assert.equal(summary.threadStarts, 1);
+    assert.equal(summary.turnStarts, 2);
+    assert.deepEqual(summary.threadIds, ["thread_fake_warm"]);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousStats === undefined) delete process.env.FAKE_CODEX_STATS_FILE;
+    else process.env.FAKE_CODEX_STATS_FILE = previousStats;
+  }
 });
