@@ -313,3 +313,38 @@ func TestStructuredQuestionCoordinatorSkipsPlaceholderHandledRound(t *testing.T)
 		t.Fatalf("ToolCallID = %q, want toolu_2", round.ToolCallID)
 	}
 }
+
+func TestStructuredQuestionCoordinatorSkipsPlaceholderHandledRoundWithDefaultedFields(t *testing.T) {
+	var c structuredQuestionCoordinator
+
+	handledFromPlaceholder := structuredQuestionRound{
+		ToolCallID: "ui_1",
+		Questions: []structuredQuestion{
+			{ID: "scope", Header: "Pick one", Question: "Pick one", Options: []structuredQuestionOption{{Label: "Daemon"}}},
+		},
+	}
+	lateToolStart := structuredQuestionRound{
+		ToolCallID: "toolu_1",
+		Questions: []structuredQuestion{
+			{ID: "scope", Question: "Pick one", Options: []structuredQuestionOption{{Label: "Daemon"}}},
+		},
+	}
+	next := structuredQuestionRound{
+		ToolCallID: "toolu_2",
+		Questions: []structuredQuestion{
+			{ID: "texture", Question: "Pick texture", Options: []structuredQuestionOption{{Label: "Analog"}}},
+		},
+	}
+
+	c.discardNextMatching(handledFromPlaceholder)
+	c.put(lateToolStart)
+	c.put(next)
+
+	round, ok := c.wait(context.Background())
+	if !ok {
+		t.Fatal("wait returned false")
+	}
+	if round.ToolCallID != "toolu_2" {
+		t.Fatalf("ToolCallID = %q, want toolu_2", round.ToolCallID)
+	}
+}

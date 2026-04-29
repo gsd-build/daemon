@@ -231,6 +231,17 @@ func (c *structuredQuestionCoordinator) wait(ctx context.Context) (structuredQue
 }
 
 func structuredQuestionRoundSignature(round structuredQuestionRound) string {
-	raw, _ := json.Marshal(round.Questions)
+	raw, _ := json.Marshal(canonicalStructuredQuestionsForSignature(round.Questions))
 	return string(raw)
+}
+
+func canonicalStructuredQuestionsForSignature(questions []structuredQuestion) []structuredQuestion {
+	canonical := make([]structuredQuestion, 0, len(questions))
+	for _, question := range questions {
+		if strings.TrimSpace(question.Header) == "" {
+			question.Header = question.Question
+		}
+		canonical = append(canonical, question)
+	}
+	return canonical
 }
