@@ -28,3 +28,23 @@ test("claude-cli provider registers Claude Haiku 4.5 model metadata", () => {
   assert.equal(haiku.contextWindow, 200_000);
   assert.equal(haiku.maxTokens, 64_000);
 });
+
+test("claude-cli provider registers current and previous Claude Opus metadata", () => {
+  const provider = captureClaudeCliProvider();
+  const opus47 = provider.models.find((model) => model.id === "claude-opus-4-7");
+  const opus46 = provider.models.find((model) => model.id === "claude-opus-4-6");
+
+  assert.ok(opus47, "Claude Opus 4.7 should be selectable by model id");
+  assert.equal(opus47.name, "Claude Opus 4.7 (via SDK)");
+  assert.equal(opus47.reasoning, false);
+  assert.deepEqual(opus47.input, ["text", "image"]);
+  assert.deepEqual(opus47.cost, { input: 5.0, output: 25.0, cacheRead: 0.50, cacheWrite: 6.25 });
+  assert.equal(opus47.contextWindow, 1_000_000);
+  assert.equal(opus47.maxTokens, 128_000);
+
+  assert.ok(opus46, "Claude Opus 4.6 should remain selectable by model id");
+  assert.equal(opus46.name, "Claude Opus 4.6 (via SDK)");
+  assert.deepEqual(opus46.cost, { input: 5.0, output: 25.0, cacheRead: 0.50, cacheWrite: 6.25 });
+  assert.equal(opus46.contextWindow, 1_000_000);
+  assert.equal(opus46.maxTokens, 128_000);
+});

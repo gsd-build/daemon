@@ -257,6 +257,7 @@ func TestAutoThresholdPercentClampsSmallWindows(t *testing.T) {
 
 func TestContextWindowForModel(t *testing.T) {
 	tests := map[string]int64{
+		"claude-opus-4-7":             longContextWindow,
 		"claude-opus-4-6":             longContextWindow,
 		"claude-opus-4-6[1m]":         longContextWindow,
 		"anthropic/claude-sonnet-4-6": longContextWindow,

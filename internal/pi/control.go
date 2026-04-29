@@ -442,7 +442,7 @@ func ContextWindowForModel(model string) int64 {
 		model = model[i+1:]
 	}
 	switch model {
-	case "claude-opus-4-6", "claude-sonnet-4-6":
+	case "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6":
 		return longContextWindow
 	default:
 		return defaultContextWindow
