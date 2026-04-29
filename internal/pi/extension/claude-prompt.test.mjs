@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   buildClaudePromptMessages,
   deriveClaudeSdkSessionId,
-  externalPiToolResult,
+  externalPiToolAcknowledgement,
   finalizeActivePiToolCall,
 } from "./index.ts";
 
@@ -102,9 +102,25 @@ test("finalizeActivePiToolCall uses the completed streamed JSON arguments", () =
   assert.equal(finalizeActivePiToolCall(null, {}), null);
 });
 
-test("externalPiToolResult marks SDK-side execution as unavailable", () => {
-  const result = externalPiToolResult();
+test("finalizeActivePiToolCall rejects malformed streamed JSON arguments", () => {
+  assert.throws(() => finalizeActivePiToolCall({
+    idx: 0,
+    id: "toolu_bad",
+    name: "plan_update_item",
+    jsonAcc: "{\"status\":",
+  }, {}), /Failed to parse tool_use input for plan_update_item/);
 
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /external execution/);
+  assert.throws(() => finalizeActivePiToolCall({
+    idx: 0,
+    id: "toolu_array",
+    name: "plan_update_item",
+    jsonAcc: "[\"completed\"]",
+  }, {}), /tool_use input must be a JSON object/);
+});
+
+test("externalPiToolAcknowledgement satisfies the SDK tool call without surfacing an error", () => {
+  const result = externalPiToolAcknowledgement();
+
+  assert.equal(result.isError, false);
+  assert.match(result.content[0].text, /daemon/);
 });

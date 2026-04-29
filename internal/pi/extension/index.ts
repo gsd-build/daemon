@@ -220,8 +220,14 @@ export function finalizeActivePiToolCall(activeToolCall: ActiveToolCall | null, 
   if (Object.keys(args).length === 0 && activeToolCall.jsonAcc.trim()) {
     try {
       const parsed = JSON.parse(activeToolCall.jsonAcc);
-      if (isRecord(parsed)) args = parsed;
-    } catch {}
+      if (!isRecord(parsed)) {
+        throw new Error("tool_use input must be a JSON object");
+      }
+      args = parsed;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to parse tool_use input for ${activeToolCall.name}: ${reason}; input=${activeToolCall.jsonAcc}`);
+    }
   }
 
   return {
@@ -232,10 +238,13 @@ export function finalizeActivePiToolCall(activeToolCall: ActiveToolCall | null, 
   };
 }
 
-export function externalPiToolResult() {
+export function externalPiToolAcknowledgement() {
   return {
-    content: [{ type: "text" as const, text: "GSD daemon handles this Pi tool through external execution." }],
-    isError: true,
+    content: [{
+      type: "text" as const,
+      text: "The GSD daemon accepted this tool call and will provide the actual tool result through Pi.",
+    }],
+    isError: false,
   };
 }
 
@@ -255,7 +264,7 @@ function piToolToSdkTool(piTool: PiTool) {
     piTool.name,
     piTool.description || piTool.name,
     shape,
-    async () => externalPiToolResult(),
+    async () => externalPiToolAcknowledgement(),
   );
 }
 
@@ -459,6 +468,14 @@ function streamClaudeSdk(
     let activeTextIndex: number | null = null;
     let activeToolCall: ActiveToolCall | null = null;
     let streamEndedForToolUse = false;
+    let streamClosed = false;
+
+    const closeStreamForToolUse = () => {
+      if (streamClosed) return;
+      stream.push({ type: "done", reason: "toolUse", message: output });
+      stream.end();
+      streamClosed = true;
+    };
 
     const browserGrant = browserGrantFromEnv();
     const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
@@ -477,7 +494,7 @@ function streamClaudeSdk(
     try {
       const sdkOptions: SdkOptions = {
         includePartialMessages: true,
-        persistSession: true,
+        persistSession: false,
         settingSources: [],
         allowedTools,
         disallowedTools: CLAUDE_BUILTINS,
@@ -490,7 +507,7 @@ function streamClaudeSdk(
         sdkOptions.systemPrompt = context.systemPrompt;
       }
 
-      const sdkSessionId = crypto.randomUUID();
+      const sdkSessionId = deriveClaudeSdkSessionId(options?.sessionId);
       const replayHistory = context.messages.length > 1;
       sdkOptions.sessionId = sdkSessionId;
 
@@ -552,8 +569,6 @@ function streamClaudeSdk(
                 activeToolCall = null;
                 output.stopReason = "toolUse";
                 ensureNonZeroUsageForAbortedToolTurn(output.usage, output.content, (model as any).cost);
-                stream.push({ type: "done", reason: "toolUse", message: output });
-                stream.end();
                 streamEndedForToolUse = true;
               }
             }
@@ -561,14 +576,20 @@ function streamClaudeSdk(
         }
       }
 
-      if (streamEndedForToolUse) return;
+      if (streamEndedForToolUse) {
+        closeStreamForToolUse();
+        return;
+      }
 
       // SDK iterator drained without a Pi tool handoff; Claude finished a pure-text turn.
       output.stopReason = "stop";
       stream.push({ type: "done", reason: "stop", message: output });
       stream.end();
     } catch (err: any) {
-      if (streamEndedForToolUse) return;
+      if (streamEndedForToolUse) {
+        closeStreamForToolUse();
+        return;
+      }
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = err instanceof Error ? err.message : String(err);
       stream.push({ type: "error", reason: output.stopReason as any, error: output });
