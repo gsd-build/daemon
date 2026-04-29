@@ -116,7 +116,6 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 			PreviewWebSocketProtocols:      true,
 			LocalServerDetection:           true,
 			Skills:                         true,
-			SessionTitles:                  true,
 			BrowserSessions:                true,
 			BrowserFrameStream:             true,
 			BrowserUserControl:             true,
