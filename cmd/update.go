@@ -41,6 +41,9 @@ var updateCmd = &cobra.Command{
 
 		platform, err := service.Detect()
 		if err == nil && platform.IsInstalled() {
+			if err := syncServiceProviderEnvironment(platform); err != nil {
+				return fmt.Errorf("sync service environment: %w", err)
+			}
 			fmt.Println("Restarting service...")
 			if err := platform.Restart(); err != nil {
 				return fmt.Errorf("restart after update: %w", err)

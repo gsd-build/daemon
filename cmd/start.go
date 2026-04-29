@@ -50,6 +50,9 @@ func startViaService() error {
 	if err != nil {
 		return err
 	}
+	if err := syncServiceProviderEnvironment(platform); err != nil {
+		return err
+	}
 	if !platform.IsInstalled() {
 		fmt.Println("Service not installed. Installing...")
 		if err := platform.Install(); err != nil {

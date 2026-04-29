@@ -104,6 +104,16 @@ func (s *systemdPlatform) Stop() error {
 	return nil
 }
 
+func (s *systemdPlatform) SyncEnvironment(keys []string) ([]string, error) {
+	return syncCurrentEnvironment(keys, func(key string, value string) error {
+		_, err := exec.Command("systemctl", "--user", "set-environment", key+"="+value).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("systemctl set-environment %s: %w", key, err)
+		}
+		return nil
+	})
+}
+
 func (s *systemdPlatform) Restart() error {
 	// `systemctl restart` works whether the unit is currently active or not
 	// — starts it if stopped, restarts it if running. Atomic from systemd's

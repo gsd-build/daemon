@@ -127,6 +127,16 @@ func (l *launchdPlatform) Stop() error {
 	return l.run("bootout", l.serviceTarget())
 }
 
+func (l *launchdPlatform) SyncEnvironment(keys []string) ([]string, error) {
+	return syncCurrentEnvironment(keys, func(key string, value string) error {
+		_, err := exec.Command("launchctl", "setenv", key, value).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("launchctl setenv %s: %w", key, err)
+		}
+		return nil
+	})
+}
+
 func (l *launchdPlatform) Restart() error {
 	// kickstart -k = "kill if running, then start". Atomic from launchd's
 	// view, so KeepAlive=true can't race a Stop()/Start() pair.
