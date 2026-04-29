@@ -29,6 +29,13 @@ IFS= read -r prompt_frame || true
 if [ -n "$FAKE_PI_PROMPT_FILE" ]; then
   printf '%s\n' "$prompt_frame" > "$FAKE_PI_PROMPT_FILE"
 fi
+if [ -n "$FAKE_PI_ENV_FILE" ]; then
+  {
+    printf 'GSD_PLAN_API_BASE_URL=%s\n' "${GSD_PLAN_API_BASE_URL:-}"
+    printf 'GSD_PLAN_CAPABILITY_TOKEN=%s\n' "${GSD_PLAN_CAPABILITY_TOKEN:-}"
+    printf 'GSD_PLAN_CAPABILITY_EXPIRES_AT=%s\n' "${GSD_PLAN_CAPABILITY_EXPIRES_AT:-}"
+  } > "$FAKE_PI_ENV_FILE"
+fi
 if [ -n "$FAKE_PI_SLEEP" ]; then
   sleep "$FAKE_PI_SLEEP"
 fi
@@ -234,6 +241,48 @@ func TestActorPiExecutorPassesCustomInstructions(t *testing.T) {
 	}
 	if args[flag+1] != "Always talk like a pirate." {
 		t.Fatalf("append system prompt = %q", args[flag+1])
+	}
+}
+
+func TestActorPiExecutorPassesPlanCapability(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "pi.env")
+	t.Setenv("FAKE_PI_ENV_FILE", envFile)
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-plan-capability",
+		Relay:     newFakeRelay(),
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:    "task-plan-capability",
+		ChannelID: "ch-plan-capability",
+		Engine:    "pi",
+		PlanCapability: &protocol.PlanCapability{
+			APIBaseURL: "https://app.test",
+			Token:      "gsd_plan_actor_secret",
+			ExpiresAt:  "2026-04-28T22:30:00Z",
+		},
+	}, "remember this")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "GSD_PLAN_API_BASE_URL=https://app.test\n") {
+		t.Fatalf("env missing api base url: %s", got)
+	}
+	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_TOKEN=gsd_plan_actor_secret\n") {
+		t.Fatalf("env missing capability token: %s", got)
+	}
+	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_EXPIRES_AT=2026-04-28T22:30:00Z\n") {
+		t.Fatalf("env missing expires at: %s", got)
 	}
 }
 

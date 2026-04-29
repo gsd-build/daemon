@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 // piExitError wraps pi's exit code + stderr into a user-friendly error.
@@ -62,6 +63,7 @@ type Options struct {
 	BrowserGrantID     string
 	BrowserID          string
 	BrowserSessionID   string
+	PlanCapability     *protocol.PlanCapability
 }
 
 // Executor spawns one `pi -p --mode rpc` process per task.
@@ -162,10 +164,14 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"skillCount", len(e.opts.SkillPaths),
 		"promptLen", len(e.opts.Prompt),
 		"customInstructionsLen", len(strings.TrimSpace(e.opts.CustomInstructions)),
+		"planCapability", e.opts.PlanCapability != nil,
 	)
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
-	cmd.Env = browserEnv(os.Environ(), e.opts.BrowserGrantID, e.opts.BrowserID, e.opts.BrowserSessionID)
+	cmd.Env = planCapabilityEnv(
+		browserEnv(os.Environ(), e.opts.BrowserGrantID, e.opts.BrowserID, e.opts.BrowserSessionID),
+		e.opts.PlanCapability,
+	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()
@@ -329,6 +335,24 @@ func browserEnv(base []string, grantID string, browserID string, sessionID strin
 			"GSD_BROWSER_GRANT_ID="+grantID,
 			"GSD_BROWSER_ID="+browserID,
 			"GSD_BROWSER_SESSION_ID="+sessionID,
+		)
+	}
+	return env
+}
+
+func planCapabilityEnv(base []string, cap *protocol.PlanCapability) []string {
+	env := make([]string, 0, len(base)+3)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GSD_PLAN_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	if cap != nil {
+		env = append(env,
+			"GSD_PLAN_API_BASE_URL="+cap.APIBaseURL,
+			"GSD_PLAN_CAPABILITY_TOKEN="+cap.Token,
+			"GSD_PLAN_CAPABILITY_EXPIRES_AT="+cap.ExpiresAt,
 		)
 	}
 	return env

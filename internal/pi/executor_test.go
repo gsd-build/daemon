@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
+	protocol "github.com/gsd-build/protocol-go"
 )
 
 func TestTerminateProcessGroupAndWaitEscalates(t *testing.T) {
@@ -152,6 +153,56 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 	if args[flag+1] != "Always talk like a pirate." {
 		t.Fatalf("append system prompt = %q", args[flag+1])
+	}
+}
+
+func TestExecutorPassesPlanCapabilityEnv(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "pi.env")
+	fakePi := writeFakePi(t, `
+{
+  printf 'GSD_PLAN_API_BASE_URL=%s\n' "${GSD_PLAN_API_BASE_URL:-}"
+  printf 'GSD_PLAN_CAPABILITY_TOKEN=%s\n' "${GSD_PLAN_CAPABILITY_TOKEN:-}"
+  printf 'GSD_PLAN_CAPABILITY_EXPIRES_AT=%s\n' "${GSD_PLAN_CAPABILITY_EXPIRES_AT:-}"
+} > "`+envFile+`"
+IFS= read -r prompt_frame || true
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`)
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write extension: %v", err)
+	}
+
+	exec := NewExecutor(Options{
+		BinaryPath:    fakePi,
+		CWD:           t.TempDir(),
+		ExtensionPath: extensionPath,
+		Provider:      "claude-cli",
+		Prompt:        "hello",
+		PlanCapability: &protocol.PlanCapability{
+			APIBaseURL: "https://app.test",
+			Token:      "gsd_plan_test_secret",
+			ExpiresAt:  "2026-04-28T22:30:00Z",
+		},
+	})
+
+	if err := exec.Run(context.Background(), func(claude.Event) error { return nil }, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "GSD_PLAN_API_BASE_URL=https://app.test\n") {
+		t.Fatalf("env missing api base url: %s", got)
+	}
+	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_TOKEN=gsd_plan_test_secret\n") {
+		t.Fatalf("env missing capability token: %s", got)
+	}
+	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_EXPIRES_AT=2026-04-28T22:30:00Z\n") {
+		t.Fatalf("env missing expires at: %s", got)
 	}
 }
 

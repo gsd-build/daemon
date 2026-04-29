@@ -35,6 +35,7 @@ import {
 } from "./usage-estimator.js";
 import { schemaToZod } from "./schema-to-zod.js";
 import { askUserQuestionsTool } from "./ask-user-questions.js";
+import { registerPlanTools } from "./plan-tools.js";
 import { Type } from "@sinclair/typebox";
 
 const CLAUDE_BUILTINS = [
@@ -191,8 +192,13 @@ async function browserRpc(browserId: string, method: string, params: unknown, si
 }
 
 class PiToolCallSurfacing extends Error {
-  constructor(public toolName: string, public args: unknown) {
+  toolName: string;
+  args: unknown;
+
+  constructor(toolName: string, args: unknown) {
     super(`pi-tool-call: ${toolName}`);
+    this.toolName = toolName;
+    this.args = args;
   }
 }
 
@@ -500,6 +506,7 @@ export default function (pi: ExtensionAPI) {
   registerAskHumanTool(pi);
   registerBrowserTool(pi);
   pi.registerTool(askUserQuestionsTool as any);
+  registerPlanTools(pi as any);
   pi.registerProvider("claude-cli", {
     baseUrl: "http://localhost/unused",
     apiKey: "CLAUDE_CLI_KEY",
