@@ -143,6 +143,40 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
     return true;
   }
 
+  function rejectPendingRequests(error: Error) {
+    for (const [id, pending] of pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+      pendingRequests.delete(id);
+    }
+  }
+
+  function endActiveRunWithError(message: string) {
+    if (!activeRun) return;
+    activeRun.output.stopReason = "error";
+    activeRun.output.errorMessage = message;
+    activeRun.stream.push({ type: "error", reason: "error", error: activeRun.output });
+    activeRun.stream.end();
+    activeRun = null;
+  }
+
+  function resetCodexState(error: Error, killProcess = false) {
+    const process = codex;
+    initialized = false;
+    initPromise = null;
+    codex = null;
+    rl?.close();
+    rl = null;
+    threadId = null;
+    activeTurnId = null;
+    pendingBridge = null;
+    rejectPendingRequests(error);
+    endActiveRunWithError(error.message);
+    if (killProcess && process && !process.killed) {
+      process.kill("SIGTERM");
+    }
+  }
+
   function surfaceDynamicToolCall(codexRequestId: string | number, params: any) {
     const run = activeRun;
     if (!run) {
@@ -280,39 +314,31 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
       rl.on("line", handleCodexLine);
       codex.stderr?.on("data", () => {});
       codex.on("close", () => {
-        initialized = false;
-        initPromise = null;
-        codex = null;
-        rl = null;
-        threadId = null;
-        activeTurnId = null;
-        pendingBridge = null;
-        if (activeRun) {
-          activeRun.output.stopReason = "error";
-          activeRun.output.errorMessage = "Codex AppServer exited";
-          activeRun.stream.push({ type: "error", reason: "error", error: activeRun.output });
-          activeRun.stream.end();
-          activeRun = null;
-        }
+        resetCodexState(new Error("Codex process exited"));
       });
 
-      await codexRequest("initialize", {
-        clientInfo: { name: "gsd-daemon-pi-codex-provider", version: "0.0.1" },
-        capabilities: { experimentalApi: true },
-      });
-      codexNotify("initialized");
-      const result = await codexRequest("thread/start", {
-        cwd: process.cwd(),
-        sandbox: "read-only",
-        approvalPolicy: "never",
-        model: model.id,
-        dynamicTools: codexDynamicToolsFromContext(context),
-        ephemeral: true,
-        experimentalRawEvents: false,
-        persistExtendedHistory: false,
-      });
-      threadId = result.thread?.id;
-      initialized = true;
+      try {
+        await codexRequest("initialize", {
+          clientInfo: { name: "gsd-daemon-pi-codex-provider", version: "0.0.1" },
+          capabilities: { experimentalApi: true },
+        });
+        codexNotify("initialized");
+        const result = await codexRequest("thread/start", {
+          cwd: process.cwd(),
+          sandbox: "read-only",
+          approvalPolicy: "never",
+          model: model.id,
+          dynamicTools: codexDynamicToolsFromContext(context),
+          ephemeral: true,
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        });
+        threadId = result.thread?.id;
+        initialized = true;
+      } catch (error) {
+        resetCodexState(error instanceof Error ? error : new Error(String(error)), true);
+        throw error;
+      }
     })();
 
     return initPromise;
@@ -349,7 +375,22 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
   function streamCodexAppServer(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
     const stream = createAssistantMessageEventStream();
     const output = codexOutputForModel(model);
+    if (activeRun) {
+      output.stopReason = "error";
+      output.errorMessage = "Codex AppServer provider already has an active run.";
+      stream.push({ type: "error", reason: "error", error: output });
+      stream.end();
+      return stream;
+    }
     activeRun = { stream, output, textIndex: null };
+    const clearActiveRun = () => {
+      if (activeRun?.stream === stream) {
+        activeRun = null;
+      }
+    };
+    (stream as any).on?.("end", clearActiveRun);
+    (stream as any).on?.("error", clearActiveRun);
+    (stream as any).on?.("close", clearActiveRun);
     stream.push({ type: "start", partial: output });
 
     options?.signal?.addEventListener(

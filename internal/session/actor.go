@@ -616,10 +616,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 	model = normalizePiModel(model)
 	a.setPiModel(model)
-	provider := strings.TrimSpace(tc.Provider)
-	if provider == "" {
-		provider = "claude-cli"
-	}
+	provider := pi.ProviderOrDefault(tc.Provider)
 	binaryPath := a.opts.PiBinaryPath
 	if binaryPath == "" {
 		binaryPath = "pi"

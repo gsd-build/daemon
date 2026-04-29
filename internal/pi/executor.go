@@ -69,6 +69,14 @@ type Options struct {
 	PlanCapability     *protocol.PlanCapability
 }
 
+// ProviderOrDefault returns the Pi provider name to use for a task.
+func ProviderOrDefault(provider string) string {
+	if strings.TrimSpace(provider) == "" {
+		return "claude-cli"
+	}
+	return strings.TrimSpace(provider)
+}
+
 // Executor spawns one `pi -p --mode rpc` process per task.
 type Executor struct {
 	opts                 Options
@@ -83,9 +91,7 @@ func NewExecutor(opts Options) *Executor {
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = "pi"
 	}
-	if strings.TrimSpace(opts.Provider) == "" {
-		opts.Provider = "claude-cli"
-	}
+	opts.Provider = ProviderOrDefault(opts.Provider)
 	return &Executor{opts: opts}
 }
 

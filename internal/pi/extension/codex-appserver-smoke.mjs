@@ -54,10 +54,11 @@ rl.on("line", (line) => {
   if (event.type === "message_update" && JSON.stringify(event).includes("ask_user_questions")) {
     flags.sawPiToolCall = true;
   }
-  if (event.type === "tool_execution_start" && event.toolName === "ask_user_questions") {
+  const toolName = event.toolName || event.tool_name;
+  if (event.type === "tool_execution_start" && toolName === "ask_user_questions") {
     flags.sawToolStart = true;
   }
-  if (event.type === "tool_execution_end" && event.toolName === "ask_user_questions") {
+  if (event.type === "tool_execution_end" && toolName === "ask_user_questions") {
     flags.sawToolEnd = true;
   }
   if (event.type === "extension_ui_request") {
