@@ -213,43 +213,56 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 }
 
 func TestActorPiExecutorPassesTaskProvider(t *testing.T) {
-	argsFile := filepath.Join(t.TempDir(), "pi.args")
-	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
-
-	actor, err := NewActor(testPiOptions(t, Options{
-		SessionID: "sess-provider-codex",
-		Relay:     newFakeRelay(),
-		Model:     "claude-opus-4-6",
-	}))
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
+	cases := []struct {
+		name     string
+		provider string
+		model    string
+	}{
+		{name: "codex", provider: "codex-appserver", model: "gpt-5.5"},
+		{name: "openrouter", provider: "openrouter", model: "z-ai/glm-4.7-flash"},
 	}
 
-	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
-		TaskID:    "task-provider-codex",
-		ChannelID: "ch-provider-codex",
-		Engine:    "pi",
-		Provider:  "codex-appserver",
-		Model:     "gpt-5.5",
-	}, "ask a question")
-	if err != nil {
-		t.Fatalf("runPiExecutor: %v", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argsFile := filepath.Join(t.TempDir(), "pi.args")
+			t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
 
-	args := readNulArgsFile(t, argsFile)
-	providerFlag := argIndex(args, "--provider")
-	if providerFlag < 0 || providerFlag+1 >= len(args) {
-		t.Fatalf("pi args missing --provider value: %v", args)
-	}
-	if args[providerFlag+1] != "codex-appserver" {
-		t.Fatalf("provider = %q, want codex-appserver", args[providerFlag+1])
-	}
-	modelFlag := argIndex(args, "--model")
-	if modelFlag < 0 || modelFlag+1 >= len(args) {
-		t.Fatalf("pi args missing --model value: %v", args)
-	}
-	if args[modelFlag+1] != "gpt-5.5" {
-		t.Fatalf("model = %q, want gpt-5.5", args[modelFlag+1])
+			actor, err := NewActor(testPiOptions(t, Options{
+				SessionID: "sess-provider-" + tc.name,
+				Relay:     newFakeRelay(),
+				Model:     "claude-opus-4-6",
+			}))
+			if err != nil {
+				t.Fatalf("new actor: %v", err)
+			}
+
+			err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+				TaskID:    "task-provider-" + tc.name,
+				ChannelID: "ch-provider-" + tc.name,
+				Engine:    "pi",
+				Provider:  tc.provider,
+				Model:     tc.model,
+			}, "ask a question")
+			if err != nil {
+				t.Fatalf("runPiExecutor: %v", err)
+			}
+
+			args := readNulArgsFile(t, argsFile)
+			providerFlag := argIndex(args, "--provider")
+			if providerFlag < 0 || providerFlag+1 >= len(args) {
+				t.Fatalf("pi args missing --provider value: %v", args)
+			}
+			if args[providerFlag+1] != tc.provider {
+				t.Fatalf("provider = %q, want %s", args[providerFlag+1], tc.provider)
+			}
+			modelFlag := argIndex(args, "--model")
+			if modelFlag < 0 || modelFlag+1 >= len(args) {
+				t.Fatalf("pi args missing --model value: %v", args)
+			}
+			if args[modelFlag+1] != tc.model {
+				t.Fatalf("model = %q, want %s", args[modelFlag+1], tc.model)
+			}
+		})
 	}
 }
 

@@ -40,6 +40,7 @@ import { schemaToZod } from "./schema-to-zod.js";
 import { askUserQuestionsTool } from "./ask-user-questions.js";
 import { registerPlanTools } from "./plan-tools.js";
 import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
+import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { Type } from "@sinclair/typebox";
 
 const CLAUDE_BUILTINS = [
@@ -742,4 +743,5 @@ export default function (pi: ExtensionAPI) {
     streamSimple: streamClaudeSdk,
   });
   registerCodexAppServerProvider(pi);
+  registerOpenRouterProvider(pi);
 }
