@@ -284,11 +284,26 @@ test("plan_update_item completion appends derived filesChanged", async () => {
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
   writeFileSync(join(repo, "a.txt"), "one\n");
   execFileSync("git", ["add", "a.txt"], { cwd: repo });
-  execFileSync("git", ["commit", "-m", "base"], { cwd: repo, stdio: "ignore" });
-  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  execFileSync("git", ["commit", "-m", "base"], {
+    cwd: repo,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: "2026-04-29T10:00:00Z",
+      GIT_COMMITTER_DATE: "2026-04-29T10:00:00Z",
+    },
+  });
   writeFileSync(join(repo, "a.txt"), "two\n");
   execFileSync("git", ["add", "a.txt"], { cwd: repo });
-  execFileSync("git", ["commit", "-m", "change"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "change"], {
+    cwd: repo,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: "2026-04-29T10:01:00Z",
+      GIT_COMMITTER_DATE: "2026-04-29T10:01:00Z",
+    },
+  });
 
   const tools = [];
   registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
@@ -305,7 +320,7 @@ test("plan_update_item completion appends derived filesChanged", async () => {
         snapshot: {
           activePlan: {
             id: "plan-1",
-            items: [{ id: "item-1", startedAt: base }],
+            items: [{ id: "item-1", startedAt: "2026-04-29T10:00:30Z" }],
           },
         },
       });

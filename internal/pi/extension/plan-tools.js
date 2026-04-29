@@ -198,8 +198,9 @@ async function projectPlanItemStartedAt(planId, itemId, signal, env) {
 export async function deriveFilesChanged({ startedAt, cwd = process.cwd(), signal } = {}) {
   if (!startedAt) return [];
   try {
-    const baseRef = startedAt.includes("T") ? `HEAD@{${startedAt}}` : startedAt;
-    const { stdout } = await execFileAsync("git", ["diff", "--name-only", baseRef, "HEAD"], {
+    const baseRef = await resolveDiffBaseRef({ startedAt, cwd, signal });
+    if (!baseRef) return [];
+    const { stdout } = await execFileAsync("git", ["diff", "--name-only", `${baseRef}..HEAD`], {
       cwd,
       signal,
       timeout: 5000,
@@ -209,6 +210,21 @@ export async function deriveFilesChanged({ startedAt, cwd = process.cwd(), signa
   } catch {
     return [];
   }
+}
+
+async function resolveDiffBaseRef({ startedAt, cwd, signal }) {
+  if (!startedAt.includes("T")) return startedAt;
+  const { stdout } = await execFileAsync(
+    "git",
+    ["rev-list", "-1", `--before=${startedAt}`, "HEAD"],
+    {
+      cwd,
+      signal,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  return stdout.trim() || null;
 }
 
 async function updateItemBody(params, signal, env) {
