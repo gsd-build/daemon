@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasPlanCapability, registerPlanTools } from "./plan-tools.js";
+import { compactProjectState, hasPlanCapability, registerPlanTools } from "./plan-tools.js";
 
 const planEnv = {
   GSD_PLAN_API_BASE_URL: "https://app.test/",
@@ -79,4 +79,192 @@ test("plan mutation tools call agent plan api with bearer token", async () => {
     mutationId: "mut_1",
     toolCallId: "toolu_1",
   });
+});
+
+const fullProjectState = {
+  snapshot: {
+    projectId: "project_1",
+    planModeEnabled: true,
+    revision: 24,
+    activePlan: {
+      id: "plan_1",
+      projectId: "project_1",
+      title: "Ship the thing",
+      status: "active",
+      revision: 3,
+      userContext: "commit after each item",
+      agentNotes: "watch the UI",
+      progress: { completed: 1, totalNonCancelled: 3, cancelled: 0, blocked: 0, percent: 33 },
+      currentItemId: null,
+      items: [
+        {
+          id: "item_done",
+          title: "Scaffold",
+          description: "Long completed description that should not be in the item summary.",
+          result: "Completed result",
+          status: "completed",
+          position: 0,
+          completedAt: "2026-04-29T14:58:41.097Z",
+          updatedAt: "2026-04-29T14:58:41.097Z",
+        },
+        {
+          id: "item_next",
+          title: "Build vocabularies",
+          description: "Create the deterministic press data vocabulary module.",
+          userContext: "Use stable seeded picks.",
+          agentNotes: "",
+          result: "",
+          status: "pending",
+          position: 1,
+          updatedAt: "2026-04-29T14:54:26.104Z",
+        },
+        {
+          id: "item_later",
+          title: "Render outlet",
+          description: "Long future description that should not be in the item summary.",
+          status: "pending",
+          position: 2,
+        },
+      ],
+    },
+    pausedPlans: [],
+    archivedPlans: [
+      {
+        id: "archived_1",
+        title: "Archived plan",
+        status: "archived",
+        progress: { completed: 9, totalNonCancelled: 9, cancelled: 0, blocked: 0, percent: 100 },
+        items: [
+          {
+            id: "archived_item",
+            title: "Old item",
+            description: "Archived item body should not be returned by compact state.",
+            status: "completed",
+            position: 0,
+          },
+        ],
+        updatedAt: "2026-04-29T14:49:28.037Z",
+        archivedAt: "2026-04-29T14:49:27.968Z",
+      },
+    ],
+    supportedActions: ["plan_get_project_state", "plan_get_archived_plan"],
+    updatedAt: "2026-04-29T15:53:27.226Z",
+  },
+};
+
+test("compactProjectState keeps the actionable item detail and summarizes plan lists", () => {
+  const compact = compactProjectState(fullProjectState);
+  const active = compact.snapshot.activePlan;
+
+  assert.equal(compact.detail, "compact");
+  assert.equal(active.nextItem.id, "item_next");
+  assert.equal(active.nextItem.description, "Create the deterministic press data vocabulary module.");
+  assert.equal(active.items.length, 3);
+  assert.equal(active.items[0].description, undefined);
+  assert.equal(active.items[2].description, undefined);
+  assert.equal(compact.snapshot.archivedPlans.length, 1);
+  assert.equal(compact.snapshot.archivedPlans[0].items, undefined);
+  assert.match(compact.fullDetail, /detail":"full"/);
+});
+
+test("compactProjectState treats malformed plan lists as empty", () => {
+  const compact = compactProjectState({
+    snapshot: {
+      projectId: "project_1",
+      activePlan: {
+        id: "plan_1",
+        title: "Malformed plan",
+        status: "active",
+        items: { id: "not_an_array" },
+      },
+      pausedPlans: { id: "not_an_array" },
+      archivedPlans: "not_an_array",
+    },
+  });
+
+  assert.deepEqual(compact.snapshot.activePlan.items, []);
+  assert.equal(compact.snapshot.activePlan.currentItem, null);
+  assert.equal(compact.snapshot.activePlan.nextItem, null);
+  assert.deepEqual(compact.snapshot.activePlan.blockedItems, []);
+  assert.deepEqual(compact.snapshot.pausedPlans, []);
+  assert.deepEqual(compact.snapshot.archivedPlans, []);
+});
+
+test("compactProjectState treats malformed active plan as absent", () => {
+  const compact = compactProjectState({
+    snapshot: {
+      projectId: "project_1",
+      activePlan: "not_a_plan",
+      pausedPlans: [],
+      archivedPlans: [],
+    },
+  });
+
+  assert.equal(compact.snapshot.activePlan, null);
+});
+
+test("compactProjectState returns malformed snapshot unchanged", () => {
+  const malformed = { snapshot: "not_a_snapshot" };
+  assert.equal(compactProjectState(malformed), malformed);
+});
+
+test("compactProjectState skips malformed entries inside plan lists", () => {
+  const compact = compactProjectState({
+    snapshot: {
+      projectId: "project_1",
+      activePlan: {
+        id: "plan_1",
+        title: "Plan with malformed entries",
+        status: "active",
+        items: [
+          null,
+          "not_an_item",
+          ["not_an_item"],
+          { id: "item_2", title: "Second", status: "pending", position: 2 },
+          { id: "item_1", title: "First", status: "pending", position: 1 },
+        ],
+      },
+      pausedPlans: [null, "not_a_plan", { id: "paused_1", title: "Paused", status: "paused" }],
+      archivedPlans: [false, ["not_a_plan"], { id: "archived_1", title: "Archived", status: "archived" }],
+    },
+  });
+
+  assert.deepEqual(
+    compact.snapshot.activePlan.items.map((item) => item.id),
+    ["item_1", "item_2"],
+  );
+  assert.equal(compact.snapshot.activePlan.nextItem.id, "item_1");
+  assert.deepEqual(
+    compact.snapshot.pausedPlans.map((plan) => plan.id),
+    ["paused_1"],
+  );
+  assert.deepEqual(
+    compact.snapshot.archivedPlans.map((plan) => plan.id),
+    ["archived_1"],
+  );
+});
+
+test("plan_get_project_state returns compact state by default and full state on request", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const getState = tools.find((tool) => tool.name === "plan_get_project_state");
+  assert.ok(getState);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json(fullProjectState);
+  try {
+    const compactResult = await getState.execute("toolu_state", {});
+    const compact = JSON.parse(compactResult.content[0].text);
+    assert.equal(compact.detail, "compact");
+    assert.equal(compact.snapshot.activePlan.nextItem.description, "Create the deterministic press data vocabulary module.");
+    assert.equal(compact.snapshot.activePlan.items[1].description, undefined);
+    assert.equal(compact.snapshot.archivedPlans[0].items, undefined);
+
+    const fullResult = await getState.execute("toolu_state", { detail: "full" });
+    const full = JSON.parse(fullResult.content[0].text);
+    assert.equal(full.snapshot.activePlan.items[1].description, "Create the deterministic press data vocabulary module.");
+    assert.equal(full.snapshot.archivedPlans[0].items[0].description, "Archived item body should not be returned by compact state.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
