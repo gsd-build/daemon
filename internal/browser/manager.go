@@ -107,7 +107,12 @@ func (m *Manager) Open(ctx context.Context, msg *protocol.BrowserSessionOpen) er
 		Title:     result.Title,
 		OpenedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}); err != nil {
-		frameCancel()
+		m.mu.Lock()
+		m.removeStateLocked(state)
+		m.mu.Unlock()
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = m.service.Close(closeCtx, state.browserID)
 		return err
 	}
 	go m.frameLoop(frameCtx, result.BrowserID)
