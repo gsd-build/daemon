@@ -12,6 +12,7 @@ const planEnv = {
   GSD_PLAN_CAPABILITY_TOKEN: "gsd_plan_test",
   GSD_PLAN_CAPABILITY_EXPIRES_AT: "2026-04-28T22:30:00Z",
 };
+const compatPlanEnv = { ...planEnv, GSD_PLAN_COMPAT_TOOLS: "1" };
 
 test("hasPlanCapability requires all env vars", () => {
   assert.equal(hasPlanCapability({}), false);
@@ -25,39 +26,69 @@ test("registerPlanTools skips registration without capability", () => {
   assert.equal(tools.length, 0);
 });
 
-test("registerPlanTools registers project state and mutation tools", () => {
+test("registerPlanTools registers only intent tools by default", () => {
   const tools = [];
   const registered = registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
   assert.equal(registered, true);
   assert.deepEqual(
-    tools.map((tool) => tool.name).sort(),
+    tools.map((tool) => tool.name),
     [
-      "plan_add_item",
-      "plan_archive",
-      "plan_cancel_item",
-      "plan_check_criterion",
-      "plan_check_sub_task",
-      "plan_commit",
-      "plan_create",
-      "plan_get_archived_plan",
-      "plan_get_project_state",
-      "plan_pause",
-      "plan_rename",
-      "plan_reorder_items",
-      "plan_resume",
-      "plan_update_agent_criteria",
-      "plan_update_item",
-      "plan_update_sub_tasks",
-      "plan_update_user_context",
-    ].sort(),
+      "plan_status",
+      "plan_next",
+      "plan_checkpoint",
+      "plan_sync",
+      "plan_done",
+    ],
   );
+});
+
+test("registerPlanTools registers compatibility tools when explicitly enabled", () => {
+  const tools = [];
+  const registered = registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
+  assert.equal(registered, true);
   const names = tools.map((tool) => tool.name);
-  assert.ok(names.indexOf("plan_commit") < names.indexOf("plan_create"));
+  assert.ok(names.includes("plan_done"));
+  assert.ok(names.includes("plan_commit"));
+  assert.ok(names.includes("plan_update_item"));
+});
+
+test("plan_done posts to the intent endpoint and injects toolCallId", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const done = tools.find((tool) => tool.name === "plan_done");
+  assert.ok(done);
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ ok: true, planId: "plan-1", revision: 2, progress: {} });
+  };
+  try {
+    const result = await done.execute("toolu_done", {
+      idempotencyKey: "done-1",
+      summary: "Complete",
+      evidencePolicy: "waive",
+      evidenceWaiverReason: "Planning-only work",
+    });
+    assert.equal(result.isError, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls[0].url, "https://app.test/api/agent-plan/intent/plan_done");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    idempotencyKey: "done-1",
+    summary: "Complete",
+    evidencePolicy: "waive",
+    evidenceWaiverReason: "Planning-only work",
+    toolCallId: "toolu_done",
+  });
 });
 
 test("plan_commit validates multi-operation payloads", () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const commit = tools.find((tool) => tool.name === "plan_commit");
   assert.ok(commit);
 
@@ -79,7 +110,7 @@ test("plan_commit validates multi-operation payloads", () => {
 
 test("plan_commit rejects stringified arrays before network forwarding", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const commit = tools.find((tool) => tool.name === "plan_commit");
   assert.ok(commit);
 
@@ -114,7 +145,7 @@ test("plan_commit rejects stringified arrays before network forwarding", async (
 
 test("plan_commit reports selected operation field errors without union noise", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const commit = tools.find((tool) => tool.name === "plan_commit");
   assert.ok(commit);
 
@@ -149,7 +180,7 @@ test("plan_commit reports selected operation field errors without union noise", 
 
 test("plan_commit rejects human-readable evidence refs before network forwarding", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const commit = tools.find((tool) => tool.name === "plan_commit");
   assert.ok(commit);
 
@@ -189,7 +220,7 @@ test("plan_commit rejects human-readable evidence refs before network forwarding
 
 test("plan_commit forwards runtime id and defaults response detail", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const commit = tools.find((tool) => tool.name === "plan_commit");
   assert.ok(commit);
 
@@ -220,7 +251,7 @@ test("plan_commit forwards runtime id and defaults response detail", async () =>
 
 test("plan_commit cloud errors complete as errored tool results", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const commit = tools.find((tool) => tool.name === "plan_commit");
   assert.ok(commit);
 
@@ -248,7 +279,7 @@ test("plan_commit cloud errors complete as errored tool results", async () => {
 
 test("plan mutation tools call agent plan api with bearer token", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const rename = tools.find((tool) => tool.name === "plan_rename");
   assert.ok(rename);
 
@@ -449,7 +480,7 @@ test("compactProjectState skips malformed entries inside plan lists", () => {
 
 test("plan_get_project_state returns compact state by default and full state on request", async () => {
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const getState = tools.find((tool) => tool.name === "plan_get_project_state");
   assert.ok(getState);
 
@@ -501,7 +532,7 @@ test("plan_update_item completion appends derived filesChanged", async () => {
   });
 
   const tools = [];
-  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, compatPlanEnv);
   const update = tools.find((tool) => tool.name === "plan_update_item");
   assert.ok(update);
 
