@@ -39,6 +39,7 @@ type piToolEnd struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Details map[string]any `json:"details"`
 	} `json:"result"`
 	IsError bool `json:"isError"`
 }
@@ -179,7 +180,18 @@ func translatePiEvent(piRaw json.RawMessage, state *translatorState) []rawEvent 
 				resultText += c.Text
 			}
 		}
-		return []rawEvent{makeToolResultUser(state, te.ToolCallID, resultText, te.IsError)}
+		var content any = resultText
+		if te.ToolName == "subagent" && te.Result.Details != nil {
+			details := make(map[string]any, len(te.Result.Details)+1)
+			for k, v := range te.Result.Details {
+				details[k] = v
+			}
+			if _, ok := details["finalText"]; !ok && resultText != "" {
+				details["finalText"] = resultText
+			}
+			content = details
+		}
+		return []rawEvent{makeToolResultUser(state, te.ToolCallID, content, te.IsError)}
 
 	case "agent_end":
 		// Result event is synthesized separately by streamPiEvents (it needs
@@ -212,6 +224,50 @@ type translatorState struct {
 type rawEvent struct {
 	Type string
 	Raw  json.RawMessage
+}
+
+type ChildTranslator struct {
+	sessionID string
+	state     translatorState
+}
+
+func NewChildTranslator(sessionID string, cwd string, model string) *ChildTranslator {
+	return &ChildTranslator{
+		sessionID: sessionID,
+		state: translatorState{
+			sessionID: sessionID,
+			cwd:       cwd,
+			model:     model,
+			taskID:    sessionID,
+		},
+	}
+}
+
+func (t *ChildTranslator) Translate(raw json.RawMessage) []json.RawMessage {
+	events := translatePiEvent(raw, &t.state)
+	if len(events) == 0 {
+		t.state.sessionID = t.sessionID
+		return nil
+	}
+	out := make([]json.RawMessage, 0, len(events))
+	for _, event := range events {
+		out = append(out, stampSessionID(event.Raw, t.sessionID))
+	}
+	t.state.sessionID = t.sessionID
+	return out
+}
+
+func stampSessionID(raw json.RawMessage, sessionID string) json.RawMessage {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return raw
+	}
+	obj["session_id"] = sessionID
+	stamped, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return stamped
 }
 
 func makeSystemInit(s piSession) rawEvent {
@@ -338,7 +394,7 @@ func makeContentBlockStop(state *translatorState) rawEvent {
 	return rawEvent{Type: "stream_event", Raw: out}
 }
 
-func makeToolResultUser(state *translatorState, toolUseID, resultText string, isError bool) rawEvent {
+func makeToolResultUser(state *translatorState, toolUseID string, content any, isError bool) rawEvent {
 	out, _ := json.Marshal(map[string]any{
 		"type": "user",
 		"message": map[string]any{
@@ -347,7 +403,7 @@ func makeToolResultUser(state *translatorState, toolUseID, resultText string, is
 				{
 					"type":        "tool_result",
 					"tool_use_id": toolUseID,
-					"content":     resultText,
+					"content":     content,
 					"is_error":    isError,
 				},
 			},

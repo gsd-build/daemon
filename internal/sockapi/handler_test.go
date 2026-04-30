@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,6 +20,26 @@ func (m *mockProvider) Health() HealthData      { return m.health }
 func (m *mockProvider) Status() StatusData      { return m.status }
 func (m *mockProvider) Sessions() []SessionInfo { return m.sessions }
 func (m *mockProvider) Workers() []WorkerInfo   { return m.workers }
+
+type mockSubagentProvider struct {
+	mockProvider
+}
+
+func (m *mockSubagentProvider) CreateSubagentChild(_ *http.Request, _ CreateSubagentChildRequest) (CreateSubagentChildResponse, error) {
+	return CreateSubagentChildResponse{}, nil
+}
+
+func (m *mockSubagentProvider) ForwardSubagentEvent(_ *http.Request, _ ForwardSubagentEventRequest) error {
+	return nil
+}
+
+func (m *mockSubagentProvider) RegisterSubagentProcess(_ *http.Request, _ RegisterSubagentProcessRequest) error {
+	return nil
+}
+
+func (m *mockSubagentProvider) FinalizeSubagentChild(_ *http.Request, _ FinalizeSubagentChildRequest) (FinalizeSubagentChildResponse, error) {
+	return FinalizeSubagentChildResponse{}, nil
+}
 
 func TestHealthReturnsOK(t *testing.T) {
 	p := &mockProvider{health: HealthData{Status: "ok"}}
@@ -136,6 +157,29 @@ func TestStatusReturnsFullData(t *testing.T) {
 	}
 	if got.LogLevel != "info" {
 		t.Errorf("expected logLevel info, got %s", got.LogLevel)
+	}
+}
+
+func TestSubagentMalformedJSONReturnsJSONError(t *testing.T) {
+	p := &mockSubagentProvider{}
+	h := newHandler(p)
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/create-child", strings.NewReader("{"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected application/json, got %s", ct)
+	}
+	var got map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(got["error"], "invalid json") {
+		t.Fatalf("error = %q, want invalid json", got["error"])
 	}
 }
 

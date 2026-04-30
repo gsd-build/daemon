@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gsd-build/daemon/internal/agents"
+	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/claude"
 	daemonfs "github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pi"
@@ -47,6 +49,11 @@ type Options struct {
 	ResumeSession     string
 	PiBinaryPath      string
 	PiExtensionPath   string
+	ServerURL         string
+	MachineID         string
+	AuthToken         string
+	DaemonSocketPath  string
+	AgentDir          string
 	Uploader          ImageUploader // nil = image upload disabled
 	BrowserGrantID    string
 	BrowserID         string
@@ -721,6 +728,13 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		}
 	}
 
+	subagentsPrompt := ""
+	if definitions, err := a.syncSubagents(taskCtx); err != nil {
+		slog.Warn("sync subagents failed", "sessionId", a.opts.SessionID, "err", err)
+	} else {
+		subagentsPrompt = agents.BuildPrompt(definitions)
+	}
+
 	opts := pi.Options{
 		BinaryPath:         binaryPath,
 		CWD:                a.opts.CWD,
@@ -738,6 +752,10 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		BrowserSessionID:   a.opts.SessionID,
 		WarmClaudeSDK:      a.opts.WarmClaudeSDK,
 		PlanCapability:     tc.PlanCapability,
+		DaemonSocketPath:   a.opts.DaemonSocketPath,
+		ParentSessionID:    a.opts.SessionID,
+		AgentDir:           a.opts.AgentDir,
+		SubagentsPrompt:    subagentsPrompt,
 	}
 
 	coordinator := &structuredQuestionCoordinator{}
@@ -758,6 +776,37 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	return a.handleResult(taskCtx, tc, resultRaw)
+}
+
+func (a *Actor) syncSubagents(ctx context.Context) ([]agents.Definition, error) {
+	if a.opts.ServerURL == "" || a.opts.MachineID == "" || a.opts.AuthToken == "" {
+		return nil, nil
+	}
+	if a.opts.AgentDir == "" {
+		return nil, nil
+	}
+	resp, err := api.NewClient(a.opts.ServerURL).ListSubagents(ctx, api.ListSubagentsRequest{
+		MachineID: a.opts.MachineID,
+		AuthToken: a.opts.AuthToken,
+		SessionID: a.opts.SessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defs := make([]agents.Definition, 0, len(resp.Agents))
+	for _, agent := range resp.Agents {
+		defs = append(defs, agents.Definition{
+			Name:         agent.Name,
+			Description:  agent.Description,
+			SystemPrompt: agent.SystemPrompt,
+			Model:        agent.Model,
+			Tools:        agent.Tools,
+		})
+	}
+	if err := agents.SyncDefinitions(a.opts.AgentDir, defs); err != nil {
+		return nil, err
+	}
+	return defs, nil
 }
 
 func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string, opts pi.Options, coordinator *structuredQuestionCoordinator) error {
