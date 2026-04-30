@@ -476,6 +476,19 @@ export function buildClaudePromptMessages(
     }];
   }
 
+  const latestMessage = messages[lastIndex];
+  if (latestMessage.role === "toolResult") {
+    return [{
+      type: "user",
+      message: {
+        role: "user" as const,
+        content: renderPiHistoryForClaude(messages),
+      },
+      parent_tool_use_id: null,
+      session_id: sdkSessionId,
+    }];
+  }
+
   return messages.slice(lastIndex).map((msg) => {
     const prompt: SDKUserMessage = {
       type: "user",

@@ -45,7 +45,7 @@ const toolResult = {
   timestamp: 3,
 };
 
-test("buildClaudePromptMessages sends only the latest message for a resumed SDK session", () => {
+test("buildClaudePromptMessages renders a tool-result continuation as text for a resumed SDK session", () => {
   const messages = buildClaudePromptMessages(
     [userMessage, assistantToolCall, toolResult],
     "11111111-1111-5111-8111-111111111111",
@@ -55,9 +55,23 @@ test("buildClaudePromptMessages sends only the latest message for a resumed SDK 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].message.role, "user");
   assert.equal(messages[0].parent_tool_use_id, null);
-  assert.equal(messages[0].message.content[0].type, "tool_result");
-  assert.equal(messages[0].message.content[0].tool_use_id, "toolu_123");
-  assert.equal(messages[0].message.content[0].content[0].text, "/tmp/project");
+  assert.equal(typeof messages[0].message.content, "string");
+  assert.match(messages[0].message.content, /Assistant tool call: bash/);
+  assert.match(messages[0].message.content, /Tool result \(bash success\):/);
+  assert.match(messages[0].message.content, /\/tmp\/project/);
+  assert.equal("isReplay" in messages[0], false);
+});
+
+test("buildClaudePromptMessages sends only the latest human text for a resumed SDK session", () => {
+  const messages = buildClaudePromptMessages(
+    [userMessage],
+    "11111111-1111-5111-8111-111111111111",
+    false,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].message.role, "user");
+  assert.deepEqual(messages[0].message.content, [{ type: "text", text: "Inspect the project." }]);
   assert.equal("isReplay" in messages[0], false);
 });
 
