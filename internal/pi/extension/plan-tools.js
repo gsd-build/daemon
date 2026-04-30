@@ -233,6 +233,7 @@ const PlanDoneParams = Type.Object({
 export function hasPlanCapability(env = process.env) {
   return Boolean(
     env.GSD_PLAN_API_BASE_URL &&
+      env.GSD_PLAN_CAPABILITY_ATTEMPT_ID &&
       env.GSD_PLAN_CAPABILITY_TOKEN &&
       env.GSD_PLAN_CAPABILITY_EXPIRES_AT,
   );

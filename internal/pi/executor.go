@@ -609,7 +609,7 @@ func browserEnv(base []string, grantID string, browserID string, sessionID strin
 }
 
 func planCapabilityEnv(base []string, cap *protocol.PlanCapability) []string {
-	env := make([]string, 0, len(base)+3)
+	env := make([]string, 0, len(base)+5)
 	for _, entry := range base {
 		if strings.HasPrefix(entry, "GSD_PLAN_") {
 			continue
@@ -618,6 +618,8 @@ func planCapabilityEnv(base []string, cap *protocol.PlanCapability) []string {
 	}
 	if cap != nil {
 		env = append(env,
+			"GSD_PLAN_CAPABILITY_ID="+cap.ID,
+			"GSD_PLAN_CAPABILITY_ATTEMPT_ID="+cap.AttemptID,
 			"GSD_PLAN_API_BASE_URL="+cap.APIBaseURL,
 			"GSD_PLAN_CAPABILITY_TOKEN="+cap.Token,
 			"GSD_PLAN_CAPABILITY_EXPIRES_AT="+cap.ExpiresAt,

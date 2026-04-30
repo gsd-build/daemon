@@ -237,6 +237,8 @@ func TestExecutorPassesPlanCapabilityEnv(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "pi.env")
 	fakePi := writeFakePi(t, `
 {
+  printf 'GSD_PLAN_CAPABILITY_ID=%s\n' "${GSD_PLAN_CAPABILITY_ID:-}"
+  printf 'GSD_PLAN_CAPABILITY_ATTEMPT_ID=%s\n' "${GSD_PLAN_CAPABILITY_ATTEMPT_ID:-}"
   printf 'GSD_PLAN_API_BASE_URL=%s\n' "${GSD_PLAN_API_BASE_URL:-}"
   printf 'GSD_PLAN_CAPABILITY_TOKEN=%s\n' "${GSD_PLAN_CAPABILITY_TOKEN:-}"
   printf 'GSD_PLAN_CAPABILITY_EXPIRES_AT=%s\n' "${GSD_PLAN_CAPABILITY_EXPIRES_AT:-}"
@@ -257,6 +259,8 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 		Provider:      "claude-cli",
 		Prompt:        "hello",
 		PlanCapability: &protocol.PlanCapability{
+			ID:         "capability-1",
+			AttemptID:  "attempt-1",
 			APIBaseURL: "https://app.test",
 			Token:      "gsd_plan_test_secret",
 			ExpiresAt:  "2026-04-28T22:30:00Z",
@@ -274,6 +278,12 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	got := string(data)
 	if !strings.Contains(got, "GSD_PLAN_API_BASE_URL=https://app.test\n") {
 		t.Fatalf("env missing api base url: %s", got)
+	}
+	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_ID=capability-1\n") {
+		t.Fatalf("env missing capability id: %s", got)
+	}
+	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_ATTEMPT_ID=attempt-1\n") {
+		t.Fatalf("env missing attempt id: %s", got)
 	}
 	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_TOKEN=gsd_plan_test_secret\n") {
 		t.Fatalf("env missing capability token: %s", got)
