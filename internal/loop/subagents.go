@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
@@ -45,6 +46,10 @@ func (d *Daemon) CreateSubagentChild(r *http.Request, req sockapi.CreateSubagent
 	d.subagentStreams[resp.ChildSessionID] = pi.NewChildTranslator(resp.ChildSessionID, "", resp.Agent.Model)
 	d.subagentSeq[resp.ChildSessionID] = 0
 	d.subagentMu.Unlock()
+
+	if err := d.sendSubagentStarted(r.Context(), req.ParentSessionID, req.ParentToolCallID, resp.ChildSessionID, resp.ProjectID, resp.Agent.Name, resp.Agent.Model); err != nil {
+		slog.Warn("send subagent started status failed", "parentSessionId", req.ParentSessionID, "childSessionId", resp.ChildSessionID, "err", err)
+	}
 
 	return sockapi.CreateSubagentChildResponse{
 		ChildSessionID:  resp.ChildSessionID,
@@ -100,6 +105,31 @@ func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubage
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) sendSubagentStarted(ctx context.Context, parentSessionID string, parentToolCallID string, childSessionID string, projectID string, agentName string, model string) error {
+	if d.manager == nil {
+		return nil
+	}
+	actor := d.manager.Get(parentSessionID)
+	if actor == nil {
+		return nil
+	}
+	payload := map[string]any{
+		"type":             "subagent_status",
+		"status":           "started",
+		"parentSessionId":  parentSessionID,
+		"parentToolCallId": parentToolCallID,
+		"childSessionId":   childSessionID,
+		"projectId":        projectID,
+		"agentName":        agentName,
+		"model":            model,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return actor.SendStreamEvent(ctx, "subagent:"+childSessionID, raw)
 }
 
 func (d *Daemon) FinalizeSubagentChild(r *http.Request, req sockapi.FinalizeSubagentChildRequest) (sockapi.FinalizeSubagentChildResponse, error) {
