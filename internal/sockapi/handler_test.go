@@ -37,6 +37,10 @@ func (m *mockSubagentProvider) RegisterSubagentProcess(_ *http.Request, _ Regist
 	return nil
 }
 
+func (m *mockSubagentProvider) HeartbeatSubagentChild(_ *http.Request, _ HeartbeatSubagentChildRequest) error {
+	return nil
+}
+
 func (m *mockSubagentProvider) FinalizeSubagentChild(_ *http.Request, _ FinalizeSubagentChildRequest) (FinalizeSubagentChildResponse, error) {
 	return FinalizeSubagentChildResponse{}, nil
 }

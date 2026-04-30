@@ -61,6 +61,7 @@ export function createDaemonRpc(socketPath = process.env.GSD_DAEMON_SOCKET) {
   return {
     createChild: (body, signal) => call("/subagents/create-child", body, signal),
     registerProcess: (body, signal) => call("/subagents/register-process", body, signal),
+    heartbeat: (body, signal) => call("/subagents/heartbeat", body, signal),
     forwardEvent: (body, signal) => call("/subagents/forward-event", body, signal),
     finalize: (body, signal) => call("/subagents/finalize", body, signal),
   };
