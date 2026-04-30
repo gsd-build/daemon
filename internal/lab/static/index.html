@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Provider Lab</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <strong>Provider Lab</strong>
+        <input id="cwd" aria-label="cwd" />
+        <select id="provider" aria-label="provider"><option>claude-cli</option></select>
+        <input id="model" aria-label="model" value="claude-sonnet-4-6" />
+        <select id="effort" aria-label="effort"><option>medium</option><option>high</option><option>max</option></select>
+        <select id="permissionMode" aria-label="permission mode"><option>acceptEdits</option><option>default</option></select>
+        <button id="terminalBtn">Terminal</button>
+        <button id="exportBtn">Export</button>
+      </header>
+      <section class="workspace">
+        <aside class="panel" id="files">
+          <h2>Files</h2>
+          <div id="fileTree"></div>
+          <pre id="filePreview"></pre>
+        </aside>
+        <section class="chat">
+          <div id="messages"></div>
+          <form id="composer">
+            <textarea id="prompt"></textarea>
+            <button>Send</button>
+          </form>
+        </section>
+        <aside class="panel">
+          <h2>Events</h2>
+          <pre id="events"></pre>
+        </aside>
+      </section>
+      <section class="terminal"><h2>Terminal</h2><pre id="terminalOutput"></pre></section>
+      <section class="plan"><h2>Plan Mode</h2><pre id="planEvents"></pre></section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
