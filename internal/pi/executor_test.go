@@ -396,6 +396,52 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
+func TestExecutorMakesServiceManagerOpenRouterEnvAvailableToSubagents(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "pi.env")
+	fakePi := writeFakePi(t, `
+{
+  printf 'OPENROUTER_API_KEY=%s\n' "${OPENROUTER_API_KEY:-}"
+} > "`+envFile+`"
+IFS= read -r prompt_frame || true
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`)
+	extensionPath := filepath.Join(t.TempDir(), "index.ts")
+	if err := os.WriteFile(extensionPath, []byte("export default {};"), 0o600); err != nil {
+		t.Fatalf("write extension: %v", err)
+	}
+
+	t.Setenv(openRouterAPIKeyEnv, " ")
+	oldLookup := lookupServiceManagerEnv
+	lookupServiceManagerEnv = func(_ context.Context, key string) string {
+		if key == openRouterAPIKeyEnv {
+			return "sk-or-service-manager"
+		}
+		return ""
+	}
+	t.Cleanup(func() { lookupServiceManagerEnv = oldLookup })
+
+	exec := NewExecutor(Options{
+		BinaryPath:    fakePi,
+		CWD:           t.TempDir(),
+		ExtensionPath: extensionPath,
+		Provider:      "claude-cli",
+		Prompt:        "hello",
+	})
+
+	if err := exec.Run(context.Background(), func(claude.Event) error { return nil }, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "OPENROUTER_API_KEY=sk-or-service-manager\n") {
+		t.Fatalf("env missing service manager key for child subagents: %s", got)
+	}
+}
+
 func TestExecutorReportsToolExecutionStart(t *testing.T) {
 	t.Run("snake case", func(t *testing.T) {
 		var got ToolExecutionStart

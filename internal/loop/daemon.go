@@ -51,34 +51,35 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg                  *config.Config
-	version              string
-	manager              SessionManager
-	terminalManager      *terminal.Manager
-	agentTerminalManager *agentterminal.Manager
-	agentToolControl     *agentterminal.ControlServer
-	client               *relay.Client
-	startedAt            time.Time
-	channelRoots         sync.Map
-	uploader             *upload.Client
-	piBinaryPath         string
-	piExtensionPath      string
-	forcePi              bool
-	previewRegistry      *preview.Registry
-	previewHTTP          *preview.HTTPHandler
-	previewWS            *preview.WebSocketBridge
-	previewWork          chan struct{}
-	browserManager       *browser.Manager
-	agentTouchedFiles    agentTouchedFileStore
-	runCtxMu             sync.RWMutex
-	runCtx               context.Context
-	sockPath             string
-	agentDir             string
-	subagentMu           sync.Mutex
-	subagentStreams      map[string]*pi.ChildTranslator
-	subagentSeq          map[string]int64
-	subagentProcesses    map[string]int
-	subagentRunIDs       map[string]string
+	cfg                    *config.Config
+	version                string
+	manager                SessionManager
+	terminalManager        *terminal.Manager
+	agentTerminalManager   *agentterminal.Manager
+	agentToolControl       *agentterminal.ControlServer
+	client                 *relay.Client
+	startedAt              time.Time
+	channelRoots           sync.Map
+	uploader               *upload.Client
+	piBinaryPath           string
+	piExtensionPath        string
+	forcePi                bool
+	previewRegistry        *preview.Registry
+	previewHTTP            *preview.HTTPHandler
+	previewWS              *preview.WebSocketBridge
+	previewWork            chan struct{}
+	browserManager         *browser.Manager
+	agentTouchedFiles      agentTouchedFileStore
+	runCtxMu               sync.RWMutex
+	runCtx                 context.Context
+	sockPath               string
+	agentDir               string
+	subagentMu             sync.Mutex
+	subagentStreams        map[string]*pi.ChildTranslator
+	subagentSeq            map[string]int64
+	subagentProcesses      map[string]int
+	subagentRunIDs         map[string]string
+	subagentParentSessions map[string]string
 }
 
 const (
@@ -496,28 +497,29 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	}
 
 	d := &Daemon{
-		cfg:                  cfg,
-		version:              version,
-		manager:              manager,
-		terminalManager:      terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
-		agentTerminalManager: agentMgr,
-		agentToolControl:     agentControl,
-		client:               client,
-		startedAt:            time.Now(),
-		uploader:             uploader,
-		piBinaryPath:         piBinaryPath,
-		piExtensionPath:      piExtensionPath,
-		forcePi:              forcePi,
-		previewRegistry:      previewRegistry,
-		previewHTTP:          &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
-		previewWS:            preview.NewWebSocketBridge(previewRegistry, client),
-		previewWork:          make(chan struct{}, preview.DefaultMaxActiveStreams),
-		sockPath:             sockPath,
-		agentDir:             agentDir,
-		subagentStreams:      make(map[string]*pi.ChildTranslator),
-		subagentSeq:          make(map[string]int64),
-		subagentProcesses:    make(map[string]int),
-		subagentRunIDs:       make(map[string]string),
+		cfg:                    cfg,
+		version:                version,
+		manager:                manager,
+		terminalManager:        terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
+		agentTerminalManager:   agentMgr,
+		agentToolControl:       agentControl,
+		client:                 client,
+		startedAt:              time.Now(),
+		uploader:               uploader,
+		piBinaryPath:           piBinaryPath,
+		piExtensionPath:        piExtensionPath,
+		forcePi:                forcePi,
+		previewRegistry:        previewRegistry,
+		previewHTTP:            &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
+		previewWS:              preview.NewWebSocketBridge(previewRegistry, client),
+		previewWork:            make(chan struct{}, preview.DefaultMaxActiveStreams),
+		sockPath:               sockPath,
+		agentDir:               agentDir,
+		subagentStreams:        make(map[string]*pi.ChildTranslator),
+		subagentSeq:            make(map[string]int64),
+		subagentProcesses:      make(map[string]int),
+		subagentRunIDs:         make(map[string]string),
+		subagentParentSessions: make(map[string]string),
 		browserManager: browser.NewManager(browser.ManagerOptions{
 			Service: browser.LocalService{BinaryPath: "gsd-browser", StateDir: browserStateDir},
 			Sender:  client,
@@ -1010,6 +1012,7 @@ func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
 		actor.CancelTask()
+		d.cancelSubagentChildrenForParent(msg.SessionID)
 		return nil
 	}
 	if d.cancelSubagentChild(msg.SessionID) {

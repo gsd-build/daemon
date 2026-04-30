@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,6 +206,89 @@ func TestFinalizeSubagentChildIgnoresLiveStatusFailureAfterCloudSuccess(t *testi
 	}
 	if resp.Status != "succeeded" || resp.RunID != "run-1" {
 		t.Fatalf("response = %#v", resp)
+	}
+}
+
+func TestHandleStopCancelsTrackedSubagentsForParentSession(t *testing.T) {
+	finalized := make(chan struct{}, 1)
+	var cancelled int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/daemon/subagents/finalize" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var body struct {
+			MachineID      string `json:"machineId"`
+			RunID          string `json:"runId"`
+			ChildSessionID string `json:"childSessionId"`
+			Status         string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.RunID != "run-1" || body.ChildSessionID != "child-session-1" || body.Status != "cancelled" {
+			t.Fatalf("body = %#v", body)
+		}
+		atomic.StoreInt32(&cancelled, 1)
+		finalized <- struct{}{}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{
+			"ok":true,
+			"status":"cancelled",
+			"runId":"run-1",
+			"childSessionId":"child-session-1",
+			"parentSessionId":"parent-session-1",
+			"projectId":"project-1",
+			"errorMessage":"subagent cancelled"
+		}`)
+	}))
+	defer server.Close()
+
+	parentActor, err := session.NewActor(session.Options{
+		SessionID: "parent-session-1",
+		CWD:       t.TempDir(),
+		Relay:     newLoopFakeRelay(),
+	})
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+	defer parentActor.Stop()
+
+	oldDelay := subagentCancelFinalizeDelay
+	subagentCancelFinalizeDelay = time.Millisecond
+	defer func() { subagentCancelFinalizeDelay = oldDelay }()
+
+	d := &Daemon{
+		cfg: &config.Config{
+			MachineID: "machine-1",
+			AuthToken: "machine-token",
+			ServerURL: server.URL,
+		},
+		manager: &mockManager{
+			getFn: func(sessionID string) *session.Actor {
+				if sessionID == "parent-session-1" {
+					return parentActor
+				}
+				return nil
+			},
+		},
+		subagentRunIDs:         map[string]string{"child-session-1": "run-1"},
+		subagentParentSessions: map[string]string{"child-session-1": "parent-session-1"},
+		subagentProcesses:      map[string]int{},
+		subagentStreams:        map[string]*pi.ChildTranslator{},
+		subagentSeq:            map[string]int64{},
+	}
+
+	if err := d.handleStop(&protocol.Stop{SessionID: "parent-session-1"}); err != nil {
+		t.Fatalf("handleStop: %v", err)
+	}
+
+	select {
+	case <-finalized:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cancelled subagent finalize")
+	}
+	if atomic.LoadInt32(&cancelled) != 1 {
+		t.Fatal("subagent was not finalized as cancelled")
 	}
 }
 
