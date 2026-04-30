@@ -283,6 +283,48 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
+func TestExecutorPassesAgentToolsEnv(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"GSD_AGENT_TOOLS_SOCKET=/tmp/stale.sock",
+		"GSD_AGENT_TOOLS_TOKEN=stale-token",
+		"GSD_SESSION_ID=stale-session",
+		"GSD_CHANNEL_ID=stale-channel",
+		"GSD_TASK_ID=stale-task",
+	}
+	env := processEnv(context.Background(), base, Options{
+		Provider:         "claude-cli",
+		AgentToolsSocket: "/tmp/agent-tools.sock",
+		AgentToolsToken:  "fresh-token",
+		SessionID:        "sess-1",
+		ChannelID:        "chan-1",
+		TaskID:           "task-1",
+	})
+	got := strings.Join(env, "\n")
+	for _, want := range []string{
+		"GSD_AGENT_TOOLS_SOCKET=/tmp/agent-tools.sock",
+		"GSD_AGENT_TOOLS_TOKEN=fresh-token",
+		"GSD_SESSION_ID=sess-1",
+		"GSD_CHANNEL_ID=chan-1",
+		"GSD_TASK_ID=task-1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("env missing %q: %s", want, got)
+		}
+	}
+	for _, stale := range []string{
+		"/tmp/stale.sock",
+		"stale-token",
+		"stale-session",
+		"stale-channel",
+		"stale-task",
+	} {
+		if strings.Contains(got, stale) {
+			t.Fatalf("env kept stale agent tool value %q: %s", stale, got)
+		}
+	}
+}
+
 func TestExecutorControlsWarmClaudeSDKEnv(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin",
@@ -488,6 +530,59 @@ func TestStreamPiEvents_FiresOnToolExecutionEnd(t *testing.T) {
 	}
 	if got.ToolCallID != "c1" || got.ToolName != "edit" {
 		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestStreamPiEventsForwardsToolExecutionUpdate(t *testing.T) {
+	stream := strings.NewReader(`{"type":"tool_execution_update","toolCallId":"c1","toolName":"shell_exec","partialResult":{"content":[{"type":"text","text":"line 1"},{"type":"text","text":"line 2"}],"details":{"jobId":"job-1","status":"running"}}}` + "\n")
+
+	var events []claude.Event
+	err := streamPiEvents(
+		context.Background(),
+		stream,
+		io.Discard,
+		func(event claude.Event) error {
+			events = append(events, event)
+			return nil
+		},
+		nil,
+		nil,
+		nil,
+		make(chan struct{}, 1),
+		true,
+		&translatorState{sessionID: "sess-1"},
+		time.Now(),
+	)
+	if err != nil && err != io.EOF {
+		t.Fatalf("streamPiEvents error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	var top struct {
+		Type      string `json:"type"`
+		SessionID string `json:"session_id"`
+		Event     struct {
+			Type       string         `json:"type"`
+			ToolCallID string         `json:"tool_call_id"`
+			ToolName   string         `json:"tool_name"`
+			Text       string         `json:"text"`
+			Details    map[string]any `json:"details"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(events[0].Raw, &top); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if top.Type != "stream_event" || top.SessionID != "sess-1" {
+		t.Fatalf("top = %#v", top)
+	}
+	if top.Event.Type != "tool_execution_update" ||
+		top.Event.ToolCallID != "c1" ||
+		top.Event.ToolName != "shell_exec" ||
+		top.Event.Text != "line 1line 2" ||
+		top.Event.Details["jobId"] != "job-1" ||
+		top.Event.Details["status"] != "running" {
+		t.Fatalf("event = %#v", top.Event)
 	}
 }
 

@@ -89,3 +89,33 @@ func TestWorkerKeyRedactsPlanTokenInHash(t *testing.T) {
 		t.Fatal("hash exposed raw plan token")
 	}
 }
+
+func TestWorkerKeyIncludesAgentTools(t *testing.T) {
+	base := Options{
+		BinaryPath:       "/bin/pi",
+		CWD:              "/repo",
+		Model:            "claude-sonnet-4-6",
+		ResumeSession:    "/tmp/session.jsonl",
+		ExtensionPath:    "/ext/index.ts",
+		Provider:         "claude-cli",
+		AgentToolsSocket: "/tmp/agent-tools.sock",
+		AgentToolsToken:  "token-1",
+	}
+	a := NewWorkerKey(base)
+
+	otherSocket := base
+	otherSocket.AgentToolsSocket = "/tmp/other.sock"
+	if a == NewWorkerKey(otherSocket) {
+		t.Fatal("worker key ignored agent tools socket")
+	}
+
+	otherToken := base
+	otherToken.AgentToolsToken = "token-2"
+	if a == NewWorkerKey(otherToken) {
+		t.Fatal("worker key ignored agent tools token")
+	}
+
+	if a.AgentToolsTokenHash == "" || a.AgentToolsTokenHash == "token-1" {
+		t.Fatalf("agent tool token hash = %q", a.AgentToolsTokenHash)
+	}
+}

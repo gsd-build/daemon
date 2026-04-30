@@ -38,6 +38,7 @@ import {
 } from "./usage-estimator.js";
 import { schemaToZod } from "./schema-to-zod.js";
 import { askUserQuestionsTool } from "./ask-user-questions.js";
+import { backgroundTools } from "./background-tools.js";
 import { registerPlanTools } from "./plan-tools.js";
 import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
@@ -801,6 +802,9 @@ export default function (pi: ExtensionAPI) {
   registerAskHumanTool(pi);
   registerBrowserTool(pi);
   pi.registerTool(askUserQuestionsTool as any);
+  for (const backgroundTool of backgroundTools) {
+    pi.registerTool(backgroundTool as any);
+  }
   registerPlanTools(pi as any);
   registerSubagentTool(pi as any);
   pi.registerProvider("claude-cli", {

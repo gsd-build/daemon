@@ -315,6 +315,51 @@ func TestTranslator_ToolCallStartShape(t *testing.T) {
 	}
 }
 
+func TestTranslator_ToolExecutionUpdateShape(t *testing.T) {
+	state := &translatorState{sessionID: "sess-x"}
+	out := translatePiEvent([]byte(`{
+	  "type":"tool_execution_update",
+	  "toolCallId":"toolu_abc",
+	  "toolName":"shell_exec",
+	  "partialResult":{
+	    "content":[{"type":"text","text":"server ready"}],
+	    "details":{"jobId":"job-1","terminalId":"term-1"}
+	  }
+	}`), state)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(out))
+	}
+	var top struct {
+		Type      string `json:"type"`
+		SessionID string `json:"session_id"`
+		Event     struct {
+			Type       string         `json:"type"`
+			ToolCallID string         `json:"tool_call_id"`
+			ToolName   string         `json:"tool_name"`
+			Text       string         `json:"text"`
+			Details    map[string]any `json:"details"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(out[0].Raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	if top.Type != "stream_event" || top.SessionID != "sess-x" {
+		t.Fatalf("top = %#v", top)
+	}
+	if top.Event.Type != "tool_execution_update" {
+		t.Fatalf("event type = %q", top.Event.Type)
+	}
+	if top.Event.ToolCallID != "toolu_abc" || top.Event.ToolName != "shell_exec" {
+		t.Fatalf("event tool = %#v", top.Event)
+	}
+	if top.Event.Text != "server ready" {
+		t.Fatalf("event text = %q", top.Event.Text)
+	}
+	if top.Event.Details["jobId"] != "job-1" || top.Event.Details["terminalId"] != "term-1" {
+		t.Fatalf("event details = %#v", top.Event.Details)
+	}
+}
+
 // Spot-check tool_execution_end to user{tool_result} synthesis.
 func TestTranslator_ToolResultShape(t *testing.T) {
 	state := &translatorState{}
