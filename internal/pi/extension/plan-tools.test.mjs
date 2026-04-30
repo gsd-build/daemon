@@ -103,6 +103,9 @@ test("plan_commit rejects stringified arrays before network forwarding", async (
     });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /invalid_arguments/);
+    assert.equal(result.details.error.code, "invalid_arguments");
+    assert.equal(result.details.error.retryable, false);
+    assert.equal(result.details.error.fieldErrors[0].path, "ops.0");
   } finally {
     globalThis.fetch = originalFetch;
   }
