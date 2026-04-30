@@ -405,9 +405,11 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
         const isError = isGrouped
           ? details.results.some((result) => !isSuccessfulStatus(result.status))
           : !isSuccessfulStatus(details.status);
-        const finalText = isGrouped ? summarizeResults(details.results) : details.finalText;
+        const finalText = isGrouped
+          ? summarizeResults(details.results)
+          : details.finalText ?? details.errorMessage;
         return {
-          content: [{ type: "text", text: finalText || "Subagent completed." }],
+          content: [{ type: "text", text: finalText || (isError ? "Subagent failed." : "Subagent completed.") }],
           isError,
           details,
         };

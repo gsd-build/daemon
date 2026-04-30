@@ -18,6 +18,7 @@ import (
 )
 
 var subagentStatusSendTimeout = 5 * time.Second
+var subagentCancelFinalizeDelay = 3 * time.Second
 
 func (d *Daemon) CreateSubagentChild(r *http.Request, req sockapi.CreateSubagentChildRequest) (sockapi.CreateSubagentChildResponse, error) {
 	if req.ParentSessionID == "" || req.ParentToolCallID == "" || req.AgentName == "" || req.Task == "" {
@@ -318,14 +319,14 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 			return false
 		}
 		d.deleteSubagentProcess(sessionID)
-		go d.finalizeCancelledSubagent(sessionID, runID)
+		d.scheduleCancelledSubagentFallback(sessionID, runID)
 		return true
 	}
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		return false
 	}
 	d.deleteSubagentProcess(sessionID)
-	go d.finalizeCancelledSubagent(sessionID, runID)
+	d.scheduleCancelledSubagentFallback(sessionID, runID)
 	go func() {
 		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
@@ -333,6 +334,25 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}()
 	return true
+}
+
+func (d *Daemon) scheduleCancelledSubagentFallback(sessionID string, runID string) {
+	if runID == "" {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(subagentCancelFinalizeDelay)
+		defer timer.Stop()
+		<-timer.C
+
+		d.subagentMu.Lock()
+		stillTracked := d.subagentRunIDs != nil && d.subagentRunIDs[sessionID] == runID
+		d.subagentMu.Unlock()
+		if !stillTracked {
+			return
+		}
+		d.finalizeCancelledSubagent(sessionID, runID)
+	}()
 }
 
 func (d *Daemon) finalizeCancelledSubagent(sessionID string, runID string) {

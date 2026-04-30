@@ -283,6 +283,7 @@ test("subagent tool finalizes cancelled child runs as cancelled", async () => {
   }, signal);
 
   assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "subagent cancelled");
   assert.equal(result.details.status, "cancelled");
   assert.equal(finalized[0].status, "cancelled");
   assert.equal(finalized[0].runId, "run-cancelled");

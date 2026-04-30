@@ -190,7 +190,7 @@ func TestFinalizeSubagentChildIgnoresLiveStatusFailureAfterCloudSuccess(t *testi
 		subagentRunIDs:    map[string]string{},
 	}
 
-	resp, err := d.FinalizeSubagentChild(httptest.NewRequest(http.MethodPost, "/", nil), sockapi.FinalizeSubagentChildRequest{
+	resp, err := d.FinalizeSubagentChild(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", nil), sockapi.FinalizeSubagentChildRequest{
 		RunID:             "run-1",
 		ChildSessionID:    "child-session-1",
 		Status:            "done",
