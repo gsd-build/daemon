@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerSubagentTool } from "./subagent.js";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { registerSubagentTool, runChildAgent } from "./subagent.js";
 import { isToolAllowed, parseAllowedTools } from "./tool-policy.js";
 
 function snapshot(name, overrides = {}) {
@@ -18,7 +21,11 @@ function snapshot(name, overrides = {}) {
 
 test("registerSubagentTool is gated by daemon subagent env", () => {
   const tools = [];
-  const registered = registerSubagentTool({ registerTool: (tool) => tools.push(tool) }, {}, {});
+  const registered = registerSubagentTool(
+    { registerTool: (tool) => tools.push(tool) },
+    {},
+    {},
+  );
   assert.equal(registered, false);
   assert.equal(tools.length, 0);
 });
@@ -277,16 +284,219 @@ test("subagent tool finalizes cancelled child runs as cancelled", async () => {
     },
   );
 
-  const result = await tools[0].execute("toolu_4", {
-    agentName: "explorer",
-    task: "Map files.",
-  }, signal);
+  const result = await tools[0].execute(
+    "toolu_4",
+    {
+      agentName: "explorer",
+      task: "Map files.",
+    },
+    signal,
+  );
 
   assert.equal(result.isError, true);
   assert.equal(result.content[0].text, "subagent cancelled");
   assert.equal(result.details.status, "cancelled");
   assert.equal(finalized[0].status, "cancelled");
   assert.equal(finalized[0].runId, "run-cancelled");
+});
+
+test("subagent tool keeps successful finalization independent from late aborts", async () => {
+  const tools = [];
+  const controller = new AbortController();
+  const rpc = {
+    async createChild(body) {
+      return {
+        runId: "run-late-abort",
+        childSessionId: "child-late-abort",
+        parentSessionId: body.parentSessionId,
+        projectId: "project-1",
+        parentToolCallId: body.parentToolCallId,
+        runIndex: body.runIndex,
+        mode: body.mode,
+        agent: snapshot(body.agentName),
+      };
+    },
+    async finalize(body, signal) {
+      assert.equal(signal, undefined);
+      return {
+        ok: true,
+        status: "succeeded",
+        runId: body.runId,
+        childSessionId: body.childSessionId,
+        parentSessionId: "parent-1",
+        projectId: "project-1",
+      };
+    },
+  };
+  registerSubagentTool(
+    { registerTool: (tool) => tools.push(tool) },
+    {
+      GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
+      GSD_PARENT_SESSION_ID: "parent-1",
+      GSD_AGENT_DIR: "/tmp/agents",
+    },
+    {
+      rpc,
+      async runChildAgent() {
+        controller.abort();
+        return {
+          finalText: "Finished before cancellation arrived.",
+          usage: { input: 3, output: 4, cost: 0.000007, turns: 1 },
+        };
+      },
+    },
+  );
+
+  const result = await tools[0].execute(
+    "toolu_late_abort",
+    {
+      agentName: "explorer",
+      task: "Map files.",
+    },
+    controller.signal,
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details.status, "succeeded");
+});
+
+test("runChildAgent sends the child task as an RPC prompt frame", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "gsd-subagent-prompt-"));
+  const script = join(tempDir, "fake-pi.mjs");
+  const binary =
+    process.platform === "win32" ? join(tempDir, "fake-pi.cmd") : script;
+  const recordPath = join(tempDir, "record.json");
+  const previousBinary = process.env.GSD_PI_BINARY;
+  const previousRecordPath = process.env.GSD_FAKE_PI_RECORD;
+
+  await writeFile(
+    script,
+    `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+
+let stdin = "";
+let emitted = false;
+
+function emit() {
+  if (emitted) return;
+  emitted = true;
+  writeFileSync(process.env.GSD_FAKE_PI_RECORD, JSON.stringify({
+    argv: process.argv.slice(2),
+    stdin,
+  }));
+  console.log(JSON.stringify({
+    type: "agent_end",
+    messages: [{
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      usage: { input: 2, output: 3, cost: { total: 0.000005 } },
+    }],
+  }));
+}
+
+process.stdin.on("data", (chunk) => {
+  stdin += chunk.toString();
+});
+process.stdin.on("end", emit);
+setTimeout(emit, 250);
+`,
+  );
+  if (process.platform === "win32") {
+    await writeFile(binary, '@echo off\r\nnode "%~dp0fake-pi.mjs" %*\r\n');
+  } else {
+    await chmod(binary, 0o755);
+  }
+
+  process.env.GSD_PI_BINARY = binary;
+  process.env.GSD_FAKE_PI_RECORD = recordPath;
+
+  try {
+    const forwarded = [];
+    const result = await runChildAgent({
+      agent: snapshot("explorer", { tools: ["read", "search"] }),
+      task: "Map the subagent rendering files.",
+      childSessionId: "child-1",
+      runId: "run-1",
+      rpc: {
+        async registerProcess(body) {
+          assert.equal(body.runId, "run-1");
+          assert.equal(body.childSessionId, "child-1");
+          assert.equal(typeof body.pid, "number");
+        },
+        async heartbeat(body) {
+          assert.equal(body.status, "running");
+        },
+        async forwardEvent(body) {
+          forwarded.push(body.event.type);
+        },
+      },
+    });
+
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    const modeIndex = record.argv.indexOf("--mode");
+    assert.equal(record.argv[modeIndex + 1], "rpc");
+    assert.equal(
+      record.argv.includes("Map the subagent rendering files."),
+      false,
+    );
+    assert.deepEqual(JSON.parse(record.stdin.trim()), {
+      id: "subagent-task-prompt",
+      type: "prompt",
+      message: "Map the subagent rendering files.",
+    });
+    assert.equal(result.finalText, "done");
+    assert.deepEqual(forwarded, ["agent_end"]);
+  } finally {
+    if (previousBinary === undefined) delete process.env.GSD_PI_BINARY;
+    else process.env.GSD_PI_BINARY = previousBinary;
+    if (previousRecordPath === undefined) delete process.env.GSD_FAKE_PI_RECORD;
+    else process.env.GSD_FAKE_PI_RECORD = previousRecordPath;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runChildAgent fails when the child exits without agent_end", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "gsd-subagent-no-end-"));
+  const script = join(tempDir, "fake-pi.mjs");
+  const binary =
+    process.platform === "win32" ? join(tempDir, "fake-pi.cmd") : script;
+  const previousBinary = process.env.GSD_PI_BINARY;
+
+  await writeFile(
+    script,
+    `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on("end", () => process.exit(0));
+`,
+  );
+  if (process.platform === "win32") {
+    await writeFile(binary, '@echo off\r\nnode "%~dp0fake-pi.mjs" %*\r\n');
+  } else {
+    await chmod(binary, 0o755);
+  }
+
+  process.env.GSD_PI_BINARY = binary;
+
+  try {
+    await assert.rejects(
+      runChildAgent({
+        agent: snapshot("explorer"),
+        task: "Map files.",
+        childSessionId: "child-1",
+        runId: "run-1",
+        rpc: {
+          async registerProcess() {},
+          async heartbeat() {},
+          async forwardEvent() {},
+        },
+      }),
+      /without emitting agent_end/,
+    );
+  } finally {
+    if (previousBinary === undefined) delete process.env.GSD_PI_BINARY;
+    else process.env.GSD_PI_BINARY = previousBinary;
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("subagent tool policy parses and checks categories", () => {
