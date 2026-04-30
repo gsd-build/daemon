@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,20 +12,27 @@ import (
 )
 
 type fakeService struct {
+	mu    sync.Mutex
 	calls []string
 }
 
 func (f *fakeService) Open(ctx context.Context, req OpenRequest) (OpenResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "open:"+req.GrantID)
 	return OpenResult{BrowserID: "browser_1", URL: "about:blank", Title: "Blank"}, nil
 }
 
 func (f *fakeService) Close(ctx context.Context, browserID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "close:"+browserID)
 	return nil
 }
 
 func (f *fakeService) Frame(ctx context.Context, browserID string) (Frame, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "frame:"+browserID)
 	return Frame{
 		Sequence:         1,
@@ -40,22 +48,41 @@ func (f *fakeService) Frame(ctx context.Context, browserID string) (Frame, error
 }
 
 func (f *fakeService) Tool(ctx context.Context, browserID string, method string, params []byte) (ToolResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "tool:"+method)
 	return ToolResult{OK: true, ResultJSON: []byte(`{"ok":true}`)}, nil
 }
 
 func (f *fakeService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "input:"+input.Kind)
 	return nil
 }
 
+func (f *fakeService) snapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
 type recordingSender struct {
+	mu   sync.Mutex
 	msgs []any
 }
 
 func (r *recordingSender) Send(ctx context.Context, msg any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.msgs = append(r.msgs, msg)
 	return nil
+}
+
+func (r *recordingSender) snapshot() []any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]any(nil), r.msgs...)
 }
 
 type failingSender struct{}
@@ -158,8 +185,9 @@ func TestManagerTearsDownExpiredSessionOnFrame(t *testing.T) {
 	if hasBrowser || hasTask {
 		t.Fatal("expected expired browser session to be removed")
 	}
-	if !hasCall(svc.calls, "close:browser_1") {
-		t.Fatalf("expected browser close call, got %v", svc.calls)
+	calls := svc.snapshot()
+	if !hasCall(calls, "close:browser_1") {
+		t.Fatalf("expected browser close call, got %v", calls)
 	}
 }
 
@@ -226,8 +254,9 @@ func TestManagerRollsBackIndexedStateWhenOpenSendFails(t *testing.T) {
 	if _, ok := m.GrantForSession("session_1"); ok {
 		t.Fatal("expected session grant rollback")
 	}
-	if !hasCall(svc.calls, "close:browser_1") {
-		t.Fatalf("expected browser close call, got %v", svc.calls)
+	calls := svc.snapshot()
+	if !hasCall(calls, "close:browser_1") {
+		t.Fatalf("expected browser close call, got %v", calls)
 	}
 }
 
@@ -336,11 +365,12 @@ func TestUserInputRejectsStaleControlVersion(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stale browser control version") {
 		t.Fatalf("expected stale control version error, got %v", err)
 	}
-	if hasCall(svc.calls, "input:click") {
+	if hasCall(svc.snapshot(), "input:click") {
 		t.Fatalf("stale input reached service")
 	}
 	var foundAck bool
-	for _, msg := range sent.msgs {
+	sentMessages := sent.snapshot()
+	for _, msg := range sentMessages {
 		ack, ok := msg.(*protocol.BrowserUserInputAck)
 		if ok && ack.InputID == "input-1" {
 			foundAck = true
@@ -350,7 +380,7 @@ func TestUserInputRejectsStaleControlVersion(t *testing.T) {
 		}
 	}
 	if !foundAck {
-		t.Fatalf("expected stale input ack in %#v", sent.msgs)
+		t.Fatalf("expected stale input ack in %#v", sentMessages)
 	}
 }
 
