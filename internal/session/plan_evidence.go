@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -49,10 +51,12 @@ type planToolStart struct {
 }
 
 type planRuntimeReporter struct {
-	taskID string
-	cap    *protocol.PlanCapability
-	client *http.Client
-	now    func() time.Time
+	taskID   string
+	cap      *protocol.PlanCapability
+	client   *http.Client
+	now      func() time.Time
+	outbox   *planEvidenceOutbox
+	postJSON func(context.Context, string, any) error
 
 	mu         sync.Mutex
 	entries    []planEvidencePayload
@@ -63,13 +67,16 @@ func newPlanRuntimeReporter(taskID string, cap *protocol.PlanCapability) *planRu
 	if cap == nil || strings.TrimSpace(cap.APIBaseURL) == "" || strings.TrimSpace(cap.Token) == "" {
 		return nil
 	}
-	return &planRuntimeReporter{
+	reporter := &planRuntimeReporter{
 		taskID:     taskID,
 		cap:        cap,
 		client:     &http.Client{},
 		now:        time.Now,
 		toolStarts: make(map[string]planToolStart),
 	}
+	reporter.outbox = newPlanEvidenceOutbox(defaultPlanEvidenceOutboxPath())
+	reporter.postJSON = reporter.postJSONWithRetry
+	return reporter
 }
 
 func (r *planRuntimeReporter) RecordToolStart(event pi.ToolExecutionStart) {
@@ -133,6 +140,7 @@ func (r *planRuntimeReporter) RecordToolEnd(event pi.ToolExecutionEnd) {
 				1000,
 			)
 			r.entries[started.index].CompletedAt = now.Format(time.RFC3339Nano)
+			r.appendOutbox(r.entries[started.index])
 		}
 	} else {
 		started = planToolStart{
@@ -140,17 +148,23 @@ func (r *planRuntimeReporter) RecordToolEnd(event pi.ToolExecutionEnd) {
 			args:      map[string]any{},
 			startedAt: now,
 		}
-		r.entries = append(r.entries, makeToolEndEvidence(r.taskID, event, status, now))
+		entry := makeToolEndEvidence(r.taskID, event, status, now)
+		r.entries = append(r.entries, entry)
+		r.appendOutbox(entry)
 	}
 
 	command := commandFromToolArgs(started.args)
 	toolName := firstNonEmpty(event.ToolName, started.toolName)
 	if command != "" && isShellTool(toolName) {
-		r.entries = append(r.entries, makeCommandEvidence(r.taskID, event.ToolCallID, command, status, now))
+		entry := makeCommandEvidence(r.taskID, event.ToolCallID, command, status, now)
+		r.entries = append(r.entries, entry)
+		r.appendOutbox(entry)
 	}
 	if path := fileToolPath(started.args); path != "" {
 		if normalized, ok := normalizePiFileToolName(toolName); ok && normalized != "read" {
-			r.entries = append(r.entries, makeFileEvidence(r.taskID, event.ToolCallID, normalized, path, status, now))
+			entry := makeFileEvidence(r.taskID, event.ToolCallID, normalized, path, status, now)
+			r.entries = append(r.entries, entry)
+			r.appendOutbox(entry)
 		}
 	}
 	r.mu.Unlock()
@@ -161,8 +175,17 @@ func (r *planRuntimeReporter) Flush(ctx context.Context) {
 		return
 	}
 	entries := r.flushCandidates(planEvidenceMaxFlushPosts)
+	if persisted, err := r.outbox.Load(); err == nil {
+		entries = dedupePlanEvidenceEntries(append(persisted, entries...))
+	}
+	if len(entries) > planEvidenceMaxFlushPosts {
+		entries = entries[:planEvidenceMaxFlushPosts]
+	}
 	for _, entry := range entries {
-		if err := r.postJSONWithRetry(ctx, "/api/agent-plan/evidence", entry); err != nil {
+		if entry.Status == "running" {
+			continue
+		}
+		if err := r.postJSON(ctx, "/api/agent-plan/evidence", entry); err != nil {
 			slog.Warn("plan evidence post failed",
 				"taskId", r.taskID,
 				"evidenceId", entry.ID,
@@ -171,6 +194,7 @@ func (r *planRuntimeReporter) Flush(ctx context.Context) {
 			)
 			continue
 		}
+		_ = r.outbox.Ack(entry.ID)
 		r.removeEntry(entry.ID)
 	}
 }
@@ -240,6 +264,41 @@ func (r *planRuntimeReporter) removeEntry(id string) {
 		}
 		return
 	}
+}
+
+func (r *planRuntimeReporter) appendOutbox(entry planEvidencePayload) {
+	if entry.Status == "running" {
+		return
+	}
+	if err := r.outbox.Append(entry); err != nil {
+		slog.Warn("plan evidence outbox append failed",
+			"taskId", r.taskID,
+			"evidenceId", entry.ID,
+			"kind", entry.Kind,
+			"err", err,
+		)
+	}
+}
+
+func defaultPlanEvidenceOutboxPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".gsd-cloud", "plan-evidence-outbox.jsonl")
+}
+
+func dedupePlanEvidenceEntries(entries []planEvidencePayload) []planEvidencePayload {
+	out := make([]planEvidencePayload, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if entry.ID == "" || seen[entry.ID] {
+			continue
+		}
+		seen[entry.ID] = true
+		out = append(out, entry)
+	}
+	return out
 }
 
 func minPositive(a int, b int) int {

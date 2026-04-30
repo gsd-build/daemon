@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,79 @@ import (
 	"github.com/gsd-build/daemon/internal/pi"
 	protocol "github.com/gsd-build/protocol-go"
 )
+
+func TestPlanEvidenceOutboxPersistsAndAcksEntries(t *testing.T) {
+	dir := t.TempDir()
+	outbox := newPlanEvidenceOutbox(filepath.Join(dir, "plan-evidence-outbox.jsonl"))
+	entry := planEvidencePayload{
+		ID:      "11111111-1111-4111-8111-111111111111",
+		TaskID:  "task-1",
+		Kind:    "test",
+		Status:  "passed",
+		Summary: "Test passed",
+	}
+
+	if err := outbox.Append(entry); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	loaded, err := outbox.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].ID != entry.ID {
+		t.Fatalf("loaded = %#v, want entry %s", loaded, entry.ID)
+	}
+
+	if err := outbox.Ack(entry.ID); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	loaded, err = outbox.Load()
+	if err != nil {
+		t.Fatalf("load after ack: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("loaded after ack = %#v, want empty", loaded)
+	}
+}
+
+func TestPlanRuntimeReporterFlushesOutboxAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan-evidence-outbox.jsonl")
+	outbox := newPlanEvidenceOutbox(path)
+	entry := planEvidencePayload{
+		ID:      "22222222-2222-4222-8222-222222222222",
+		TaskID:  "task-1",
+		Kind:    "command",
+		Status:  "passed",
+		Summary: "Command passed",
+	}
+	if err := outbox.Append(entry); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	reporter := newPlanRuntimeReporter("task-1", &protocol.PlanCapability{
+		Token:      "gsd_plan_test",
+		APIBaseURL: "https://app.test",
+	})
+	reporter.outbox = outbox
+	posted := make([]string, 0, 1)
+	reporter.postJSON = func(_ context.Context, _ string, payload any) error {
+		posted = append(posted, payload.(planEvidencePayload).ID)
+		return nil
+	}
+
+	reporter.Flush(context.Background())
+	if got, want := posted, []string{entry.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("posted = %#v, want %#v", got, want)
+	}
+	loaded, err := outbox.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("outbox entries = %#v, want empty", loaded)
+	}
+}
 
 func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	var mu sync.Mutex
@@ -49,6 +123,7 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 		Token:      "gsd_plan_test",
 		ExpiresAt:  time.Now().Add(time.Hour).Format(time.RFC3339),
 	})
+	reporter.outbox = newPlanEvidenceOutbox(filepath.Join(t.TempDir(), "plan-evidence-outbox.jsonl"))
 	reporter.now = fixedPlanEvidenceClock()
 	for i := 0; i < planEvidenceMaxFlushPosts/2+10; i++ {
 		toolCallID := fmt.Sprintf("toolu_test_%d", i)
@@ -124,6 +199,7 @@ func TestPlanRuntimeReporterRecordsFileChanges(t *testing.T) {
 		Token:      "gsd_plan_test",
 		ExpiresAt:  time.Now().Add(time.Hour).Format(time.RFC3339),
 	})
+	reporter.outbox = newPlanEvidenceOutbox(filepath.Join(t.TempDir(), "plan-evidence-outbox.jsonl"))
 	reporter.now = fixedPlanEvidenceClock()
 
 	reporter.RecordToolStart(pi.ToolExecutionStart{
