@@ -1248,6 +1248,22 @@ func (a *Actor) forwardExecutorEvents(actorCtx context.Context, taskCtx context.
 	return resultRaw, nil
 }
 
+func (a *Actor) SendStreamEvent(ctx context.Context, channelID string, event json.RawMessage) error {
+	if channelID == "" {
+		channelID = a.opts.SessionID
+	}
+	next := atomic.AddInt64(&a.seq, 1)
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return a.opts.Relay.Send(sendCtx, &protocol.Stream{
+		Type:           protocol.MsgTypeStream,
+		SessionID:      a.opts.SessionID,
+		ChannelID:      channelID,
+		SequenceNumber: next,
+		Event:          event,
+	})
+}
+
 func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawMessage) error {
 	var payload struct {
 		SessionID    string  `json:"session_id"`
