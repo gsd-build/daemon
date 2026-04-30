@@ -129,7 +129,8 @@ function makeTool(name, label, description, parameters, path) {
     parameters,
     async execute(_toolCallId, params, signal) {
       try {
-        return toolResult(await callAgentTools(path, params, { signal }));
+        const body = _toolCallId ? { ...params, toolCallId: _toolCallId } : params;
+        return toolResult(await callAgentTools(path, body, { signal }));
       } catch (err) {
         return toolError(err);
       }
@@ -146,4 +147,3 @@ export const backgroundTools = [
   makeTool("background_list", "List background jobs", "List active background jobs for this session.", ListParams, "/background/list"),
   makeTool("shell_exec", "Run shell command", "Run a finite shell command or route long-running commands to a background job.", ShellExecParams, "/shell/exec"),
 ];
-

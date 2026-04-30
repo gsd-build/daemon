@@ -60,7 +60,6 @@ type Options struct {
 	BrowserID         string
 	RecordTouchedFile func(channelID string, cwd string, path string)
 	OnTaskIdle        func()
-	MachineID         string
 	ProjectID         string
 	AgentTools        AgentToolController
 }
@@ -784,7 +783,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	coordinator := &structuredQuestionCoordinator{}
-	if a.useWarmPiWorker {
+	if a.useWarmPiWorker && a.opts.AgentTools == nil {
 		return a.runPiWorker(actorCtx, taskCtx, tc, prompt, opts, coordinator)
 	}
 

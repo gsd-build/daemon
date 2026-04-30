@@ -5,10 +5,13 @@ package agentterminal
 import (
 	"bytes"
 	"context"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gsd-build/daemon/internal/terminal"
 )
 
@@ -160,6 +163,44 @@ func testAgentTerminalLimits() Limits {
 func setAgentTerminalTestShell(t *testing.T) {
 	t.Helper()
 	t.Setenv("SHELL", "/bin/sh")
+	requireAgentTerminalPTY(t)
+}
+
+func requireAgentTerminalPTY(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-lc", "printf pty-probe; sleep 0.01")
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
+	if err != nil {
+		if isPTYUnavailable(err) {
+			t.Skipf("PTY allocation is unavailable on this runner: %v", err)
+		}
+		t.Fatalf("probe PTY: %v", err)
+	}
+	_ = ptmx.Close()
+	if err := cmd.Wait(); err != nil && !isPTYUnavailable(err) && !strings.Contains(strings.ToLower(err.Error()), "hangup") {
+		t.Fatalf("probe PTY wait: %v", err)
+	}
+}
+
+func isPTYUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isPTYUnavailableMessage(err.Error())
+}
+
+func isPTYUnavailableMessage(message string) bool {
+	text := strings.ToLower(message)
+	return strings.Contains(text, "operation not permitted") ||
+		strings.Contains(text, "permission denied") ||
+		strings.Contains(text, "inappropriate ioctl")
+}
+
+func skipIfPTYStartUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if isPTYUnavailable(err) {
+		t.Skipf("PTY start is unavailable on this runner: %v", err)
+	}
 }
 
 func waitForAgentTerminal(t *testing.T, timeout time.Duration, condition func() bool, description string) {
@@ -197,6 +238,7 @@ func TestManagerStartWaitOutputListSnapshotAndKill(t *testing.T) {
 		MachineID:    "machine-1",
 	})
 	if err != nil {
+		skipIfPTYStartUnavailable(t, err)
 		t.Fatalf("Start: %v", err)
 	}
 	if result.JobID == "" || result.TerminalID == "" {
@@ -265,6 +307,7 @@ func TestManagerSendWritesToInteractiveJob(t *testing.T) {
 		TaskID:    "task-1",
 	})
 	if err != nil {
+		skipIfPTYStartUnavailable(t, err)
 		t.Fatalf("Start: %v", err)
 	}
 	if _, err := manager.Send(SendRequest{JobID: result.JobID, Input: "agent-input-ok", AppendNewline: true}); err != nil {
@@ -300,6 +343,7 @@ func TestManagerEnforcesSessionJobLimit(t *testing.T) {
 		TaskID:    "task-1",
 	}
 	if _, err := manager.Start(context.Background(), req); err != nil {
+		skipIfPTYStartUnavailable(t, err)
 		t.Fatalf("Start first: %v", err)
 	}
 	req.TaskID = "task-2"
@@ -326,6 +370,7 @@ func TestManagerCloseAllStopsRunningJobs(t *testing.T) {
 		ChannelID: "chan-1",
 		TaskID:    "task-1",
 	}); err != nil {
+		skipIfPTYStartUnavailable(t, err)
 		t.Fatalf("Start: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -353,6 +398,7 @@ func TestManagerUsesRequestReadyTimeout(t *testing.T) {
 		ReadyTimeoutMs: 100,
 	})
 	if err != nil {
+		skipIfPTYStartUnavailable(t, err)
 		t.Fatalf("Start: %v", err)
 	}
 	waitForAgentTerminal(t, time.Second, func() bool {

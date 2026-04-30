@@ -198,10 +198,11 @@ type TaskControl struct {
 }
 
 type ShellExecRequest struct {
-	Command   string `json:"command"`
-	CWD       string `json:"cwd,omitempty"`
-	TimeoutMs int    `json:"timeoutMs,omitempty"`
-	Mode      string `json:"mode,omitempty"`
+	Command    string `json:"command"`
+	CWD        string `json:"cwd,omitempty"`
+	TimeoutMs  int    `json:"timeoutMs,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
 }
 
 type ShellExecResult struct {
@@ -212,6 +213,7 @@ type ShellExecResult struct {
 	Stderr     string       `json:"stderr,omitempty"`
 	ExitCode   int          `json:"exitCode"`
 	TimedOut   bool         `json:"timedOut"`
+	Truncated  bool         `json:"truncated,omitempty"`
 }
 
 type Job struct {

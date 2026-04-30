@@ -70,3 +70,40 @@ test("shell_exec schema accepts supported modes", () => {
   }
 });
 
+test("tool execute forwards tool call id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-bg-tools-"));
+  const socketPath = join(dir, "tools.sock");
+  let body = {};
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  const previousSocket = process.env.GSD_AGENT_TOOLS_SOCKET;
+  const previousToken = process.env.GSD_AGENT_TOOLS_TOKEN;
+  process.env.GSD_AGENT_TOOLS_SOCKET = socketPath;
+  process.env.GSD_AGENT_TOOLS_TOKEN = "token-1";
+  try {
+    const result = await byName.get("background_list").execute("toolu_1", {}, undefined);
+    assert.equal(result.isError, false);
+    assert.equal(body.toolCallId, "toolu_1");
+  } finally {
+    if (previousSocket === undefined) {
+      delete process.env.GSD_AGENT_TOOLS_SOCKET;
+    } else {
+      process.env.GSD_AGENT_TOOLS_SOCKET = previousSocket;
+    }
+    if (previousToken === undefined) {
+      delete process.env.GSD_AGENT_TOOLS_TOKEN;
+    } else {
+      process.env.GSD_AGENT_TOOLS_TOKEN = previousToken;
+    }
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

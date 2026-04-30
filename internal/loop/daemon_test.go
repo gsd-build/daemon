@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/creack/pty"
 	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
@@ -27,6 +29,39 @@ import (
 	"github.com/gsd-build/daemon/internal/terminal"
 	protocol "github.com/gsd-build/protocol-go"
 )
+
+func requireLoopTestPTY(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-lc", "printf pty-probe; sleep 0.01")
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
+	if err != nil {
+		if isLoopTestPTYUnavailable(err) {
+			t.Skipf("PTY allocation is unavailable on this runner: %v", err)
+		}
+		t.Fatalf("probe PTY: %v", err)
+	}
+	_ = ptmx.Close()
+	if err := cmd.Wait(); err != nil && !isLoopTestPTYUnavailable(err) && !strings.Contains(strings.ToLower(err.Error()), "hangup") {
+		t.Fatalf("probe PTY wait: %v", err)
+	}
+}
+
+func isLoopTestPTYUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "operation not permitted") ||
+		strings.Contains(text, "permission denied") ||
+		strings.Contains(text, "inappropriate ioctl")
+}
+
+func skipIfLoopPTYStartUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if isLoopTestPTYUnavailable(err) {
+		t.Skipf("PTY start is unavailable on this runner: %v", err)
+	}
+}
 
 func TestRelayURLIncludesMachineIDOnly(t *testing.T) {
 	cfg := &config.Config{
@@ -640,6 +675,7 @@ func TestHandleTerminalMessagesOpenInputAndExit(t *testing.T) {
 }
 
 func TestHandleAgentTerminalAttachSendsSnapshot(t *testing.T) {
+	requireLoopTestPTY(t)
 	t.Setenv("SHELL", "/bin/sh")
 	client := relayClientStub(false)
 	manager := newLoopAgentTerminalManager(client)
@@ -654,6 +690,7 @@ func TestHandleAgentTerminalAttachSendsSnapshot(t *testing.T) {
 		TaskID:    "task-agent",
 	})
 	if err != nil {
+		skipIfLoopPTYStartUnavailable(t, err)
 		t.Fatalf("start agent terminal: %v", err)
 	}
 	drainQueuedUntil(t, client, func(env *protocol.Envelope) bool {
@@ -683,6 +720,7 @@ func TestHandleAgentTerminalAttachSendsSnapshot(t *testing.T) {
 }
 
 func TestHandleTerminalInputRoutesAgentTerminal(t *testing.T) {
+	requireLoopTestPTY(t)
 	t.Setenv("SHELL", "/bin/sh")
 	client := relayClientStub(false)
 	manager := newLoopAgentTerminalManager(client)
@@ -700,6 +738,7 @@ func TestHandleTerminalInputRoutesAgentTerminal(t *testing.T) {
 		TaskID:    "task-agent",
 	})
 	if err != nil {
+		skipIfLoopPTYStartUnavailable(t, err)
 		t.Fatalf("start agent terminal: %v", err)
 	}
 	input := base64.StdEncoding.EncodeToString([]byte("agent-input-route\n"))
@@ -722,6 +761,7 @@ func TestHandleTerminalInputRoutesAgentTerminal(t *testing.T) {
 }
 
 func TestGracefulShutdownClosesAgentTerminalJobs(t *testing.T) {
+	requireLoopTestPTY(t)
 	t.Setenv("SHELL", "/bin/sh")
 	client := relayClientStub(false)
 	manager := newLoopAgentTerminalManager(client)
@@ -739,6 +779,7 @@ func TestGracefulShutdownClosesAgentTerminalJobs(t *testing.T) {
 		ChannelID: "chan-agent",
 		TaskID:    "task-agent",
 	}); err != nil {
+		skipIfLoopPTYStartUnavailable(t, err)
 		t.Fatalf("start agent terminal: %v", err)
 	}
 

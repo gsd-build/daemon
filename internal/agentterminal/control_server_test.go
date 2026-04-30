@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -59,8 +60,16 @@ func postAgentTool(t *testing.T, client *http.Client, path string, token string,
 		t.Fatalf("post %s: %v", path, err)
 	}
 	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	bodyText := string(bodyBytes)
+	if resp.StatusCode >= http.StatusBadRequest && isPTYUnavailableMessage(bodyText) {
+		t.Skipf("PTY start is unavailable on this runner: %s", bodyText)
+	}
 	if dst != nil {
-		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		if err := json.Unmarshal(bodyBytes, dst); err != nil {
 			t.Fatalf("decode response: %v", err)
 		}
 	}
@@ -238,5 +247,18 @@ func TestControlServerShellExecForegroundAndAutoBackground(t *testing.T) {
 	status = postAgentTool(t, client, "/background/kill", control.Token, KillRequest{JobID: background.Started.JobID}, &killed)
 	if status != http.StatusOK || killed.Status != StatusKilled {
 		t.Fatalf("kill status = %d killed=%#v", status, killed)
+	}
+}
+
+func TestBoundedOutputBufferKeepsTail(t *testing.T) {
+	buf := &boundedOutputBuffer{limit: 3}
+	if _, err := buf.Write([]byte("abc")); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if _, err := buf.Write([]byte("def")); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if buf.String() != "def" || !buf.Truncated() {
+		t.Fatalf("buffer = %q truncated=%v", buf.String(), buf.Truncated())
 	}
 }

@@ -22,6 +22,7 @@ type ReadinessDetector struct {
 	ports   []Port
 	urls    []string
 	seen    map[string]bool
+	overlap string
 }
 
 func NewReadinessDetector(req StartRequest, limits Limits) (*ReadinessDetector, error) {
@@ -56,16 +57,18 @@ func NewReadinessDetector(req StartRequest, limits Limits) (*ReadinessDetector, 
 
 func (d *ReadinessDetector) Observe(output string) (Readiness, []Port, []string, bool) {
 	before := d.snapshotKey()
-	for _, p := range extractPorts(output) {
+	combined := d.overlap + output
+	d.overlap = trailingReadinessOverlap(combined)
+	for _, p := range extractPorts(combined) {
 		d.addPort(p)
 	}
 	if d.pattern != nil {
-		if match := d.pattern.FindString(output); match != "" {
+		if match := d.pattern.FindString(combined); match != "" {
 			d.markReady("pattern", match)
 		}
 	}
-	if d.state.State != ReadinessReady && heuristicReady(output) {
-		d.markReady("heuristic", strings.TrimSpace(output))
+	if d.state.State != ReadinessReady && heuristicReady(combined) {
+		d.markReady("heuristic", strings.TrimSpace(combined))
 	}
 	return d.state, clonePorts(d.ports), append([]string(nil), d.urls...), before != d.snapshotKey()
 }
@@ -211,4 +214,12 @@ func clonePorts(in []Port) []Port {
 	out := make([]Port, len(in))
 	copy(out, in)
 	return out
+}
+
+func trailingReadinessOverlap(text string) string {
+	const maxOverlap = 4096
+	if len(text) <= maxOverlap {
+		return text
+	}
+	return text[len(text)-maxOverlap:]
 }

@@ -3,7 +3,6 @@
 package agentterminal
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -213,6 +212,7 @@ func (s *ControlServer) handleShellExec(ts *taskServer) http.HandlerFunc {
 				SessionID:  ts.scope.SessionID,
 				ChannelID:  ts.scope.ChannelID,
 				TaskID:     ts.scope.TaskID,
+				ToolCallID: req.ToolCallID,
 				ProjectID:  ts.scope.ProjectID,
 				MachineID:  ts.scope.MachineID,
 				ProjectCWD: ts.scope.ProjectCWD,
@@ -220,12 +220,12 @@ func (s *ControlServer) handleShellExec(ts *taskServer) http.HandlerFunc {
 			writeResult(w, ShellExecResult{Mode: mode, Background: true, Started: &started}, err)
 			return
 		}
-		result, err := runForeground(r.Context(), ts.scope, req)
+		result, err := runForeground(r.Context(), ts.scope, req, s.manager.limits.ToolOutputBytes)
 		writeResult(w, result, err)
 	}
 }
 
-func runForeground(ctx context.Context, scope TaskScope, req ShellExecRequest) (ShellExecResult, error) {
+func runForeground(ctx context.Context, scope TaskScope, req ShellExecRequest, outputLimit int) (ShellExecResult, error) {
 	command := strings.TrimSpace(req.Command)
 	if command == "" {
 		return ShellExecResult{}, fmt.Errorf("command is required")
@@ -246,9 +246,10 @@ func runForeground(ctx context.Context, scope TaskScope, req ShellExecRequest) (
 	cmd := exec.CommandContext(runCtx, terminal.ResolveShell(), "-lc", command)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &boundedOutputBuffer{limit: outputLimit}
+	stderr := &boundedOutputBuffer{limit: outputLimit}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
@@ -267,7 +268,44 @@ func runForeground(ctx context.Context, scope TaskScope, req ShellExecRequest) (
 		Stderr:     stderr.String(),
 		ExitCode:   exitCode,
 		TimedOut:   runCtx.Err() == context.DeadlineExceeded,
+		Truncated:  stdout.Truncated() || stderr.Truncated(),
 	}, nil
+}
+
+type boundedOutputBuffer struct {
+	limit     int
+	data      []byte
+	truncated bool
+}
+
+func (b *boundedOutputBuffer) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.limit <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) >= b.limit {
+		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
+		b.truncated = true
+		return len(p), nil
+	}
+	if overflow := len(b.data) + len(p) - b.limit; overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+		b.truncated = true
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+func (b *boundedOutputBuffer) String() string {
+	return string(b.data)
+}
+
+func (b *boundedOutputBuffer) Truncated() bool {
+	return b.truncated
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {

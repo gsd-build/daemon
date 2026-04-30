@@ -5,6 +5,7 @@ package loop
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -752,9 +753,15 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 	case *protocol.TerminalClose:
 		return d.handleTerminalClose(msg)
 	case *protocol.AgentTerminalAttach:
-		return d.agentTerminalManager.Snapshot(msg.TerminalID)
+		if d.agentTerminalManager == nil {
+			return nil
+		}
+		return ignoreAgentTerminalGone(d.agentTerminalManager.Snapshot(msg.TerminalID))
 	case *protocol.AgentTerminalSnapshotRequest:
-		return d.agentTerminalManager.Snapshot(msg.TerminalID)
+		if d.agentTerminalManager == nil {
+			return nil
+		}
+		return ignoreAgentTerminalGone(d.agentTerminalManager.Snapshot(msg.TerminalID))
 	case *protocol.CompactRequest:
 		return d.handleCompactRequest(msg)
 	case *protocol.ContextStatsRequest:
@@ -938,10 +945,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		}
 	}
 	if actor == nil {
-		machineID := ""
-		if d.cfg != nil {
-			machineID = d.cfg.MachineID
-		}
 		var err error
 		serverURL := ""
 		machineID := ""
@@ -968,7 +971,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			BrowserGrantID:    browserGrantID,
 			BrowserID:         browserID,
 			RecordTouchedFile: d.recordAgentTouchedFile,
-			MachineID:         machineID,
 		})
 		if err != nil {
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1041,16 +1043,16 @@ func (d *Daemon) handleTerminalInput(msg *protocol.TerminalInput) error {
 		return nil
 	}
 	if d.agentTerminalManager != nil && d.agentTerminalManager.HasTerminal(msg.TerminalID) {
-		return d.agentTerminalManager.Input(msg.TerminalID, data)
+		return ignoreAgentTerminalGone(d.agentTerminalManager.Input(msg.TerminalID, data))
 	}
-	return d.terminalManager.Input(msg.TerminalID, data)
+	return ignoreAgentTerminalGone(d.terminalManager.Input(msg.TerminalID, data))
 }
 
 func (d *Daemon) handleTerminalResize(msg *protocol.TerminalResize) error {
 	if d.agentTerminalManager != nil && d.agentTerminalManager.HasTerminal(msg.TerminalID) {
-		return d.agentTerminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows)
+		return ignoreAgentTerminalGone(d.agentTerminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows))
 	}
-	return d.terminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows)
+	return ignoreAgentTerminalGone(d.terminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows))
 }
 
 func (d *Daemon) handleTerminalClose(msg *protocol.TerminalClose) error {
@@ -1060,6 +1062,17 @@ func (d *Daemon) handleTerminalClose(msg *protocol.TerminalClose) error {
 	}
 	d.terminalManager.Close(msg.TerminalID, terminal.ReasonClosedByUser)
 	return nil
+}
+
+func ignoreAgentTerminalGone(err error) error {
+	if err == nil ||
+		errors.Is(err, agentterminal.ErrTerminalNotFound) ||
+		errors.Is(err, agentterminal.ErrTerminalClosed) ||
+		strings.Contains(err.Error(), "terminal not found") ||
+		strings.Contains(err.Error(), "terminal is closed") {
+		return nil
+	}
+	return err
 }
 
 func (d *Daemon) handleCompactRequest(msg *protocol.CompactRequest) error {

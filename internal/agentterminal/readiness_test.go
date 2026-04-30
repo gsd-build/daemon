@@ -30,6 +30,23 @@ func TestReadinessURLExtraction(t *testing.T) {
 	}
 }
 
+func TestReadinessDetectsSplitURL(t *testing.T) {
+	d, err := NewReadinessDetector(StartRequest{}, DefaultLimits())
+	if err != nil {
+		t.Fatalf("detector: %v", err)
+	}
+	if _, _, _, advanced := d.Observe("server at local"); advanced {
+		t.Fatal("advanced before URL was complete")
+	}
+	readiness, ports, urls, advanced := d.Observe("host:3000")
+	if !advanced || readiness.State != ReadinessReady {
+		t.Fatalf("readiness = %#v advanced=%v", readiness, advanced)
+	}
+	if len(ports) != 1 || ports[0].Port != 3000 || len(urls) != 1 {
+		t.Fatalf("ports=%#v urls=%#v", ports, urls)
+	}
+}
+
 func TestReadinessHeuristic(t *testing.T) {
 	d, err := NewReadinessDetector(StartRequest{}, DefaultLimits())
 	if err != nil {

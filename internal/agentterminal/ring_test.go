@@ -42,6 +42,18 @@ func TestScrollbackRingSinceSeq(t *testing.T) {
 	}
 }
 
+func TestScrollbackRingSinceSeqHandlesZeroLimitAfterTruncation(t *testing.T) {
+	r := newScrollbackRing(5)
+	r.Write([]byte("abcdef"))
+	got, truncated := r.SinceSeq(0, 0)
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+	if string(got) != "bcdef" {
+		t.Fatalf("since seq = %q", got)
+	}
+}
+
 func TestScrollbackRingReturnsCopies(t *testing.T) {
 	r := newScrollbackRing(64)
 	r.Write([]byte("abc"))

@@ -91,7 +91,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	}
 
 	shell := terminal.ResolveShell()
-	cmd := exec.CommandContext(context.Background(), shell, "-lc", command)
+	cmd := exec.CommandContext(ctx, shell, "-lc", command)
 	cmd.Dir = cwd
 	cmd.Env = startEnv(req.Env)
 	if runtime.GOOS != "darwin" {
@@ -103,6 +103,10 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	}
 
 	now := time.Now().UTC()
+	status := StatusRunning
+	if detector.state.State == ReadinessReady {
+		status = StatusReady
+	}
 	job := &managedJob{
 		req:            req,
 		jobID:          "job-" + randomID(),
@@ -115,7 +119,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		ptmx:           ptmx,
 		ring:           newScrollbackRing(m.limits.ScrollbackBytes),
 		detector:       detector,
-		status:         StatusRunning,
+		status:         status,
 		readiness:      detector.state,
 		ports:          clonePorts(detector.ports),
 		urls:           append([]string(nil), detector.urls...),
@@ -137,7 +141,8 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	m.byTerminal[job.terminalID] = job
 	m.mu.Unlock()
 
-	_ = m.events.SendAgentTerminalStarted(job.snapshot())
+	snapshot := job.snapshot()
+	_ = m.events.SendAgentTerminalStarted(snapshot)
 	job.reportDetectedPorts(m.events, m.serverSource)
 	go m.readLoop(job)
 	go m.waitLoop(job)
@@ -149,15 +154,15 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 	}
 
 	return StartResult{
-		JobID:       job.jobID,
-		TerminalID:  job.terminalID,
-		Status:      job.status,
-		Title:       job.title,
+		JobID:       snapshot.JobID,
+		TerminalID:  snapshot.TerminalID,
+		Status:      snapshot.Status,
+		Title:       snapshot.Title,
 		CWD:         cwd,
 		StartedAt:   now.Format(time.RFC3339Nano),
-		Readiness:   job.readiness,
-		Ports:       clonePorts(job.ports),
-		URLs:        append([]string(nil), job.urls...),
+		Readiness:   snapshot.Readiness,
+		Ports:       clonePorts(snapshot.Ports),
+		URLs:        append([]string(nil), snapshot.URLs...),
 		OutputTail:  "",
 		NextActions: []string{"background_output", "background_wait", "background_kill"},
 	}, nil
@@ -166,7 +171,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 func (m *Manager) Output(req OutputRequest) (OutputResult, error) {
 	job, ok := m.getJob(req.JobID)
 	if !ok {
-		return OutputResult{}, fmt.Errorf("job not found")
+		return OutputResult{}, ErrJobNotFound
 	}
 	job.mu.Lock()
 	defer job.mu.Unlock()
@@ -190,7 +195,7 @@ func (m *Manager) Output(req OutputRequest) (OutputResult, error) {
 func (m *Manager) Wait(ctx context.Context, req WaitRequest) (WaitResult, error) {
 	job, ok := m.getJob(req.JobID)
 	if !ok {
-		return WaitResult{}, fmt.Errorf("job not found")
+		return WaitResult{}, ErrJobNotFound
 	}
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
 	if timeout <= 0 || timeout > m.limits.MaxWaitTimeout {
@@ -229,7 +234,7 @@ func (m *Manager) Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
 func (m *Manager) Send(req SendRequest) (SendResult, error) {
 	job, ok := m.getJob(req.JobID)
 	if !ok {
-		return SendResult{}, fmt.Errorf("job not found")
+		return SendResult{}, ErrJobNotFound
 	}
 	input := req.Input
 	if req.AppendNewline {
@@ -246,7 +251,7 @@ func (m *Manager) Send(req SendRequest) (SendResult, error) {
 func (m *Manager) Kill(req KillRequest) (KillResult, error) {
 	job, ok := m.getJob(req.JobID)
 	if !ok {
-		return KillResult{}, fmt.Errorf("job not found")
+		return KillResult{}, ErrJobNotFound
 	}
 	reason := req.Reason
 	if reason == "" {
@@ -298,7 +303,7 @@ func (m *Manager) List(sessionID string, req ListRequest) (ListResult, error) {
 func (m *Manager) Snapshot(terminalID string) error {
 	job, ok := m.getByTerminal(terminalID)
 	if !ok {
-		return fmt.Errorf("terminal not found")
+		return ErrTerminalNotFound
 	}
 	job.mu.Lock()
 	seq := job.ring.Seq()
@@ -317,14 +322,14 @@ func (m *Manager) HasTerminal(terminalID string) bool {
 func (m *Manager) Input(terminalID string, data []byte) error {
 	job, ok := m.getByTerminal(terminalID)
 	if !ok {
-		return fmt.Errorf("terminal not found")
+		return ErrTerminalNotFound
 	}
 	job.mu.Lock()
 	ptmx := job.ptmx
 	status := job.status
 	job.mu.Unlock()
 	if ptmx == nil || terminalDone(status) {
-		return fmt.Errorf("terminal is closed")
+		return ErrTerminalClosed
 	}
 	_, err := ptmx.Write(data)
 	return err
@@ -333,7 +338,7 @@ func (m *Manager) Input(terminalID string, data []byte) error {
 func (m *Manager) Resize(terminalID string, cols, rows int) error {
 	job, ok := m.getByTerminal(terminalID)
 	if !ok {
-		return fmt.Errorf("terminal not found")
+		return ErrTerminalNotFound
 	}
 	job.mu.Lock()
 	ptmx := job.ptmx
@@ -443,6 +448,7 @@ func (m *Manager) waitLoop(job *managedJob) {
 
 	m.mu.Lock()
 	delete(m.byTerminal, job.terminalID)
+	delete(m.jobs, job.jobID)
 	m.mu.Unlock()
 
 	_ = m.events.SendAgentTerminalUpdated(snapshot)

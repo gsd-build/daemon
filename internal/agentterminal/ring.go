@@ -70,12 +70,20 @@ func (r *scrollbackRing) SinceSeq(seq int64, limit int) ([]byte, bool) {
 	if limit <= 0 {
 		limit = r.cap
 	}
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > len(all) {
+		limit = len(all)
+	}
 	truncated := len(all) > limit
 	if r.truncated && len(r.chunks) > 0 && seq < r.chunks[0].seq {
 		truncated = true
 	}
-	if truncated {
+	if truncated && limit > 0 {
 		all = all[len(all)-limit:]
+	} else if limit == 0 {
+		all = nil
 	}
 	return all, truncated
 }

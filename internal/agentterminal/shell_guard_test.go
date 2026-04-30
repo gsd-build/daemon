@@ -11,6 +11,9 @@ func TestShouldRunInBackground(t *testing.T) {
 		{"pnpm dev", true},
 		{"docker compose up", true},
 		{"docker compose up -d", false},
+		{"docker compose up --detach", false},
+		{"npx create-vite@latest demo", false},
+		{"npx vite --host 0.0.0.0", true},
 		{"go test ./...", false},
 		{"npm test -- --watch", true},
 	}

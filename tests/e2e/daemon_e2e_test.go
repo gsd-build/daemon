@@ -135,7 +135,7 @@ func TestE2EHappyPath(t *testing.T) {
 	}
 }
 
-func TestDaemonWarmPiWorkerReusesProcessAcrossTasks(t *testing.T) {
+func TestDaemonAgentToolsBypassWarmPiWorker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e integration test in short mode")
 	}
@@ -214,11 +214,8 @@ func TestDaemonWarmPiWorkerReusesProcessAcrossTasks(t *testing.T) {
 	}
 
 	workers := daemon.Workers()
-	if len(workers) != 1 {
-		t.Fatalf("workers = %d, want 1", len(workers))
-	}
-	if workers[0].State != "idle" {
-		t.Fatalf("worker state = %q, want idle", workers[0].State)
+	if len(workers) != 0 {
+		t.Fatalf("workers = %d, want 0", len(workers))
 	}
 
 	cancel()
