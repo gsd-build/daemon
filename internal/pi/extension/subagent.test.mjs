@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerSubagentTool } from "./subagent.js";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { registerSubagentTool, runChildAgent } from "./subagent.js";
 import { isToolAllowed, parseAllowedTools } from "./tool-policy.js";
 
 function snapshot(name, overrides = {}) {
@@ -18,7 +21,11 @@ function snapshot(name, overrides = {}) {
 
 test("registerSubagentTool is gated by daemon subagent env", () => {
   const tools = [];
-  const registered = registerSubagentTool({ registerTool: (tool) => tools.push(tool) }, {}, {});
+  const registered = registerSubagentTool(
+    { registerTool: (tool) => tools.push(tool) },
+    {},
+    {},
+  );
   assert.equal(registered, false);
   assert.equal(tools.length, 0);
 });
@@ -277,16 +284,110 @@ test("subagent tool finalizes cancelled child runs as cancelled", async () => {
     },
   );
 
-  const result = await tools[0].execute("toolu_4", {
-    agentName: "explorer",
-    task: "Map files.",
-  }, signal);
+  const result = await tools[0].execute(
+    "toolu_4",
+    {
+      agentName: "explorer",
+      task: "Map files.",
+    },
+    signal,
+  );
 
   assert.equal(result.isError, true);
   assert.equal(result.content[0].text, "subagent cancelled");
   assert.equal(result.details.status, "cancelled");
   assert.equal(finalized[0].status, "cancelled");
   assert.equal(finalized[0].runId, "run-cancelled");
+});
+
+test("runChildAgent sends the child task as an RPC prompt frame", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "gsd-subagent-prompt-"));
+  const binary = join(tempDir, "fake-pi.mjs");
+  const recordPath = join(tempDir, "record.json");
+  const previousBinary = process.env.GSD_PI_BINARY;
+  const previousRecordPath = process.env.GSD_FAKE_PI_RECORD;
+
+  await writeFile(
+    binary,
+    `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+
+let stdin = "";
+let emitted = false;
+
+function emit() {
+  if (emitted) return;
+  emitted = true;
+  writeFileSync(process.env.GSD_FAKE_PI_RECORD, JSON.stringify({
+    argv: process.argv.slice(2),
+    stdin,
+  }));
+  console.log(JSON.stringify({
+    type: "agent_end",
+    messages: [{
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      usage: { input: 2, output: 3, cost: { total: 0.000005 } },
+    }],
+  }));
+}
+
+process.stdin.on("data", (chunk) => {
+  stdin += chunk.toString();
+  if (stdin.trim()) emit();
+});
+process.stdin.on("end", emit);
+setTimeout(emit, 250);
+`,
+  );
+  await chmod(binary, 0o755);
+
+  process.env.GSD_PI_BINARY = binary;
+  process.env.GSD_FAKE_PI_RECORD = recordPath;
+
+  try {
+    const forwarded = [];
+    const result = await runChildAgent({
+      agent: snapshot("explorer", { tools: ["read", "search"] }),
+      task: "Map the subagent rendering files.",
+      childSessionId: "child-1",
+      runId: "run-1",
+      rpc: {
+        async registerProcess(body) {
+          assert.equal(body.runId, "run-1");
+          assert.equal(body.childSessionId, "child-1");
+          assert.equal(typeof body.pid, "number");
+        },
+        async heartbeat(body) {
+          assert.equal(body.status, "running");
+        },
+        async forwardEvent(body) {
+          forwarded.push(body.event.type);
+        },
+      },
+    });
+
+    const record = JSON.parse(await readFile(recordPath, "utf8"));
+    const modeIndex = record.argv.indexOf("--mode");
+    assert.equal(record.argv[modeIndex + 1], "rpc");
+    assert.equal(
+      record.argv.includes("Map the subagent rendering files."),
+      false,
+    );
+    assert.deepEqual(JSON.parse(record.stdin.trim()), {
+      id: "subagent-task-prompt",
+      type: "prompt",
+      message: "Map the subagent rendering files.",
+    });
+    assert.equal(result.finalText, "done");
+    assert.deepEqual(forwarded, ["agent_end"]);
+  } finally {
+    if (previousBinary === undefined) delete process.env.GSD_PI_BINARY;
+    else process.env.GSD_PI_BINARY = previousBinary;
+    if (previousRecordPath === undefined) delete process.env.GSD_FAKE_PI_RECORD;
+    else process.env.GSD_FAKE_PI_RECORD = previousRecordPath;
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("subagent tool policy parses and checks categories", () => {

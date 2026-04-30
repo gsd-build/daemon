@@ -10,7 +10,8 @@ function textFromAgentEnd(event) {
   const messages = Array.isArray(event?.messages) ? event.messages : [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    if (message?.role !== "assistant" || !Array.isArray(message.content))
+      continue;
     const parts = message.content
       .filter((item) => item?.type === "text" && typeof item.text === "string")
       .map((item) => item.text);
@@ -34,10 +35,32 @@ function usageFromAgentEnd(event) {
 }
 
 function buildAgentSystemPrompt(agent) {
-  const tools = Array.isArray(agent.tools) && agent.tools.length > 0
-    ? agent.tools.join(", ")
-    : "default";
+  const tools =
+    Array.isArray(agent.tools) && agent.tools.length > 0
+      ? agent.tools.join(", ")
+      : "default";
   return `${agent.systemPrompt}\n\nConfigured tool scope: ${tools}.`;
+}
+
+function childPromptFrame(task) {
+  return `${JSON.stringify({
+    id: "subagent-task-prompt",
+    type: "prompt",
+    message: task,
+  })}\n`;
+}
+
+function writeChildPrompt(child, task) {
+  return new Promise((resolve, reject) => {
+    child.stdin.write(childPromptFrame(task), (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      child.stdin.end();
+      resolve();
+    });
+  });
 }
 
 function cancelledError(message = "subagent cancelled") {
@@ -54,13 +77,20 @@ function childStatusFromError(err, signal) {
   return signal?.aborted || isCancelledError(err) ? "cancelled" : "failed";
 }
 
-export async function runChildAgent({ agent, task, childSessionId, runId, rpc, signal }) {
+export async function runChildAgent({
+  agent,
+  task,
+  childSessionId,
+  runId,
+  rpc,
+  signal,
+}) {
   const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
   const binary = process.env.GSD_PI_BINARY || "pi";
   const args = [
     "-p",
     "--mode",
-    "json",
+    "rpc",
     "-e",
     extensionPath,
     "--provider",
@@ -73,7 +103,6 @@ export async function runChildAgent({ agent, task, childSessionId, runId, rpc, s
     agent.model,
     "--append-system-prompt",
     buildAgentSystemPrompt(agent),
-    task,
   ];
   const child = spawn(binary, args, {
     cwd: process.cwd(),
@@ -82,14 +111,17 @@ export async function runChildAgent({ agent, task, childSessionId, runId, rpc, s
       GSD_PARENT_SESSION_ID: childSessionId,
       GSD_AGENT_DIR: process.env.GSD_AGENT_DIR || "",
       GSD_DAEMON_SOCKET: process.env.GSD_DAEMON_SOCKET || "",
-      GSD_SUBAGENT_ALLOWED_TOOLS: Array.isArray(agent.tools) ? agent.tools.join(",") : "",
+      GSD_SUBAGENT_ALLOWED_TOOLS: Array.isArray(agent.tools)
+        ? agent.tools.join(",")
+        : "",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
 
   let finalText = "";
   let usage = { input: 0, output: 0, cost: 0, turns: 0 };
+  let agentEnded = false;
   const stderr = [];
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => stderr.push(chunk));
@@ -124,9 +156,15 @@ export async function runChildAgent({ agent, task, childSessionId, runId, rpc, s
   });
   if (child.pid && typeof rpc.registerProcess === "function") {
     try {
-      await rpc.registerProcess({ runId, childSessionId, pid: child.pid }, signal);
+      await rpc.registerProcess(
+        { runId, childSessionId, pid: child.pid },
+        signal,
+      );
       if (typeof rpc.heartbeat === "function") {
-        await rpc.heartbeat({ runId, childSessionId, pid: child.pid, status: "running" }, signal);
+        await rpc.heartbeat(
+          { runId, childSessionId, pid: child.pid, status: "running" },
+          signal,
+        );
       }
     } catch (err) {
       killChild();
@@ -137,6 +175,18 @@ export async function runChildAgent({ agent, task, childSessionId, runId, rpc, s
       }
       throw err;
     }
+  }
+  try {
+    if (signal?.aborted) throw cancelledError();
+    await writeChildPrompt(child, task);
+  } catch (err) {
+    killChild();
+    try {
+      await closePromise;
+    } catch {
+      // Preserve the prompt write failure as the reason this child failed.
+    }
+    throw err;
   }
   const lines = createInterface({ input: child.stdout });
   for await (const line of lines) {
@@ -161,14 +211,21 @@ export async function runChildAgent({ agent, task, childSessionId, runId, rpc, s
     if (event?.type === "agent_end") {
       finalText = textFromAgentEnd(event);
       usage = usageFromAgentEnd(event);
+      agentEnded = true;
+      killChild();
     }
   }
   const { code, signalName } = await closePromise;
-  if (signal?.aborted || signalName === "SIGTERM" || signalName === "SIGKILL") {
+  if (
+    !agentEnded &&
+    (signal?.aborted || signalName === "SIGTERM" || signalName === "SIGKILL")
+  ) {
     throw cancelledError();
   }
-  if (code !== 0) {
-    throw new Error(stderr.join("").trim() || `subagent exited with code ${code}`);
+  if (!agentEnded && code !== 0) {
+    throw new Error(
+      stderr.join("").trim() || `subagent exited with code ${code}`,
+    );
   }
   return { finalText, usage };
 }
@@ -220,16 +277,28 @@ function summarizeResults(results) {
     .join("\n");
 }
 
-async function runOne({ env, deps, rpc, toolCallId, task, runIndex = 1, mode = "single", signal }) {
+async function runOne({
+  env,
+  deps,
+  rpc,
+  toolCallId,
+  task,
+  runIndex = 1,
+  mode = "single",
+  signal,
+}) {
   const descriptor = runDescriptor({ toolCallId, index: runIndex, mode, task });
-  const created = await rpc.createChild({
-    parentSessionId: env.GSD_PARENT_SESSION_ID,
-    parentToolCallId: descriptor.parentToolCallId,
-    runIndex: descriptor.runIndex,
-    mode: descriptor.mode,
-    agentName: descriptor.agentName,
-    task: descriptor.task,
-  }, signal);
+  const created = await rpc.createChild(
+    {
+      parentSessionId: env.GSD_PARENT_SESSION_ID,
+      parentToolCallId: descriptor.parentToolCallId,
+      runIndex: descriptor.runIndex,
+      mode: descriptor.mode,
+      agentName: descriptor.agentName,
+      task: descriptor.task,
+    },
+    signal,
+  );
   const agent = created.agent ?? {
     name: descriptor.agentName,
     model: created.model ?? "",
@@ -246,16 +315,19 @@ async function runOne({ env, deps, rpc, toolCallId, task, runIndex = 1, mode = "
       rpc,
       signal,
     });
-    const finalized = await rpc.finalize({
-      runId: created.runId,
-      childSessionId: created.childSessionId,
-      status: "done",
-      totalInputTokens: run.usage.input,
-      totalOutputTokens: run.usage.output,
-      totalCostUsd: String(run.usage.cost || 0),
-      turnCount: Math.max(1, run.usage.turns || 1),
-      finalText: run.finalText,
-    }, signal);
+    const finalized = await rpc.finalize(
+      {
+        runId: created.runId,
+        childSessionId: created.childSessionId,
+        status: "done",
+        totalInputTokens: run.usage.input,
+        totalOutputTokens: run.usage.output,
+        totalCostUsd: String(run.usage.cost || 0),
+        turnCount: Math.max(1, run.usage.turns || 1),
+        finalText: run.finalText,
+      },
+      signal,
+    );
     return {
       status: finalized.status ?? "succeeded",
       runId: created.runId,
@@ -275,16 +347,18 @@ async function runOne({ env, deps, rpc, toolCallId, task, runIndex = 1, mode = "
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const status = childStatusFromError(err, signal);
-    const finalized = await rpc.finalize({
-      runId: created.runId,
-      childSessionId: created.childSessionId,
-      status,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCostUsd: "0",
-      turnCount: 1,
-      errorMessage: message,
-    }).catch(() => ({}));
+    const finalized = await rpc
+      .finalize({
+        runId: created.runId,
+        childSessionId: created.childSessionId,
+        status,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCostUsd: "0",
+        turnCount: 1,
+        errorMessage: message,
+      })
+      .catch(() => ({}));
     return {
       status,
       runId: created.runId,
@@ -326,9 +400,10 @@ async function runChain({ env, deps, rpc, toolCallId, chain, signal }) {
   const results = [];
   for (const [index, task] of chain.entries()) {
     const previousText = summarizeResults(results);
-    const taskText = task.previous && previousText
-      ? `${task.task}\n\nPrior subagent results:\n${previousText}`
-      : task.task;
+    const taskText =
+      task.previous && previousText
+        ? `${task.task}\n\nPrior subagent results:\n${previousText}`
+        : task.task;
     const result = await runOne({
       env,
       deps,
@@ -346,7 +421,11 @@ async function runChain({ env, deps, rpc, toolCallId, chain, signal }) {
 }
 
 export function registerSubagentTool(pi, env = process.env, deps = {}) {
-  if (!env.GSD_DAEMON_SOCKET || !env.GSD_PARENT_SESSION_ID || !env.GSD_AGENT_DIR) {
+  if (
+    !env.GSD_DAEMON_SOCKET ||
+    !env.GSD_PARENT_SESSION_ID ||
+    !env.GSD_AGENT_DIR
+  ) {
     return false;
   }
   const rpc = deps.rpc ?? createDaemonRpc(env.GSD_DAEMON_SOCKET);
@@ -357,40 +436,74 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
     label: "Subagent",
     description: "Delegate bounded work to configured project subagents.",
     parameters: Type.Object({
-      agentName: Type.Optional(Type.String({ description: "Name of the configured subagent." })),
-      agent: Type.Optional(Type.String({ description: "Name of the configured subagent." })),
-      task: Type.Optional(Type.String({ description: "Bounded task for the subagent." })),
-      tasks: Type.Optional(Type.Array(Type.Object({
-        agentName: Type.Optional(Type.String()),
-        agent: Type.Optional(Type.String()),
-        task: Type.String(),
-      }))),
-      chain: Type.Optional(Type.Array(Type.Object({
-        agentName: Type.Optional(Type.String()),
-        agent: Type.Optional(Type.String()),
-        task: Type.String(),
-        previous: Type.Optional(Type.Boolean()),
-      }))),
+      agentName: Type.Optional(
+        Type.String({ description: "Name of the configured subagent." }),
+      ),
+      agent: Type.Optional(
+        Type.String({ description: "Name of the configured subagent." }),
+      ),
+      task: Type.Optional(
+        Type.String({ description: "Bounded task for the subagent." }),
+      ),
+      tasks: Type.Optional(
+        Type.Array(
+          Type.Object({
+            agentName: Type.Optional(Type.String()),
+            agent: Type.Optional(Type.String()),
+            task: Type.String(),
+          }),
+        ),
+      ),
+      chain: Type.Optional(
+        Type.Array(
+          Type.Object({
+            agentName: Type.Optional(Type.String()),
+            agent: Type.Optional(Type.String()),
+            task: Type.String(),
+            previous: Type.Optional(Type.Boolean()),
+          }),
+        ),
+      ),
     }),
     async execute(toolCallId, params, signal) {
       const single = normalizeSingle(params);
       const parallelTasks = Array.isArray(params?.tasks)
-        ? params.tasks.map((task) => ({ agentName: taskAgentName(task), task: task.task }))
+        ? params.tasks.map((task) => ({
+            agentName: taskAgentName(task),
+            task: task.task,
+          }))
         : [];
       const chainTasks = Array.isArray(params?.chain)
-        ? params.chain.map((task) => ({ agentName: taskAgentName(task), task: task.task, previous: task.previous === true }))
+        ? params.chain.map((task) => ({
+            agentName: taskAgentName(task),
+            task: task.task,
+            previous: task.previous === true,
+          }))
         : [];
-      const modeCount = (single ? 1 : 0) + (parallelTasks.length > 0 ? 1 : 0) + (chainTasks.length > 0 ? 1 : 0);
+      const modeCount =
+        (single ? 1 : 0) +
+        (parallelTasks.length > 0 ? 1 : 0) +
+        (chainTasks.length > 0 ? 1 : 0);
       if (modeCount !== 1) {
         return {
-          content: [{ type: "text", text: "Provide exactly one of: agentName+task, tasks, chain." }],
+          content: [
+            {
+              type: "text",
+              text: "Provide exactly one of: agentName+task, tasks, chain.",
+            },
+          ],
           isError: true,
           details: { status: "failed" },
         };
       }
       if (parallelTasks.length > MAX_PARALLEL) {
         return {
-          content: [{ type: "text", text: `Too many parallel subagents. Maximum is ${MAX_PARALLEL}.` }],
+          content: [
+            {
+              type: "text",
+              text: `Too many parallel subagents. Maximum is ${MAX_PARALLEL}.`,
+            },
+          ],
           isError: true,
           details: { status: "failed", maxParallel: MAX_PARALLEL },
         };
@@ -399,17 +512,38 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
         const details = single
           ? await runOne({ env, deps, rpc, toolCallId, task: single, signal })
           : parallelTasks.length > 0
-            ? await runParallel({ env, deps, rpc, toolCallId, tasks: parallelTasks, signal })
-            : await runChain({ env, deps, rpc, toolCallId, chain: chainTasks, signal });
+            ? await runParallel({
+                env,
+                deps,
+                rpc,
+                toolCallId,
+                tasks: parallelTasks,
+                signal,
+              })
+            : await runChain({
+                env,
+                deps,
+                rpc,
+                toolCallId,
+                chain: chainTasks,
+                signal,
+              });
         const isGrouped = Array.isArray(details.results);
         const isError = isGrouped
           ? details.results.some((result) => !isSuccessfulStatus(result.status))
           : !isSuccessfulStatus(details.status);
         const finalText = isGrouped
           ? summarizeResults(details.results)
-          : details.finalText ?? details.errorMessage;
+          : (details.finalText ?? details.errorMessage);
         return {
-          content: [{ type: "text", text: finalText || (isError ? "Subagent failed." : "Subagent completed.") }],
+          content: [
+            {
+              type: "text",
+              text:
+                finalText ||
+                (isError ? "Subagent failed." : "Subagent completed."),
+            },
+          ],
           isError,
           details,
         };
@@ -421,7 +555,9 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
           details: {
             status: childStatusFromError(err, signal),
             errorMessage: message,
-            available: Array.isArray(err?.available) ? err.available : undefined,
+            available: Array.isArray(err?.available)
+              ? err.available
+              : undefined,
           },
         };
       }
