@@ -222,9 +222,13 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 func subagentEnv(base []string, opts Options) []string {
 	out := make([]string, 0, len(base)+3)
 	for _, entry := range base {
-		if strings.HasPrefix(entry, "GSD_DAEMON_SOCKET=") ||
-			strings.HasPrefix(entry, "GSD_PARENT_SESSION_ID=") ||
-			strings.HasPrefix(entry, "GSD_AGENT_DIR=") {
+		if opts.DaemonSocketPath != "" && strings.HasPrefix(entry, "GSD_DAEMON_SOCKET=") {
+			continue
+		}
+		if opts.ParentSessionID != "" && strings.HasPrefix(entry, "GSD_PARENT_SESSION_ID=") {
+			continue
+		}
+		if opts.AgentDir != "" && strings.HasPrefix(entry, "GSD_AGENT_DIR=") {
 			continue
 		}
 		out = append(out, entry)

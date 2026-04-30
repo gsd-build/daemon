@@ -6,6 +6,17 @@ export function createDaemonRpc(socketPath = process.env.GSD_DAEMON_SOCKET) {
   async function call(path, body, signal) {
     const data = JSON.stringify(body ?? {});
     return await new Promise((resolve, reject) => {
+      let settled = false;
+      const resolveOnce = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const rejectOnce = (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
       const req = http.request({
         socketPath,
         path,
@@ -31,13 +42,17 @@ export function createDaemonRpc(socketPath = process.env.GSD_DAEMON_SOCKET) {
             }
           }
           if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(parsed?.error || `daemon rpc ${res.statusCode}`));
+            rejectOnce(new Error(parsed?.error || `daemon rpc ${res.statusCode}`));
             return;
           }
-          resolve(parsed);
+          resolveOnce(parsed);
         });
       });
-      req.on("error", reject);
+      req.setTimeout(15_000, () => {
+        rejectOnce(new Error("daemon rpc timeout"));
+        req.destroy();
+      });
+      req.on("error", rejectOnce);
       req.write(data);
       req.end();
     });

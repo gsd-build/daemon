@@ -87,9 +87,6 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
-  if (child.pid && typeof rpc.registerProcess === "function") {
-    await rpc.registerProcess({ childSessionId, pid: child.pid }, signal);
-  }
 
   let finalText = "";
   let usage = { input: 0, output: 0, cost: 0, turns: 0 };
@@ -125,10 +122,33 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
       resolve({ code, signalName });
     });
   });
+  if (child.pid && typeof rpc.registerProcess === "function") {
+    try {
+      await rpc.registerProcess({ childSessionId, pid: child.pid }, signal);
+    } catch (err) {
+      killChild();
+      try {
+        await closePromise;
+      } catch {
+        // Preserve the daemon RPC failure as the reason this child failed.
+      }
+      throw err;
+    }
+  }
   const lines = createInterface({ input: child.stdout });
   for await (const line of lines) {
     if (!line.trim()) continue;
-    await rpc.forwardEvent({ childSessionId, event: line }, signal);
+    try {
+      await rpc.forwardEvent({ childSessionId, event: line }, signal);
+    } catch (err) {
+      killChild();
+      try {
+        await closePromise;
+      } catch {
+        // Preserve the daemon RPC failure as the reason this child failed.
+      }
+      throw err;
+    }
     try {
       const event = JSON.parse(line);
       if (event?.type === "agent_end") {

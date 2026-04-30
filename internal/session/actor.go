@@ -785,7 +785,7 @@ func (a *Actor) syncSubagents(ctx context.Context) ([]agents.Definition, error) 
 	if a.opts.AgentDir == "" {
 		return nil, nil
 	}
-	resp, err := api.NewClient(a.opts.ServerURL).ListSubagents(api.ListSubagentsRequest{
+	resp, err := api.NewClient(a.opts.ServerURL).ListSubagents(ctx, api.ListSubagentsRequest{
 		MachineID: a.opts.MachineID,
 		AuthToken: a.opts.AuthToken,
 		SessionID: a.opts.SessionID,

@@ -36,6 +36,35 @@ func TestSyncDefinitionsWritesAgentFiles(t *testing.T) {
 	}
 }
 
+func TestSyncDefinitionsReplacesStaleAgentFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "stale.json"), []byte("{}\n"), 0600); err != nil {
+		t.Fatalf("write stale agent: %v", err)
+	}
+
+	if err := SyncDefinitions(dir, []Definition{{Name: "reviewer", Model: "claude-sonnet-4-6"}}); err != nil {
+		t.Fatalf("SyncDefinitions: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "stale.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale agent file stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "reviewer.json")); err != nil {
+		t.Fatalf("reviewer agent file stat: %v", err)
+	}
+}
+
+func TestSyncDefinitionsRejectsFileNameCollisions(t *testing.T) {
+	dir := t.TempDir()
+	err := SyncDefinitions(dir, []Definition{
+		{Name: "a/b"},
+		{Name: "a?b"},
+	})
+	if err == nil {
+		t.Fatal("SyncDefinitions returned nil, want collision error")
+	}
+}
+
 func TestBuildPromptListsAvailableAgents(t *testing.T) {
 	prompt := BuildPrompt([]Definition{
 		{Name: "explorer", Description: "Maps the code path.", Model: "claude-haiku-4-5-20251001", Tools: []string{"read"}},

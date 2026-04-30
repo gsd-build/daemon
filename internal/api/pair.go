@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -179,11 +180,11 @@ func (c *Client) RefreshToken(req RefreshTokenRequest) (*RefreshTokenResponse, e
 	return &out, nil
 }
 
-func (c *Client) ListSubagents(req ListSubagentsRequest) (*ListSubagentsResponse, error) {
+func (c *Client) ListSubagents(ctx context.Context, req ListSubagentsRequest) (*ListSubagentsResponse, error) {
 	values := url.Values{}
 	values.Set("machineId", req.MachineID)
 	values.Set("sessionId", req.SessionID)
-	httpReq, err := http.NewRequest(http.MethodGet, c.baseURL+"/api/daemon/subagents?"+values.Encode(), nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/daemon/subagents?"+values.Encode(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
@@ -195,28 +196,28 @@ func (c *Client) ListSubagents(req ListSubagentsRequest) (*ListSubagentsResponse
 	return &out, nil
 }
 
-func (c *Client) CreateSubagentChild(req CreateSubagentChildRequest) (*CreateSubagentChildResponse, error) {
+func (c *Client) CreateSubagentChild(ctx context.Context, req CreateSubagentChildRequest) (*CreateSubagentChildResponse, error) {
 	var out CreateSubagentChildResponse
-	if err := c.postBearer("/api/daemon/subagents/child", req.AuthToken, req, &out); err != nil {
+	if err := c.postBearer(ctx, "/api/daemon/subagents/child", req.AuthToken, req, &out); err != nil {
 		return nil, fmt.Errorf("create subagent child: %w", err)
 	}
 	return &out, nil
 }
 
-func (c *Client) FinalizeSubagentChild(req FinalizeSubagentChildRequest) (*FinalizeSubagentChildResponse, error) {
+func (c *Client) FinalizeSubagentChild(ctx context.Context, req FinalizeSubagentChildRequest) (*FinalizeSubagentChildResponse, error) {
 	var out FinalizeSubagentChildResponse
-	if err := c.postBearer("/api/daemon/subagents/finalize", req.AuthToken, req, &out); err != nil {
+	if err := c.postBearer(ctx, "/api/daemon/subagents/finalize", req.AuthToken, req, &out); err != nil {
 		return nil, fmt.Errorf("finalize subagent child: %w", err)
 	}
 	return &out, nil
 }
 
-func (c *Client) postBearer(path string, token string, payload any, out any) error {
+func (c *Client) postBearer(ctx context.Context, path string, token string, payload any, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("new request: %w", err)
 	}

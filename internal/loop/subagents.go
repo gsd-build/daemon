@@ -16,11 +16,11 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
-func (d *Daemon) CreateSubagentChild(_ *http.Request, req sockapi.CreateSubagentChildRequest) (sockapi.CreateSubagentChildResponse, error) {
+func (d *Daemon) CreateSubagentChild(r *http.Request, req sockapi.CreateSubagentChildRequest) (sockapi.CreateSubagentChildResponse, error) {
 	if req.ParentSessionID == "" || req.ParentToolCallID == "" || req.AgentName == "" || req.Task == "" {
 		return sockapi.CreateSubagentChildResponse{}, fmt.Errorf("%w: missing required child fields", sockapi.ErrBadSubagentRequest)
 	}
-	resp, err := api.NewClient(d.cfg.ServerURL).CreateSubagentChild(api.CreateSubagentChildRequest{
+	resp, err := api.NewClient(d.cfg.ServerURL).CreateSubagentChild(r.Context(), api.CreateSubagentChildRequest{
 		MachineID:        d.cfg.MachineID,
 		AuthToken:        d.cfg.AuthToken,
 		ParentSessionID:  req.ParentSessionID,
@@ -102,7 +102,7 @@ func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubage
 	return nil
 }
 
-func (d *Daemon) FinalizeSubagentChild(_ *http.Request, req sockapi.FinalizeSubagentChildRequest) (sockapi.FinalizeSubagentChildResponse, error) {
+func (d *Daemon) FinalizeSubagentChild(r *http.Request, req sockapi.FinalizeSubagentChildRequest) (sockapi.FinalizeSubagentChildResponse, error) {
 	if req.ChildSessionID == "" {
 		return sockapi.FinalizeSubagentChildResponse{}, fmt.Errorf("%w: childSessionId is required", sockapi.ErrBadSubagentRequest)
 	}
@@ -114,7 +114,7 @@ func (d *Daemon) FinalizeSubagentChild(_ *http.Request, req sockapi.FinalizeSuba
 	if cost == "" {
 		cost = "0"
 	}
-	resp, err := api.NewClient(d.cfg.ServerURL).FinalizeSubagentChild(api.FinalizeSubagentChildRequest{
+	resp, err := api.NewClient(d.cfg.ServerURL).FinalizeSubagentChild(r.Context(), api.FinalizeSubagentChildRequest{
 		MachineID:         d.cfg.MachineID,
 		AuthToken:         d.cfg.AuthToken,
 		ChildSessionID:    req.ChildSessionID,
@@ -129,13 +129,17 @@ func (d *Daemon) FinalizeSubagentChild(_ *http.Request, req sockapi.FinalizeSuba
 	if err != nil {
 		return sockapi.FinalizeSubagentChildResponse{}, err
 	}
-	d.sendSubagentStatus(req.ChildSessionID, status, req.TotalInputTokens, req.TotalOutputTokens, cost, req.ErrorMessage)
+
+	sendErr := d.sendSubagentStatus(req.ChildSessionID, resp.Status, req.TotalInputTokens, req.TotalOutputTokens, cost, resp.ErrorMessage)
 
 	d.subagentMu.Lock()
 	delete(d.subagentStreams, req.ChildSessionID)
 	delete(d.subagentSeq, req.ChildSessionID)
 	delete(d.subagentProcesses, req.ChildSessionID)
 	d.subagentMu.Unlock()
+	if sendErr != nil {
+		return sockapi.FinalizeSubagentChildResponse{}, sendErr
+	}
 
 	return sockapi.FinalizeSubagentChildResponse{
 		OK:              resp.OK,
@@ -159,9 +163,9 @@ func (d *Daemon) nextSubagentSequence(sessionID string) int64 {
 	return next
 }
 
-func (d *Daemon) sendSubagentStatus(sessionID string, status string, inputTokens int64, outputTokens int64, costUSD string, errorMessage string) {
+func (d *Daemon) sendSubagentStatus(sessionID string, status string, inputTokens int64, outputTokens int64, costUSD string, errorMessage string) error {
 	if d.client == nil {
-		return
+		return nil
 	}
 	payload := map[string]any{
 		"type":         "subagent_status",
@@ -175,11 +179,11 @@ func (d *Daemon) sendSubagentStatus(sessionID string, status string, inputTokens
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return err
 	}
 	sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = d.client.Send(sendCtx, &protocol.Stream{
+	return d.client.Send(sendCtx, &protocol.Stream{
 		Type:           protocol.MsgTypeStream,
 		SessionID:      sessionID,
 		ChannelID:      "subagent:" + sessionID,
@@ -193,19 +197,26 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 	pid := 0
 	if d.subagentProcesses != nil {
 		pid = d.subagentProcesses[sessionID]
-		delete(d.subagentProcesses, sessionID)
 	}
 	d.subagentMu.Unlock()
 	if pid <= 0 {
 		return false
 	}
 	if runtime.GOOS == "windows" {
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Kill()
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return false
 		}
+		if err := proc.Kill(); err != nil {
+			return false
+		}
+		d.deleteSubagentProcess(sessionID)
 		return true
 	}
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		return false
+	}
+	d.deleteSubagentProcess(sessionID)
 	go func() {
 		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
@@ -213,4 +224,12 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}()
 	return true
+}
+
+func (d *Daemon) deleteSubagentProcess(sessionID string) {
+	d.subagentMu.Lock()
+	defer d.subagentMu.Unlock()
+	if d.subagentProcesses != nil {
+		delete(d.subagentProcesses, sessionID)
+	}
 }

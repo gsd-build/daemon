@@ -24,10 +24,22 @@ func SyncDefinitions(dir string, defs []Definition) error {
 	if strings.TrimSpace(dir) == "" {
 		return fmt.Errorf("agent directory is required")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("mkdir agents dir: %w", err)
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return fmt.Errorf("mkdir agents parent: %w", err)
 	}
+	staging, err := os.MkdirTemp(parent, filepath.Base(dir)+".staging-*")
+	if err != nil {
+		return fmt.Errorf("mkdir agents staging: %w", err)
+	}
+	stagingActive := true
+	defer func() {
+		if stagingActive {
+			_ = os.RemoveAll(staging)
+		}
+	}()
 
+	seen := make(map[string]string, len(defs))
 	for _, def := range defs {
 		name := strings.TrimSpace(def.Name)
 		if name == "" {
@@ -38,11 +50,15 @@ func SyncDefinitions(dir string, defs []Definition) error {
 		if fileName == "" || fileName == "." || fileName == ".." {
 			return fmt.Errorf("invalid agent name %q", name)
 		}
+		if prior, ok := seen[fileName]; ok {
+			return fmt.Errorf("agent names %q and %q resolve to the same file", prior, name)
+		}
+		seen[fileName] = name
 		data, err := json.MarshalIndent(def, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal %s: %w", name, err)
 		}
-		path := filepath.Join(dir, fileName+".json")
+		path := filepath.Join(staging, fileName+".json")
 		tmp := path + ".tmp"
 		if err := os.WriteFile(tmp, append(data, '\n'), 0600); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
@@ -51,6 +67,19 @@ func SyncDefinitions(dir string, defs []Definition) error {
 			return fmt.Errorf("rename %s: %w", name, err)
 		}
 	}
+	backup := dir + ".previous"
+	_ = os.RemoveAll(backup)
+	if err := os.Rename(dir, backup); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("backup agents dir: %w", err)
+	}
+	if err := os.Rename(staging, dir); err != nil {
+		if _, statErr := os.Stat(backup); statErr == nil {
+			_ = os.Rename(backup, dir)
+		}
+		return fmt.Errorf("replace agents dir: %w", err)
+	}
+	stagingActive = false
+	_ = os.RemoveAll(backup)
 	return nil
 }
 

@@ -3,6 +3,7 @@ package sockapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -37,7 +38,7 @@ func newHandler(p StatusProvider) http.Handler {
 		}
 		var req CreateSubagentChildRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeInvalidSubagentJSON(w, err)
 			return
 		}
 		resp, err := provider.CreateSubagentChild(r, req)
@@ -51,7 +52,7 @@ func newHandler(p StatusProvider) http.Handler {
 		}
 		var req ForwardSubagentEventRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeInvalidSubagentJSON(w, err)
 			return
 		}
 		writeSubagentResponse(w, map[string]bool{"ok": true}, provider.ForwardSubagentEvent(r, req))
@@ -64,7 +65,7 @@ func newHandler(p StatusProvider) http.Handler {
 		}
 		var req RegisterSubagentProcessRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeInvalidSubagentJSON(w, err)
 			return
 		}
 		writeSubagentResponse(w, map[string]bool{"ok": true}, provider.RegisterSubagentProcess(r, req))
@@ -77,13 +78,17 @@ func newHandler(p StatusProvider) http.Handler {
 		}
 		var req FinalizeSubagentChildRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeInvalidSubagentJSON(w, err)
 			return
 		}
 		resp, err := provider.FinalizeSubagentChild(r, req)
 		writeSubagentResponse(w, resp, err)
 	})
 	return mux
+}
+
+func writeInvalidSubagentJSON(w http.ResponseWriter, err error) {
+	writeSubagentResponse(w, nil, fmt.Errorf("%w: invalid json: %v", ErrBadSubagentRequest, err))
 }
 
 func writeSubagentResponse(w http.ResponseWriter, resp any, err error) {
