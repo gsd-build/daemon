@@ -150,6 +150,7 @@ type taskContext struct {
 	BrowserGrantID     string
 	BrowserID          string
 	PlanCapability     *protocol.PlanCapability
+	PlanRuntime        *planRuntimeReporter
 }
 
 // pendingDenial tracks a task waiting on permission/question responses.
@@ -616,6 +617,8 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		BrowserID:          a.opts.BrowserID,
 		PlanCapability:     task.PlanCapability,
 	}
+	tc.PlanRuntime = newPlanRuntimeReporter(tc.TaskID, tc.PlanCapability)
+	defer tc.PlanRuntime.Finish(context.Background())
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
 	if task.RequestID != "" {
@@ -765,8 +768,8 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 
 	exec := pi.NewExecutor(opts)
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
-	exec.OnToolExecutionStart = a.capturePiToolStart(coordinator)
-	exec.OnToolExecutionEnd = a.capturePiToolEnd(tc.ChannelID)
+	exec.OnToolExecutionStart = a.capturePiToolStartWithEvidence(coordinator, tc.PlanRuntime)
+	exec.OnToolExecutionEnd = a.capturePiToolEndWithEvidence(tc.ChannelID, tc.PlanRuntime)
 
 	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
 		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
@@ -834,8 +837,8 @@ func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, t
 			Message:              prompt,
 			OnEvent:              onEvent,
 			OnUIRequest:          a.makePiUIHandler(ctx, tc, coordinator),
-			OnToolExecutionStart: a.capturePiToolStart(coordinator),
-			OnToolExecutionEnd:   a.capturePiToolEnd(tc.ChannelID),
+			OnToolExecutionStart: a.capturePiToolStartWithEvidence(coordinator, tc.PlanRuntime),
+			OnToolExecutionEnd:   a.capturePiToolEndWithEvidence(tc.ChannelID, tc.PlanRuntime),
 		})
 	})
 	if err != nil {
@@ -844,6 +847,26 @@ func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, t
 	}
 
 	return a.handleResult(taskCtx, tc, resultRaw)
+}
+
+func (a *Actor) capturePiToolStartWithEvidence(coordinator *structuredQuestionCoordinator, reporter *planRuntimeReporter) func(pi.ToolExecutionStart) {
+	base := a.capturePiToolStart(coordinator)
+	return func(event pi.ToolExecutionStart) {
+		if reporter != nil {
+			reporter.RecordToolStart(event)
+		}
+		base(event)
+	}
+}
+
+func (a *Actor) capturePiToolEndWithEvidence(channelID string, reporter *planRuntimeReporter) func(pi.ToolExecutionEnd) {
+	base := a.capturePiToolEnd(channelID)
+	return func(event pi.ToolExecutionEnd) {
+		if reporter != nil {
+			reporter.RecordToolEnd(event)
+		}
+		base(event)
+	}
 }
 
 func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {

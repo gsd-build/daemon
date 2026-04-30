@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"strings"
 	"time"
 )
@@ -135,6 +136,7 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("open pi stderr: %w", err)
 	}
+	cmd.Env = planCapabilityEnv(os.Environ(), nil)
 
 	if err := cmd.Start(); err != nil {
 		return ControlResult{}, fmt.Errorf("start pi control process: %w", err)
