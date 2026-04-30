@@ -75,3 +75,35 @@ func TestStreamLogFileFollowsExistingAndAppendedContent(t *testing.T) {
 		t.Fatalf("streamLogFile returned error: %v", err)
 	}
 }
+
+func TestFilterLogLinesByTaskAndSession(t *testing.T) {
+	lines := []string{
+		`{"time":"2026-04-30T12:30:55Z","level":"INFO","event":"task_lifecycle","phase":"task_received","taskId":"task-1","sessionId":"session-1"}`,
+		`{"time":"2026-04-30T12:30:56Z","level":"INFO","event":"task_lifecycle","phase":"task_received","taskId":"task-2","sessionId":"session-2"}`,
+	}
+	got := filterLogLines(lines, logFilter{TaskID: "task-1"})
+	if len(got) != 1 || got[0].TaskID != "task-1" {
+		t.Fatalf("filtered by task = %#v", got)
+	}
+	got = filterLogLines(lines, logFilter{SessionID: "session-2"})
+	if len(got) != 1 || got[0].SessionID != "session-2" {
+		t.Fatalf("filtered by session = %#v", got)
+	}
+}
+
+func TestPrettyTimelineIncludesPromptPreviewAndFailureCode(t *testing.T) {
+	events := []logEvent{
+		{Time: "2026-04-30T12:30:55Z", Event: "task_lifecycle", Phase: "task_received", TaskID: "d1fae004-71f0-481a-9980-0cd6cecf49cb", SessionID: "session-1", PromptPreview: "write the full update spec"},
+		{Time: "2026-04-30T12:32:26Z", Event: "task_lifecycle", Phase: "timed_out", FailureCode: "no_first_event_timeout", ElapsedMs: 90000},
+	}
+	got := renderPrettyTimeline(events, colorNever)
+	if !strings.Contains(got, "task received") || !strings.Contains(got, `"write the full update spec"`) {
+		t.Fatalf("missing received line: %s", got)
+	}
+	if !strings.Contains(got, "no_first_event_timeout") {
+		t.Fatalf("missing failure code: %s", got)
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Fatalf("color escaped in colorNever output: %q", got)
+	}
+}
