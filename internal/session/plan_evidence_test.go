@@ -135,15 +135,20 @@ func TestPlanRuntimeReporterRecordsFileChanges(t *testing.T) {
 }
 
 func TestActorPlanEvidencePostFailureDoesNotFailTask(t *testing.T) {
+	var countsMu sync.Mutex
 	var evidencePosts int
 	var revokePosts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/agent-plan/evidence":
+			countsMu.Lock()
 			evidencePosts++
+			countsMu.Unlock()
 			http.Error(w, "temporary failure", http.StatusInternalServerError)
 		case "/api/agent-plan/capability/revoke":
+			countsMu.Lock()
 			revokePosts++
+			countsMu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -179,18 +184,25 @@ func TestActorPlanEvidencePostFailureDoesNotFailTask(t *testing.T) {
 	if !fakeRelayHasTaskComplete(relay, "33333333-3333-4333-8333-333333333333") {
 		t.Fatalf("expected task complete frame")
 	}
-	if evidencePosts == 0 {
+	countsMu.Lock()
+	gotEvidencePosts := evidencePosts
+	gotRevokePosts := revokePosts
+	countsMu.Unlock()
+	if gotEvidencePosts == 0 {
 		t.Fatalf("expected evidence posts")
 	}
-	if revokePosts != 1 {
-		t.Fatalf("revoke posts = %d, want 1", revokePosts)
+	if gotRevokePosts != 1 {
+		t.Fatalf("revoke posts = %d, want 1", gotRevokePosts)
 	}
 }
 
 func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
+	var pathsMu sync.Mutex
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pathsMu.Lock()
 		paths = append(paths, r.URL.Path)
+		pathsMu.Unlock()
 		if got := r.Header.Get("Authorization"); got != "Bearer gsd_plan_revoke" {
 			t.Fatalf("authorization = %q", got)
 		}
@@ -227,14 +239,17 @@ func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
 		t.Fatalf("expected task complete frame")
 	}
 
+	pathsMu.Lock()
+	gotPaths := append([]string(nil), paths...)
+	pathsMu.Unlock()
 	var revokeCount int
-	for _, path := range paths {
+	for _, path := range gotPaths {
 		if path == "/api/agent-plan/capability/revoke" {
 			revokeCount++
 		}
 	}
 	if revokeCount != 1 {
-		t.Fatalf("revoke count = %d, paths=%v", revokeCount, paths)
+		t.Fatalf("revoke count = %d, paths=%v", revokeCount, gotPaths)
 	}
 }
 
