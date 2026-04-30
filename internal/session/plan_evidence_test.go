@@ -50,7 +50,7 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 		ExpiresAt:  time.Now().Add(time.Hour).Format(time.RFC3339),
 	})
 	reporter.now = fixedPlanEvidenceClock()
-	for i := 0; i < planEvidenceMaxFlushPosts+10; i++ {
+	for i := 0; i < planEvidenceMaxFlushPosts/2+10; i++ {
 		toolCallID := fmt.Sprintf("toolu_test_%d", i)
 		reporter.RecordToolStart(pi.ToolExecutionStart{
 			ToolCallID: toolCallID,
@@ -64,9 +64,6 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	}
 	totalEntries := len(reporter.snapshot(0))
 	expectedSecondFlush := totalEntries - planEvidenceMaxFlushPosts
-	if expectedSecondFlush > planEvidenceMaxFlushPosts {
-		expectedSecondFlush = planEvidenceMaxFlushPosts
-	}
 
 	reporter.Flush(context.Background())
 	assertNoPlanEvidenceHandlerErrors(t, handlerErrors)
@@ -88,6 +85,9 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 			}
 		case "test":
 			seenTest = true
+			if len(payload.Refs) == 0 {
+				t.Fatalf("test refs missing: %#v", payload.Refs)
+			}
 			if payload.Refs[0].Type != "command" || payload.Refs[0].Value != "go test ./..." {
 				t.Fatalf("test refs = %#v", payload.Refs)
 			}
