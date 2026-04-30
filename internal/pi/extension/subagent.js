@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Type } from "@sinclair/typebox";
-import { findAgent, listAgents } from "./agents-discoverer.js";
 import { createDaemonRpc } from "./daemon-rpc.js";
 
 const MAX_PARALLEL = 4;
@@ -55,7 +54,7 @@ function childStatusFromError(err, signal) {
   return signal?.aborted || isCancelledError(err) ? "cancelled" : "failed";
 }
 
-export async function runChildAgent({ agent, task, childSessionId, rpc, signal }) {
+export async function runChildAgent({ agent, task, childSessionId, runId, rpc, signal }) {
   const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
   const binary = process.env.GSD_PI_BINARY || "pi";
   const args = [
@@ -83,6 +82,7 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
       GSD_PARENT_SESSION_ID: childSessionId,
       GSD_AGENT_DIR: process.env.GSD_AGENT_DIR || "",
       GSD_DAEMON_SOCKET: process.env.GSD_DAEMON_SOCKET || "",
+      GSD_SUBAGENT_ALLOWED_TOOLS: Array.isArray(agent.tools) ? agent.tools.join(",") : "",
     },
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
@@ -124,7 +124,10 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
   });
   if (child.pid && typeof rpc.registerProcess === "function") {
     try {
-      await rpc.registerProcess({ childSessionId, pid: child.pid }, signal);
+      await rpc.registerProcess({ runId, childSessionId, pid: child.pid }, signal);
+      if (typeof rpc.heartbeat === "function") {
+        await rpc.heartbeat({ runId, childSessionId, pid: child.pid, status: "running" }, signal);
+      }
     } catch (err) {
       killChild();
       try {
@@ -145,7 +148,7 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
       continue;
     }
     try {
-      await rpc.forwardEvent({ childSessionId, event }, signal);
+      await rpc.forwardEvent({ runId, childSessionId, event }, signal);
     } catch (err) {
       killChild();
       try {
@@ -180,13 +183,18 @@ function normalizeSingle(params) {
   return { agentName, task: params.task };
 }
 
-async function resolveAgent(agentName, env, deps) {
-  const agent = await (deps.findAgent ?? findAgent)(agentName, env.GSD_AGENT_DIR);
-  if (agent) return agent;
-  const available = await listAgents(env.GSD_AGENT_DIR);
-  const err = new Error(`Unknown subagent: ${agentName}`);
-  err.available = available.map((item) => item.name);
-  throw err;
+function runDescriptor({ toolCallId, index, mode, task }) {
+  return {
+    parentToolCallId: toolCallId,
+    runIndex: index,
+    mode,
+    agentName: task.agentName,
+    task: task.task,
+  };
+}
+
+function isSuccessfulStatus(status) {
+  return status === "done" || status === "succeeded";
 }
 
 function sumUsage(results) {
@@ -212,24 +220,34 @@ function summarizeResults(results) {
     .join("\n");
 }
 
-async function runOne({ env, deps, rpc, toolCallId, task, signal }) {
-  const agent = await resolveAgent(task.agentName, env, deps);
+async function runOne({ env, deps, rpc, toolCallId, task, runIndex = 1, mode = "single", signal }) {
+  const descriptor = runDescriptor({ toolCallId, index: runIndex, mode, task });
   const created = await rpc.createChild({
     parentSessionId: env.GSD_PARENT_SESSION_ID,
-    parentToolCallId: toolCallId,
-    agentName: agent.name,
-    task: task.task,
+    parentToolCallId: descriptor.parentToolCallId,
+    runIndex: descriptor.runIndex,
+    mode: descriptor.mode,
+    agentName: descriptor.agentName,
+    task: descriptor.task,
   }, signal);
+  const agent = created.agent ?? {
+    name: descriptor.agentName,
+    model: created.model ?? "",
+    systemPrompt: "",
+    tools: [],
+  };
 
   try {
     const run = await (deps.runChildAgent ?? runChildAgent)({
       agent,
-      task: task.task,
+      task: descriptor.task,
       childSessionId: created.childSessionId,
+      runId: created.runId,
       rpc,
       signal,
     });
     const finalized = await rpc.finalize({
+      runId: created.runId,
       childSessionId: created.childSessionId,
       status: "done",
       totalInputTokens: run.usage.input,
@@ -239,13 +257,18 @@ async function runOne({ env, deps, rpc, toolCallId, task, signal }) {
       finalText: run.finalText,
     }, signal);
     return {
-      status: "done",
+      status: finalized.status ?? "succeeded",
+      runId: created.runId,
       childSessionId: created.childSessionId,
       parentSessionId: created.parentSessionId,
       projectId: created.projectId,
+      parentToolCallId: descriptor.parentToolCallId,
+      runIndex: descriptor.runIndex,
+      mode: descriptor.mode,
       agentName: agent.name,
       model: agent.model,
-      finalText: run.finalText,
+      task: descriptor.task,
+      finalText: finalized.finalText ?? run.finalText,
       usage: run.usage,
       ...finalized,
     };
@@ -253,6 +276,7 @@ async function runOne({ env, deps, rpc, toolCallId, task, signal }) {
     const message = err instanceof Error ? err.message : String(err);
     const status = childStatusFromError(err, signal);
     const finalized = await rpc.finalize({
+      runId: created.runId,
       childSessionId: created.childSessionId,
       status,
       totalInputTokens: 0,
@@ -263,11 +287,16 @@ async function runOne({ env, deps, rpc, toolCallId, task, signal }) {
     }).catch(() => ({}));
     return {
       status,
+      runId: created.runId,
       childSessionId: created.childSessionId,
       parentSessionId: created.parentSessionId,
       projectId: created.projectId,
+      parentToolCallId: descriptor.parentToolCallId,
+      runIndex: descriptor.runIndex,
+      mode: descriptor.mode,
       agentName: agent.name,
       model: agent.model,
+      task: descriptor.task,
       errorMessage: message,
       usage: { input: 0, output: 0, cost: 0, turns: 1 },
       ...finalized,
@@ -282,8 +311,10 @@ async function runParallel({ env, deps, rpc, toolCallId, tasks, signal }) {
         env,
         deps,
         rpc,
-        toolCallId: `${toolCallId}:${index + 1}`,
+        toolCallId,
         task,
+        runIndex: index + 1,
+        mode: "parallel",
         signal,
       }),
     ),
@@ -302,12 +333,14 @@ async function runChain({ env, deps, rpc, toolCallId, chain, signal }) {
       env,
       deps,
       rpc,
-      toolCallId: `${toolCallId}:${index + 1}`,
+      toolCallId,
       task: { ...task, task: taskText },
+      runIndex: index + 1,
+      mode: "chain",
       signal,
     });
     results.push(result);
-    if (result.status !== "done") break;
+    if (!isSuccessfulStatus(result.status)) break;
   }
   return { mode: "chain", results, usage: sumUsage(results) };
 }
@@ -368,10 +401,11 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
           : parallelTasks.length > 0
             ? await runParallel({ env, deps, rpc, toolCallId, tasks: parallelTasks, signal })
             : await runChain({ env, deps, rpc, toolCallId, chain: chainTasks, signal });
-        const isError = details.mode
-          ? details.results.some((result) => result.status !== "done")
-          : details.status !== "done";
-        const finalText = details.mode ? summarizeResults(details.results) : details.finalText;
+        const isGrouped = Array.isArray(details.results);
+        const isError = isGrouped
+          ? details.results.some((result) => !isSuccessfulStatus(result.status))
+          : !isSuccessfulStatus(details.status);
+        const finalText = isGrouped ? summarizeResults(details.results) : details.finalText;
         return {
           content: [{ type: "text", text: finalText || "Subagent completed." }],
           isError,
