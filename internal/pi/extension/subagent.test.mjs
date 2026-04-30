@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { registerSubagentTool, runChildAgent } from "./subagent.js";
+import { registerSubagentTool, runChildAgent, subagentProviderForModel } from "./subagent.js";
 import { isToolAllowed, parseAllowedTools } from "./tool-policy.js";
 
 function snapshot(name, overrides = {}) {
@@ -112,6 +112,12 @@ test("subagent tool creates child session, runs child, and finalizes usage", asy
       },
     ],
   ]);
+});
+
+test("subagentProviderForModel routes configured model families to their Pi provider", () => {
+  assert.equal(subagentProviderForModel("claude-haiku-4-5-20251001"), "claude-cli");
+  assert.equal(subagentProviderForModel("z-ai/glm-4.7-flash"), "openrouter");
+  assert.equal(subagentProviderForModel("gpt-5.5"), "codex-appserver");
 });
 
 test("subagent tool runs parallel child tasks and aggregates details", async () => {

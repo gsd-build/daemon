@@ -59,9 +59,13 @@ func (d *Daemon) CreateSubagentChild(r *http.Request, req sockapi.CreateSubagent
 	if d.subagentRunIDs == nil {
 		d.subagentRunIDs = make(map[string]string)
 	}
+	if d.subagentParentSessions == nil {
+		d.subagentParentSessions = make(map[string]string)
+	}
 	d.subagentStreams[resp.ChildSessionID] = pi.NewChildTranslator(resp.ChildSessionID, "", resp.Agent.Model)
 	d.subagentSeq[resp.ChildSessionID] = 0
 	d.subagentRunIDs[resp.ChildSessionID] = resp.RunID
+	d.subagentParentSessions[resp.ChildSessionID] = req.ParentSessionID
 	d.subagentMu.Unlock()
 
 	if err := d.sendSubagentStarted(r.Context(), resp.RunID, req.ParentSessionID, req.ParentToolCallID, resp.ChildSessionID, resp.ProjectID, runIndex, mode, req.Task, resp.Agent.Name, resp.Agent.Model); err != nil {
@@ -239,6 +243,7 @@ func (d *Daemon) FinalizeSubagentChild(r *http.Request, req sockapi.FinalizeSuba
 	delete(d.subagentSeq, req.ChildSessionID)
 	delete(d.subagentProcesses, req.ChildSessionID)
 	delete(d.subagentRunIDs, req.ChildSessionID)
+	delete(d.subagentParentSessions, req.ChildSessionID)
 	d.subagentMu.Unlock()
 	if sendErr != nil {
 		slog.Warn("send subagent terminal status failed", "childSessionId", req.ChildSessionID, "err", sendErr)
@@ -308,6 +313,10 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 	}
 	d.subagentMu.Unlock()
 	if pid <= 0 {
+		if runID != "" {
+			d.scheduleCancelledSubagentFallback(sessionID, runID)
+			return true
+		}
 		return false
 	}
 	if runtime.GOOS == "windows" {
@@ -334,6 +343,25 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}()
 	return true
+}
+
+func (d *Daemon) cancelSubagentChildrenForParent(parentSessionID string) bool {
+	d.subagentMu.Lock()
+	children := make([]string, 0)
+	for childSessionID, trackedParentSessionID := range d.subagentParentSessions {
+		if trackedParentSessionID == parentSessionID {
+			children = append(children, childSessionID)
+		}
+	}
+	d.subagentMu.Unlock()
+
+	cancelled := false
+	for _, childSessionID := range children {
+		if d.cancelSubagentChild(childSessionID) {
+			cancelled = true
+		}
+	}
+	return cancelled
 }
 
 func (d *Daemon) scheduleCancelledSubagentFallback(sessionID string, runID string) {
@@ -377,7 +405,9 @@ func (d *Daemon) finalizeCancelledSubagent(sessionID string, runID string) {
 	d.subagentMu.Lock()
 	delete(d.subagentStreams, sessionID)
 	delete(d.subagentSeq, sessionID)
+	delete(d.subagentProcesses, sessionID)
 	delete(d.subagentRunIDs, sessionID)
+	delete(d.subagentParentSessions, sessionID)
 	d.subagentMu.Unlock()
 }
 

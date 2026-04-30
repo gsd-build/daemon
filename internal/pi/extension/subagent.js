@@ -6,6 +6,49 @@ import { createDaemonRpc } from "./daemon-rpc.js";
 
 const MAX_PARALLEL = 4;
 
+const CLAUDE_CLI_MODELS = new Set([
+  "claude-haiku-4-5-20251001",
+  "claude-sonnet-4-6",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+]);
+
+const CODEX_APPSERVER_MODELS = new Set(["gpt-5.5", "gpt-5.4"]);
+
+const ZAI_MODELS = new Set([
+  "glm-5",
+  "glm-4.7",
+  "glm-4.7-flash",
+  "glm-4.6",
+  "glm-4.6v",
+  "glm-4.5",
+  "glm-4.5-air",
+  "glm-4.5-flash",
+  "glm-4.5v",
+]);
+
+const KIMI_CODING_MODELS = new Set(["k2p5", "kimi-k2-thinking"]);
+
+export function subagentProviderForModel(model) {
+  const value = typeof model === "string" ? model.trim() : "";
+  if (CLAUDE_CLI_MODELS.has(value) || value.startsWith("claude-")) {
+    return "claude-cli";
+  }
+  if (CODEX_APPSERVER_MODELS.has(value)) {
+    return "codex-appserver";
+  }
+  if (ZAI_MODELS.has(value)) {
+    return "zai";
+  }
+  if (KIMI_CODING_MODELS.has(value)) {
+    return "kimi-coding";
+  }
+  if (value.includes("/")) {
+    return "openrouter";
+  }
+  return "claude-cli";
+}
+
 function textFromAgentEnd(event) {
   const messages = Array.isArray(event?.messages) ? event.messages : [];
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -87,6 +130,7 @@ export async function runChildAgent({
 }) {
   const extensionPath = fileURLToPath(new URL("./index.ts", import.meta.url));
   const binary = process.env.GSD_PI_BINARY || "pi";
+  const provider = subagentProviderForModel(agent.model);
   const args = [
     "-p",
     "--mode",
@@ -94,7 +138,7 @@ export async function runChildAgent({
     "-e",
     extensionPath,
     "--provider",
-    "claude-cli",
+    provider,
     "--no-extensions",
     "--no-prompt-templates",
     "--offline",

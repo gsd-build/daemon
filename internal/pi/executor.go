@@ -503,7 +503,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 }
 
 func providerEnv(ctx context.Context, base []string, provider string) []string {
-	if provider != "openrouter" || envHasKey(base, openRouterAPIKeyEnv) {
+	if envHasKey(base, openRouterAPIKeyEnv) {
 		return base
 	}
 	if value := strings.TrimSpace(lookupServiceManagerEnv(ctx, openRouterAPIKeyEnv)); value != "" {
