@@ -563,6 +563,7 @@ func TestStreamPiEvents_FiresOnToolExecutionEnd(t *testing.T) {
 		nil,
 		nil,
 		func(ev ToolExecutionEnd) { got = &ev },
+		nil,
 		make(chan struct{}, 1),
 		false,
 		state,
@@ -591,6 +592,7 @@ func TestStreamPiEventsForwardsToolExecutionUpdate(t *testing.T) {
 			events = append(events, event)
 			return nil
 		},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -649,6 +651,7 @@ func TestStreamPiEvents_ReturnsAgentEndError(t *testing.T) {
 			events = append(events, e.Type)
 			return nil
 		},
+		nil,
 		nil,
 		nil,
 		nil,

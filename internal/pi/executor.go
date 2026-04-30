@@ -97,8 +97,18 @@ type Executor struct {
 	opts                 Options
 	OnPIDStart           func(pid int)
 	OnPIDExit            func(pid int)
+	OnLifecycle          LifecycleHooks
 	OnToolExecutionStart func(ToolExecutionStart)
 	OnToolExecutionEnd   func(ToolExecutionEnd)
+}
+
+type LifecycleHooks struct {
+	ProcessStarted    func(pid int)
+	PromptWritten     func()
+	FirstEventSeen    func()
+	FirstVisibleEvent func()
+	CleanupStarted    func(pid int)
+	CleanupFinished   func(pid int, cleanup string)
 }
 
 // NewExecutor constructs an Executor. Call Run to spawn.
@@ -378,6 +388,9 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	if e.OnPIDStart != nil {
 		e.OnPIDStart(pid)
 	}
+	if e.OnLifecycle.ProcessStarted != nil {
+		e.OnLifecycle.ProcessStarted(pid)
+	}
 	defer func() {
 		if e.OnPIDExit != nil {
 			e.OnPIDExit(pid)
@@ -432,9 +445,18 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"message": e.opts.Prompt,
 	})
 	if _, err := stdin.Write(append(promptFrame, '\n')); err != nil {
+		if e.OnLifecycle.CleanupStarted != nil {
+			e.OnLifecycle.CleanupStarted(pid)
+		}
 		_ = terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
+		if e.OnLifecycle.CleanupFinished != nil {
+			e.OnLifecycle.CleanupFinished(pid, "process_group_killed")
+		}
 		<-stderrDone
 		return fmt.Errorf("write prompt frame: %w", err)
+	}
+	if e.OnLifecycle.PromptWritten != nil {
+		e.OnLifecycle.PromptWritten()
 	}
 
 	// After agent_end fires the parser signals via agentEndCh. Pi RPC mode
@@ -446,7 +468,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		model:  e.opts.Model,
 		taskID: e.opts.TaskID,
 	}
-	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, e.OnToolExecutionEnd, agentEndCh, true, state, startedAt)
+	parseErr := streamPiEvents(ctx, stdout, stdin, onEvent, onUIRequest, e.OnToolExecutionStart, e.OnToolExecutionEnd, &e.OnLifecycle, agentEndCh, true, state, startedAt)
 	agentEnded := false
 	select {
 	case <-agentEndCh:
@@ -454,7 +476,13 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 	default:
 	}
 	if !agentEnded {
+		if e.OnLifecycle.CleanupStarted != nil {
+			e.OnLifecycle.CleanupStarted(pid)
+		}
 		waitErr := terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
+		if e.OnLifecycle.CleanupFinished != nil {
+			e.OnLifecycle.CleanupFinished(pid, "process_group_killed")
+		}
 		<-stderrDone
 		if ctx.Err() != nil {
 			return nil
@@ -477,7 +505,13 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		}
 		return fmt.Errorf("pi stream ended before agent_end")
 	}
+	if e.OnLifecycle.CleanupStarted != nil {
+		e.OnLifecycle.CleanupStarted(pid)
+	}
 	waitErr := terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
+	if e.OnLifecycle.CleanupFinished != nil {
+		e.OnLifecycle.CleanupFinished(pid, "process_group_killed")
+	}
 	<-stderrDone
 
 	if waitErr != nil {
@@ -636,6 +670,7 @@ func streamPiEvents(
 	onUIRequest UIRequestHandler,
 	onToolExecutionStart func(ToolExecutionStart),
 	onToolExecutionEnd func(ToolExecutionEnd),
+	lifecycleHooks *LifecycleHooks,
 	agentEndCh chan<- struct{},
 	translate bool,
 	state *translatorState,
@@ -647,6 +682,8 @@ func streamPiEvents(
 	if state == nil {
 		state = &translatorState{}
 	}
+	firstEventSeen := false
+	firstVisibleEvent := false
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -668,6 +705,12 @@ func streamPiEvents(
 		if peek.Type == "response" {
 			continue
 		}
+		if !firstEventSeen {
+			firstEventSeen = true
+			if lifecycleHooks != nil && lifecycleHooks.FirstEventSeen != nil {
+				lifecycleHooks.FirstEventSeen()
+			}
+		}
 
 		notifyToolExecutionStart(raw, onToolExecutionStart)
 		notifyToolExecutionEnd(raw, onToolExecutionEnd)
@@ -682,11 +725,23 @@ func streamPiEvents(
 
 		if translate {
 			for _, ev := range translatePiEvent(raw, state) {
+				if !firstVisibleEvent {
+					firstVisibleEvent = true
+					if lifecycleHooks != nil && lifecycleHooks.FirstVisibleEvent != nil {
+						lifecycleHooks.FirstVisibleEvent()
+					}
+				}
 				if err := onEvent(claude.Event{Type: ev.Type, Raw: ev.Raw}); err != nil {
 					return err
 				}
 			}
 		} else {
+			if !firstVisibleEvent {
+				firstVisibleEvent = true
+				if lifecycleHooks != nil && lifecycleHooks.FirstVisibleEvent != nil {
+					lifecycleHooks.FirstVisibleEvent()
+				}
+			}
 			if err := onEvent(claude.Event{Type: peek.Type, Raw: raw}); err != nil {
 				return err
 			}
@@ -850,6 +905,7 @@ func (e *Executor) StreamFromReaderForTest(
 		onUIRequest,
 		e.OnToolExecutionStart,
 		e.OnToolExecutionEnd,
+		&e.OnLifecycle,
 		agentEndCh,
 		true,
 		state,

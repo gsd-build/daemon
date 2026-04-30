@@ -14,3 +14,5 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 )
+
+replace github.com/gsd-build/protocol-go => /Users/lexchristopherson/Developer/gsd/gsd-build-protocol-go/.worktrees/turn-lifecycle-protocol

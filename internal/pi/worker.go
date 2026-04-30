@@ -227,6 +227,7 @@ func (w *Worker) Prompt(ctx context.Context, req PromptRequest) error {
 		req.OnUIRequest,
 		req.OnToolExecutionStart,
 		req.OnToolExecutionEnd,
+		nil,
 		agentEndCh,
 		true,
 		state,
