@@ -41,6 +41,8 @@ type NativeToolCall = {
 
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const REQUEST_TIMEOUT_MS = 90_000;
+const CODEX_SANDBOX = "danger-full-access";
+const CODEX_APPROVAL_POLICY = "never";
 
 export const codexModelDefinitions = [
   {
@@ -755,8 +757,8 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
         codexNotify("initialized");
         const result = await codexRequest("thread/start", {
           cwd: process.cwd(),
-          sandbox: "read-only",
-          approvalPolicy: "never",
+          sandbox: CODEX_SANDBOX,
+          approvalPolicy: CODEX_APPROVAL_POLICY,
           model: model.id,
           dynamicTools: codexDynamicToolsFromContext(context),
           ephemeral: true,
