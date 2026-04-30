@@ -105,8 +105,34 @@ function installClaudeSdkPipeGuard() {
 
 installClaudeSdkPipeGuard();
 
+const BROWSER_TOOL_METHODS = [
+  "navigate",
+  "back",
+  "forward",
+  "reload",
+  "click",
+  "type",
+  "press",
+  "hover",
+  "scroll",
+  "snapshot",
+  "get_ref",
+  "click_ref",
+  "hover_ref",
+  "fill_ref",
+  "wait_for",
+  "extract",
+  "assert",
+  "screenshot",
+  "console",
+  "network",
+  "dialog",
+] as const;
+
+const BrowserToolMethod = Type.Union(BROWSER_TOOL_METHODS.map((method) => Type.Literal(method)) as any);
+
 const BrowserToolParams = Type.Object({
-  method: Type.String({ description: "Browser operation to execute." }),
+  method: BrowserToolMethod,
   params: Type.Optional(Type.Record(Type.String(), Type.Any())),
 });
 
@@ -114,13 +140,19 @@ function browserToolDefinition() {
   return {
     name: "gsd_browser",
     label: "GSD Browser",
-    description: "Use the task-scoped GSD shared browser session.",
+    description:
+      "Use the active task-scoped GSD shared browser session. Pass bare method names such as navigate, snapshot, console, or network; do not prefix methods with browser.",
     parameters: BrowserToolParams,
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        method: { type: "string" },
+        method: {
+          type: "string",
+          enum: BROWSER_TOOL_METHODS,
+          description:
+            "Bare browser operation name. Use navigate, not browser.navigate.",
+        },
         params: { type: "object", additionalProperties: true },
       },
       required: ["method"],
@@ -144,7 +176,9 @@ export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserG
     !hasSubagentToolPolicy() || isToolAllowed("browser", allowed)
       ? (buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[])
       : [];
-  const visibleContextTools = filterToolsByPolicy((contextTools ?? []) as any[], allowed) as PiTool[];
+  const visibleContextTools = (
+    filterToolsByPolicy((contextTools ?? []) as any[], allowed) as PiTool[]
+  ).filter((toolDef) => browserGrant || piToolName(toolDef) !== "gsd_browser");
 
   for (const toolDef of [...visibleContextTools, ...browserTools]) {
     const name = piToolName(toolDef);
@@ -833,8 +867,9 @@ function registerBrowserTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
   const subagentAllowedTools = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
+  const browserGrant = browserGrantFromEnv();
   registerAskHumanTool(pi);
-  if (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy()) {
+  if (browserGrant && (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy())) {
     registerBrowserTool(pi);
   }
   pi.registerTool(askUserQuestionsTool as any);

@@ -9,8 +9,9 @@ import { schemaToZod } from "./schema-to-zod.js";
 
 const planEnv = {
   GSD_PLAN_API_BASE_URL: "https://app.test/",
+  GSD_PLAN_CAPABILITY_ATTEMPT_ID: "attempt_test",
   GSD_PLAN_CAPABILITY_TOKEN: "gsd_plan_test",
-  GSD_PLAN_CAPABILITY_EXPIRES_AT: "2026-04-28T22:30:00Z",
+  GSD_PLAN_CAPABILITY_EXPIRES_AT: "2999-04-28T22:30:00Z",
 };
 const compatPlanEnv = { ...planEnv, GSD_PLAN_COMPAT_TOOLS: "1" };
 
