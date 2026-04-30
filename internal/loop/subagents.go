@@ -69,7 +69,7 @@ func (d *Daemon) RegisterSubagentProcess(_ *http.Request, req sockapi.RegisterSu
 }
 
 func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubagentEventRequest) error {
-	if req.ChildSessionID == "" || req.Event == "" {
+	if req.ChildSessionID == "" || len(req.Raw) == 0 {
 		return fmt.Errorf("%w: missing child session event fields", sockapi.ErrBadSubagentRequest)
 	}
 
@@ -82,7 +82,7 @@ func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubage
 		translator = pi.NewChildTranslator(req.ChildSessionID, "", "")
 		d.subagentStreams[req.ChildSessionID] = translator
 	}
-	events := translator.Translate(json.RawMessage(req.Event))
+	events := translator.Translate(req.Raw)
 	d.subagentMu.Unlock()
 
 	for _, event := range events {

@@ -138,8 +138,14 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
   const lines = createInterface({ input: child.stdout });
   for await (const line of lines) {
     if (!line.trim()) continue;
+    let event;
     try {
-      await rpc.forwardEvent({ childSessionId, event: line }, signal);
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    try {
+      await rpc.forwardEvent({ childSessionId, event }, signal);
     } catch (err) {
       killChild();
       try {
@@ -149,14 +155,9 @@ export async function runChildAgent({ agent, task, childSessionId, rpc, signal }
       }
       throw err;
     }
-    try {
-      const event = JSON.parse(line);
-      if (event?.type === "agent_end") {
-        finalText = textFromAgentEnd(event);
-        usage = usageFromAgentEnd(event);
-      }
-    } catch {
-      continue;
+    if (event?.type === "agent_end") {
+      finalText = textFromAgentEnd(event);
+      usage = usageFromAgentEnd(event);
     }
   }
   const { code, signalName } = await closePromise;

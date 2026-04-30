@@ -40,12 +40,12 @@ func SyncDefinitions(dir string, defs []Definition) error {
 	}()
 
 	seen := make(map[string]string, len(defs))
-	for _, def := range defs {
-		name := strings.TrimSpace(def.Name)
+	for i := range defs {
+		name := strings.TrimSpace(defs[i].Name)
 		if name == "" {
 			return fmt.Errorf("agent name is required")
 		}
-		def.Name = name
+		defs[i].Name = name
 		fileName := safeAgentFileName.ReplaceAllString(name, "_")
 		if fileName == "" || fileName == "." || fileName == ".." {
 			return fmt.Errorf("invalid agent name %q", name)
@@ -54,6 +54,7 @@ func SyncDefinitions(dir string, defs []Definition) error {
 			return fmt.Errorf("agent names %q and %q resolve to the same file", prior, name)
 		}
 		seen[fileName] = name
+		def := defs[i]
 		data, err := json.MarshalIndent(def, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal %s: %w", name, err)

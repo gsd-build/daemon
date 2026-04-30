@@ -63,12 +63,15 @@ func TestSyncDefinitionsRejectsFileNameCollisions(t *testing.T) {
 	if err == nil {
 		t.Fatal("SyncDefinitions returned nil, want collision error")
 	}
+	if !contains(err.Error(), "resolve to the same file") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestBuildPromptListsAvailableAgents(t *testing.T) {
 	prompt := BuildPrompt([]Definition{
-		{Name: "explorer", Description: "Maps the code path.", Model: "claude-haiku-4-5-20251001", Tools: []string{"read"}},
 		{Name: "reviewer", Description: "Reviews correctness.", Model: "claude-sonnet-4-6", Tools: []string{"read", "search"}},
+		{Name: "explorer", Description: "Maps the code path.", Model: "claude-haiku-4-5-20251001", Tools: []string{"read"}},
 	})
 
 	for _, want := range []string{
@@ -81,6 +84,9 @@ func TestBuildPromptListsAvailableAgents(t *testing.T) {
 		if !contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	if index(prompt, "explorer") > index(prompt, "reviewer") {
+		t.Fatalf("prompt order is not deterministic:\n%s", prompt)
 	}
 }
 

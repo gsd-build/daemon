@@ -1,6 +1,7 @@
 package sockapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -65,8 +66,8 @@ type CreateSubagentChildResponse struct {
 }
 
 type ForwardSubagentEventRequest struct {
-	ChildSessionID string `json:"childSessionId"`
-	Event          string `json:"event"`
+	ChildSessionID string          `json:"childSessionId"`
+	Raw            json.RawMessage `json:"event"`
 }
 
 type RegisterSubagentProcessRequest struct {
