@@ -144,7 +144,9 @@ printf '%s\n' '{"type":"control_result","ok":true}'
 		t.Fatalf("read env capture: %v", err)
 	}
 	got := string(data)
-	if strings.Contains(got, "gsd_plan_parent") || strings.Contains(got, "https://app.test") {
+	if strings.Contains(got, "gsd_plan_parent") ||
+		strings.Contains(got, "https://app.test") ||
+		strings.Contains(got, "2026-04-29T12:00:00Z") {
 		t.Fatalf("plan capability leaked into control env: %s", got)
 	}
 }

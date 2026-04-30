@@ -160,7 +160,7 @@ func (r *planRuntimeReporter) Flush(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	entries := r.snapshot(planEvidenceMaxFlushPosts)
+	entries := r.flushCandidates(planEvidenceMaxFlushPosts)
 	for _, entry := range entries {
 		if err := r.postJSONWithRetry(ctx, "/api/agent-plan/evidence", entry); err != nil {
 			slog.Warn("plan evidence post failed",
@@ -169,7 +169,9 @@ func (r *planRuntimeReporter) Flush(ctx context.Context) {
 				"kind", entry.Kind,
 				"err", err,
 			)
+			continue
 		}
+		r.removeEntry(entry.ID)
 	}
 }
 
@@ -201,6 +203,50 @@ func (r *planRuntimeReporter) snapshot(limit int) []planEvidencePayload {
 	out := make([]planEvidencePayload, n)
 	copy(out, r.entries[:n])
 	return out
+}
+
+func (r *planRuntimeReporter) flushCandidates(limit int) []planEvidencePayload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]planEvidencePayload, 0, minPositive(limit, len(r.entries)))
+	for _, entry := range r.entries {
+		if entry.Status == "running" {
+			continue
+		}
+		out = append(out, entry)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (r *planRuntimeReporter) removeEntry(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, entry := range r.entries {
+		if entry.ID != id {
+			continue
+		}
+		r.entries = append(r.entries[:i], r.entries[i+1:]...)
+		for key, started := range r.toolStarts {
+			switch {
+			case started.index == i && started.evidenceID == id:
+				delete(r.toolStarts, key)
+			case started.index > i:
+				started.index--
+				r.toolStarts[key] = started
+			}
+		}
+		return
+	}
+}
+
+func minPositive(a int, b int) int {
+	if a > 0 && a < b {
+		return a
+	}
+	return b
 }
 
 func (r *planRuntimeReporter) postJSONWithRetry(ctx context.Context, path string, payload any) error {

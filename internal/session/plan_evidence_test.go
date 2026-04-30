@@ -58,7 +58,6 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	reporter.Flush(context.Background())
 
 	mu.Lock()
-	defer mu.Unlock()
 	if len(payloads) != planEvidenceMaxFlushPosts {
 		t.Fatalf("posted evidence count = %d, want %d", len(payloads), planEvidenceMaxFlushPosts)
 	}
@@ -81,6 +80,21 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	if !seenToolCall || !seenTest {
 		t.Fatalf("posted kinds missing tool_call=%v test=%v", seenToolCall, seenTest)
 	}
+	firstFlushIDs := make(map[string]bool, len(payloads))
+	for _, payload := range payloads {
+		firstFlushIDs[payload.ID] = true
+	}
+	mu.Unlock()
+
+	reporter.Flush(context.Background())
+
+	mu.Lock()
+	for _, payload := range payloads[planEvidenceMaxFlushPosts:] {
+		if firstFlushIDs[payload.ID] {
+			t.Fatalf("evidence %s was posted more than once", payload.ID)
+		}
+	}
+	mu.Unlock()
 }
 
 func TestPlanRuntimeReporterRecordsFileChanges(t *testing.T) {
@@ -186,8 +200,9 @@ func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
 
 	relay := newFakeRelay()
 	actor, err := NewActor(testPiOptions(t, Options{
-		SessionID: "sess-plan-revoke",
-		Relay:     relay,
+		SessionID:    "sess-plan-revoke",
+		Relay:        relay,
+		PiBinaryPath: writePlanEvidenceFakePi(t),
 	}))
 	if err != nil {
 		t.Fatalf("new actor: %v", err)
