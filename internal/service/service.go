@@ -61,11 +61,6 @@ func PrevBinaryPath() string {
 	return filepath.Join(baseDir(), "bin", "gsd-cloud.prev")
 }
 
-// ConfigPath returns ~/.gsd-cloud/config.json.
-func ConfigPath() string {
-	return filepath.Join(baseDir(), "config.json")
-}
-
 // LogPath returns ~/.gsd-cloud/logs/daemon.log.
 func LogPath() string {
 	return filepath.Join(baseDir(), "logs", "daemon.log")
