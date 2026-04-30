@@ -273,6 +273,7 @@ function summarizeFakeCodexStats(contents) {
     initializes: count("initialize"),
     threadStarts: count("threadStart"),
     turnStarts: count("turnStart"),
+    threadStartsDetails: records.filter((record) => record.event === "threadStart"),
     threadIds: [...new Set(records.filter((record) => record.event === "threadStart").map((record) => record.threadId))],
   };
 }
@@ -309,7 +310,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (message.method === "thread/start") {
-    record("threadStart", { threadId });
+    record("threadStart", {
+      threadId,
+      sandbox: message.params.sandbox,
+      approvalPolicy: message.params.approvalPolicy,
+    });
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
@@ -366,6 +371,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(summary.initializes, 1);
     assert.equal(summary.threadStarts, 1);
     assert.equal(summary.turnStarts, 2);
+    assert.equal(summary.threadStartsDetails[0]?.sandbox, "danger-full-access");
+    assert.equal(summary.threadStartsDetails[0]?.approvalPolicy, "never");
     assert.deepEqual(summary.threadIds, ["thread_fake_warm"]);
   } finally {
     if (previousPath === undefined) delete process.env.PATH;
