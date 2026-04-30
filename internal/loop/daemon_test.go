@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/creack/pty"
+	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/pi"
@@ -26,6 +29,39 @@ import (
 	"github.com/gsd-build/daemon/internal/terminal"
 	protocol "github.com/gsd-build/protocol-go"
 )
+
+func requireLoopTestPTY(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-lc", "printf pty-probe; sleep 0.01")
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
+	if err != nil {
+		if isLoopTestPTYUnavailable(err) {
+			t.Skipf("PTY allocation is unavailable on this runner: %v", err)
+		}
+		t.Fatalf("probe PTY: %v", err)
+	}
+	_ = ptmx.Close()
+	if err := cmd.Wait(); err != nil && !isLoopTestPTYUnavailable(err) && !strings.Contains(strings.ToLower(err.Error()), "hangup") {
+		t.Fatalf("probe PTY wait: %v", err)
+	}
+}
+
+func isLoopTestPTYUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "operation not permitted") ||
+		strings.Contains(text, "permission denied") ||
+		strings.Contains(text, "inappropriate ioctl")
+}
+
+func skipIfLoopPTYStartUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if isLoopTestPTYUnavailable(err) {
+		t.Skipf("PTY start is unavailable on this runner: %v", err)
+	}
+}
 
 func TestRelayURLIncludesMachineIDOnly(t *testing.T) {
 	cfg := &config.Config{
@@ -638,6 +674,125 @@ func TestHandleTerminalMessagesOpenInputAndExit(t *testing.T) {
 	}
 }
 
+func TestHandleAgentTerminalAttachSendsSnapshot(t *testing.T) {
+	requireLoopTestPTY(t)
+	t.Setenv("SHELL", "/bin/sh")
+	client := relayClientStub(false)
+	manager := newLoopAgentTerminalManager(client)
+	defer manager.CloseAll(context.Background(), terminal.ReasonDaemonShutdown)
+	d := &Daemon{agentTerminalManager: manager}
+
+	started, err := manager.Start(context.Background(), agentterminal.StartRequest{
+		Command:   "printf 'agent-snapshot-ok\\n'; sleep 5",
+		CWD:       t.TempDir(),
+		SessionID: "sess-agent",
+		ChannelID: "chan-agent",
+		TaskID:    "task-agent",
+	})
+	if err != nil {
+		skipIfLoopPTYStartUnavailable(t, err)
+		t.Fatalf("start agent terminal: %v", err)
+	}
+	drainQueuedUntil(t, client, func(env *protocol.Envelope) bool {
+		output, ok := env.Payload.(*protocol.TerminalOutput)
+		if !ok || output.TerminalID != started.TerminalID {
+			return false
+		}
+		data, _ := base64.StdEncoding.DecodeString(output.DataBase64)
+		return strings.Contains(string(data), "agent-snapshot-ok")
+	})
+
+	if err := d.handleMessage(&protocol.Envelope{Payload: &protocol.AgentTerminalAttach{
+		Type:       protocol.MsgTypeAgentTerminalAttach,
+		TerminalID: started.TerminalID,
+		ChannelID:  "chan-agent",
+	}}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	drainQueuedUntil(t, client, func(env *protocol.Envelope) bool {
+		snapshot, ok := env.Payload.(*protocol.TerminalSnapshot)
+		if !ok || snapshot.TerminalID != started.TerminalID {
+			return false
+		}
+		data, _ := base64.StdEncoding.DecodeString(snapshot.DataBase64)
+		return strings.Contains(string(data), "agent-snapshot-ok")
+	})
+}
+
+func TestHandleTerminalInputRoutesAgentTerminal(t *testing.T) {
+	requireLoopTestPTY(t)
+	t.Setenv("SHELL", "/bin/sh")
+	client := relayClientStub(false)
+	manager := newLoopAgentTerminalManager(client)
+	defer manager.CloseAll(context.Background(), terminal.ReasonDaemonShutdown)
+	d := &Daemon{
+		agentTerminalManager: manager,
+		terminalManager:      terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
+	}
+
+	started, err := manager.Start(context.Background(), agentterminal.StartRequest{
+		Command:   "cat",
+		CWD:       t.TempDir(),
+		SessionID: "sess-agent",
+		ChannelID: "chan-agent",
+		TaskID:    "task-agent",
+	})
+	if err != nil {
+		skipIfLoopPTYStartUnavailable(t, err)
+		t.Fatalf("start agent terminal: %v", err)
+	}
+	input := base64.StdEncoding.EncodeToString([]byte("agent-input-route\n"))
+	if err := d.handleMessage(&protocol.Envelope{Payload: &protocol.TerminalInput{
+		Type:       protocol.MsgTypeTerminalInput,
+		TerminalID: started.TerminalID,
+		ChannelID:  "chan-agent",
+		DataBase64: input,
+	}}); err != nil {
+		t.Fatalf("terminal input: %v", err)
+	}
+	drainQueuedUntil(t, client, func(env *protocol.Envelope) bool {
+		output, ok := env.Payload.(*protocol.TerminalOutput)
+		if !ok || output.TerminalID != started.TerminalID {
+			return false
+		}
+		data, _ := base64.StdEncoding.DecodeString(output.DataBase64)
+		return strings.Contains(string(data), "agent-input-route")
+	})
+}
+
+func TestGracefulShutdownClosesAgentTerminalJobs(t *testing.T) {
+	requireLoopTestPTY(t)
+	t.Setenv("SHELL", "/bin/sh")
+	client := relayClientStub(false)
+	manager := newLoopAgentTerminalManager(client)
+	d := &Daemon{
+		cfg:                  &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
+		version:              "test",
+		manager:              &mockManager{},
+		client:               client,
+		agentTerminalManager: manager,
+	}
+	if _, err := manager.Start(context.Background(), agentterminal.StartRequest{
+		Command:   "sleep 5",
+		CWD:       t.TempDir(),
+		SessionID: "sess-agent",
+		ChannelID: "chan-agent",
+		TaskID:    "task-agent",
+	}); err != nil {
+		skipIfLoopPTYStartUnavailable(t, err)
+		t.Fatalf("start agent terminal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.gracefulShutdown(ctx)
+
+	drainQueuedUntil(t, client, func(env *protocol.Envelope) bool {
+		exit, ok := env.Payload.(*protocol.TerminalExit)
+		return ok && exit.Reason == terminal.ReasonDaemonShutdown
+	})
+}
+
 func TestCheckAndRefreshTokenUpdatesLiveClients(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -825,11 +980,35 @@ func newTestDaemonWithPreview(t *testing.T) (*Daemon, *relay.Client) {
 	return d, client
 }
 
+func newLoopAgentTerminalManager(client *relay.Client) *agentterminal.Manager {
+	limits := agentterminal.DefaultLimits()
+	limits.DefaultReadyTimeout = time.Second
+	limits.MaxWaitTimeout = time.Second
+	limits.TerminationGracePeriod = 50 * time.Millisecond
+	return agentterminal.NewManager(agentTerminalRelaySender{client: client}, limits)
+}
+
 func drainQueuedMessage(t *testing.T, client *relay.Client) (*protocol.Envelope, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return client.DrainQueuedForTest(ctx)
+}
+
+func drainQueuedUntil(t *testing.T, client *relay.Client, match func(*protocol.Envelope) bool) *protocol.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		env, err := drainQueuedMessage(t, client)
+		if err != nil {
+			t.Fatalf("drain queued message: %v", err)
+		}
+		if match(env) {
+			return env
+		}
+	}
+	t.Fatal("matching relay message was not queued")
+	return nil
 }
 
 type loopFakeRelay struct {

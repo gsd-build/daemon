@@ -44,6 +44,19 @@ type piToolEnd struct {
 	IsError bool `json:"isError"`
 }
 
+type piToolUpdate struct {
+	Type          string `json:"type"`
+	ToolCallID    string `json:"toolCallId"`
+	ToolName      string `json:"toolName"`
+	PartialResult struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Details map[string]any `json:"details"`
+	} `json:"partialResult"`
+}
+
 type piMessageEnd struct {
 	Type    string `json:"type"`
 	Message struct {
@@ -193,6 +206,11 @@ func translatePiEvent(piRaw json.RawMessage, state *translatorState) []rawEvent 
 		}
 		return []rawEvent{makeToolResultUser(state, te.ToolCallID, content, te.IsError)}
 
+	case "tool_execution_update":
+		var tu piToolUpdate
+		_ = json.Unmarshal(piRaw, &tu)
+		return []rawEvent{makeToolExecutionUpdate(state, tu)}
+
 	case "agent_end":
 		// Result event is synthesized separately by streamPiEvents (it needs
 		// the same agentEnd raw bytes for usage rollup). Translator no-op.
@@ -201,6 +219,27 @@ func translatePiEvent(piRaw json.RawMessage, state *translatorState) []rawEvent 
 	default:
 		return nil
 	}
+}
+
+func makeToolExecutionUpdate(state *translatorState, update piToolUpdate) rawEvent {
+	var text string
+	for _, c := range update.PartialResult.Content {
+		if c.Type == "text" {
+			text += c.Text
+		}
+	}
+	out, _ := json.Marshal(map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"type":         "tool_execution_update",
+			"tool_call_id": update.ToolCallID,
+			"tool_name":    update.ToolName,
+			"text":         text,
+			"details":      update.PartialResult.Details,
+		},
+		"session_id": state.sessionID,
+	})
+	return rawEvent{Type: "stream_event", Raw: out}
 }
 
 // translatorState carries cross-event data the translator needs.

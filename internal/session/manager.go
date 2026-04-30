@@ -8,10 +8,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/sockapi"
 )
+
+type AgentToolController interface {
+	StartTask(context.Context, agentterminal.TaskScope) (agentterminal.TaskControl, error)
+	StopTask(taskID string)
+}
 
 // ManagerOptions configures a new Manager.
 type ManagerOptions struct {
@@ -23,6 +29,7 @@ type ManagerOptions struct {
 	Uploader         ImageUploader // nil = image upload disabled
 	DaemonSocketPath string
 	AgentDir         string
+	AgentTools       AgentToolController
 }
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -38,6 +45,7 @@ type Manager struct {
 	uploader         ImageUploader
 	daemonSocketPath string
 	agentDir         string
+	agentTools       AgentToolController
 }
 
 // NewManager constructs a Manager.
@@ -52,6 +60,7 @@ func NewManager(opts ManagerOptions) *Manager {
 		uploader:         opts.Uploader,
 		daemonSocketPath: opts.DaemonSocketPath,
 		agentDir:         opts.AgentDir,
+		agentTools:       opts.AgentTools,
 	}
 }
 
@@ -150,6 +159,9 @@ func (m *Manager) Spawn(
 	}
 	if opts.AgentDir == "" {
 		opts.AgentDir = m.agentDir
+	}
+	if opts.AgentTools == nil {
+		opts.AgentTools = m.agentTools
 	}
 	warmWorkersEnabled := m.cfg.EffectiveWarmWorkersEnabled()
 	opts.WarmPiWorkers = warmWorkersEnabled

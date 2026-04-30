@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/agents"
+	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/claude"
 	daemonfs "github.com/gsd-build/daemon/internal/fs"
@@ -59,6 +60,8 @@ type Options struct {
 	BrowserID         string
 	RecordTouchedFile func(channelID string, cwd string, path string)
 	OnTaskIdle        func()
+	ProjectID         string
+	AgentTools        AgentToolController
 }
 
 // Actor drives a single agent session using spawn-per-task execution.
@@ -744,6 +747,8 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		Model:              model,
 		ResumeSession:      sessionFile,
 		TaskID:             tc.TaskID,
+		SessionID:          a.opts.SessionID,
+		ChannelID:          tc.ChannelID,
 		Prompt:             prompt,
 		CustomInstructions: tc.CustomInstructions,
 		ExtensionPath:      a.opts.PiExtensionPath,
@@ -760,9 +765,25 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		AgentDir:           a.opts.AgentDir,
 		SubagentsPrompt:    subagentsPrompt,
 	}
+	if a.opts.AgentTools != nil {
+		control, err := a.opts.AgentTools.StartTask(taskCtx, agentterminal.TaskScope{
+			SessionID:  a.opts.SessionID,
+			ChannelID:  tc.ChannelID,
+			TaskID:     tc.TaskID,
+			ProjectID:  a.opts.ProjectID,
+			MachineID:  a.opts.MachineID,
+			ProjectCWD: a.opts.CWD,
+		})
+		if err != nil {
+			return fmt.Errorf("start agent tool control: %w", err)
+		}
+		defer a.opts.AgentTools.StopTask(tc.TaskID)
+		opts.AgentToolsSocket = control.SocketPath
+		opts.AgentToolsToken = control.Token
+	}
 
 	coordinator := &structuredQuestionCoordinator{}
-	if a.useWarmPiWorker {
+	if a.useWarmPiWorker && a.opts.AgentTools == nil {
 		return a.runPiWorker(actorCtx, taskCtx, tc, prompt, opts, coordinator)
 	}
 
