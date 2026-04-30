@@ -53,4 +53,37 @@ assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(false), false)
 assert.throws(() => schemaToZod({ enum: [1, "two", false, null] }).parse("1"), z.ZodError);
 assert.equal(schemaToZod({ const: "plan_commit" }).parse("plan_commit"), "plan_commit");
 assert.throws(() => schemaToZod({ const: "plan_commit" }).parse("plan_create"), z.ZodError);
+assert.throws(() => schemaToZod({ type: "integer", minimum: 1, maximum: 900 }).parse(1800), z.ZodError);
+assert.throws(() => schemaToZod({ type: "string", format: "uuid" }).parse("main.py:23"), z.ZodError);
+
+const operationSchema = schemaToZod({
+  anyOf: [
+    {
+      type: "object",
+      properties: {
+        type: { const: "start_next_item" },
+        leaseTtlSeconds: { type: "integer", minimum: 1, maximum: 900 },
+      },
+      required: ["type"],
+    },
+    {
+      type: "object",
+      properties: {
+        type: { const: "create_plan" },
+        title: { type: "string" },
+        items: { type: "array", items: { type: "object" } },
+      },
+      required: ["type", "title", "items"],
+    },
+  ],
+});
+const operationResult = operationSchema.safeParse({
+  type: "start_next_item",
+  leaseTtlSeconds: 1800,
+});
+assert.equal(operationResult.success, false);
+assert.deepEqual(
+  operationResult.error.issues.map((issue) => issue.path.join(".")),
+  ["leaseTtlSeconds"],
+);
 console.log("schema-to-zod tests passed");

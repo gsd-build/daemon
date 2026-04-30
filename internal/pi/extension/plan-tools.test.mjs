@@ -105,7 +105,82 @@ test("plan_commit rejects stringified arrays before network forwarding", async (
     assert.match(result.content[0].text, /invalid_arguments/);
     assert.equal(result.details.error.code, "invalid_arguments");
     assert.equal(result.details.error.retryable, false);
-    assert.equal(result.details.error.fieldErrors[0].path, "ops.0");
+    assert.equal(result.details.error.fieldErrors[0].path, "ops.0.subTasks");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("plan_commit reports selected operation field errors without union noise", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const commit = tools.find((tool) => tool.name === "plan_commit");
+  assert.ok(commit);
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ ok: true });
+  };
+  try {
+    const result = await commit.execute("toolu_commit", {
+      mutationId: "mut_bad_ttl",
+      ops: [{ type: "start_next_item", leaseTtlSeconds: 1800 }],
+    });
+
+    assert.equal(result.isError, true);
+    assert.equal(result.details.error.code, "invalid_arguments");
+    const paths = result.details.error.fieldErrors.map((error) => error.path);
+    assert.ok(paths.includes("ops.0.leaseTtlSeconds"));
+    assert.ok(!paths.includes("ops.0.title"));
+    assert.ok(!paths.includes("ops.0.items"));
+    assert.ok(!paths.includes("ops.0.itemId"));
+    assert.match(
+      result.details.error.fieldErrors.find((error) => error.path === "ops.0.leaseTtlSeconds").message,
+      /900|less than or equal/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("plan_commit rejects human-readable evidence refs before network forwarding", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const commit = tools.find((tool) => tool.name === "plan_commit");
+  assert.ok(commit);
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ ok: true });
+  };
+  try {
+    const result = await commit.execute("toolu_commit", {
+      mutationId: "mut_bad_evidence",
+      ops: [
+        {
+          type: "complete_item",
+          itemId: "22222222-2222-4222-8222-222222222222",
+          result: {
+            summary: "Done",
+            evidenceRefs: ["main.py:23"],
+          },
+        },
+      ],
+    });
+
+    assert.equal(result.isError, true);
+    assert.equal(result.details.error.code, "invalid_arguments");
+    assert.deepEqual(
+      result.details.error.fieldErrors.map((error) => error.path),
+      ["ops.0.result.evidenceRefs.0"],
+    );
+    assert.match(result.details.error.fieldErrors[0].message, /Evidence refs must be evidence record IDs/);
   } finally {
     globalThis.fetch = originalFetch;
   }

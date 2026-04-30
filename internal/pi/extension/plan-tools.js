@@ -47,6 +47,16 @@ const ExecutionCriterion = Type.Object({
   text: Type.String(),
 });
 
+const CriteriaMetRef = Type.String({
+  description: "Criterion ID or exact criterion text.",
+});
+
+const EvidenceRefId = Type.String({
+  format: "uuid",
+  description: "Evidence record ID returned by runtime evidence.",
+  errorMessage: "Evidence refs must be evidence record IDs",
+});
+
 const PlanCommitOperation = Type.Union([
   Type.Object({
     type: Type.Literal("create_plan"),
@@ -92,8 +102,8 @@ const PlanCommitOperation = Type.Union([
     result: Type.Object({
       summary: Type.String(),
       blockers: Type.Optional(Type.Array(Type.String())),
-      criteriaMet: Type.Optional(Type.Array(Type.String())),
-      evidenceRefs: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
+      criteriaMet: Type.Optional(Type.Array(CriteriaMetRef)),
+      evidenceRefs: Type.Optional(Type.Array(EvidenceRefId, { maxItems: 20 })),
     }),
   }),
   Type.Object({
@@ -102,7 +112,7 @@ const PlanCommitOperation = Type.Union([
     leaseId: Type.Optional(Type.String()),
     reason: Type.String(),
     nextAction: Type.Optional(Type.String()),
-    evidenceRefs: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
+    evidenceRefs: Type.Optional(Type.Array(EvidenceRefId, { maxItems: 20 })),
   }),
   Type.Object({
     type: Type.Literal("cancel_item"),
