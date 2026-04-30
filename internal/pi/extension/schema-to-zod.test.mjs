@@ -51,4 +51,6 @@ assert.throws(() => schemaToZod(schema).parse({ questions: [{ id: "", question: 
 assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(1), 1);
 assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(false), false);
 assert.throws(() => schemaToZod({ enum: [1, "two", false, null] }).parse("1"), z.ZodError);
+assert.equal(schemaToZod({ const: "plan_commit" }).parse("plan_commit"), "plan_commit");
+assert.throws(() => schemaToZod({ const: "plan_commit" }).parse("plan_create"), z.ZodError);
 console.log("schema-to-zod tests passed");

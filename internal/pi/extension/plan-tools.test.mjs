@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { compactProjectState, hasPlanCapability, registerPlanTools } from "./plan-tools.js";
+import { schemaToZod } from "./schema-to-zod.js";
 
 const planEnv = {
   GSD_PLAN_API_BASE_URL: "https://app.test/",
@@ -36,6 +37,7 @@ test("registerPlanTools registers project state and mutation tools", () => {
       "plan_cancel_item",
       "plan_check_criterion",
       "plan_check_sub_task",
+      "plan_commit",
       "plan_create",
       "plan_get_archived_plan",
       "plan_get_project_state",
@@ -49,6 +51,124 @@ test("registerPlanTools registers project state and mutation tools", () => {
       "plan_update_user_context",
     ].sort(),
   );
+  const names = tools.map((tool) => tool.name);
+  assert.ok(names.indexOf("plan_commit") < names.indexOf("plan_create"));
+});
+
+test("plan_commit validates multi-operation payloads", () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const commit = tools.find((tool) => tool.name === "plan_commit");
+  assert.ok(commit);
+
+  const parsed = schemaToZod(commit.parameters).parse({
+    mutationId: "mut_commit",
+    ops: [
+      { type: "start_next_item", leaseTtlSeconds: 120 },
+      {
+        type: "set_execution_contract",
+        itemId: "item-1",
+        subTasks: [{ text: "Implement" }],
+        agentCriteria: [{ text: "Tests pass" }],
+      },
+    ],
+  });
+
+  assert.equal(parsed.ops.length, 2);
+});
+
+test("plan_commit rejects stringified arrays before network forwarding", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const commit = tools.find((tool) => tool.name === "plan_commit");
+  assert.ok(commit);
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ ok: true });
+  };
+  try {
+    const result = await commit.execute("toolu_commit", {
+      mutationId: "mut_bad",
+      ops: [
+        {
+          type: "set_execution_contract",
+          itemId: "item-1",
+          subTasks: JSON.stringify([{ text: "Do not stringify" }]),
+          agentCriteria: [{ text: "Arrays stay arrays" }],
+        },
+      ],
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /invalid_arguments/);
+    assert.equal(result.details.error.code, "invalid_arguments");
+    assert.equal(result.details.error.retryable, false);
+    assert.equal(result.details.error.fieldErrors[0].path, "ops.0");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("plan_commit forwards runtime id and defaults response detail", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const commit = tools.find((tool) => tool.name === "plan_commit");
+  assert.ok(commit);
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ ok: true, commandId: "command-1" });
+  };
+  try {
+    const result = await commit.execute("toolu_commit", {
+      mutationId: "mut_commit",
+      ops: [{ type: "start_next_item" }],
+    });
+    assert.equal(result.isError, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls[0].url, "https://app.test/api/agent-plan/commit");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    mutationId: "mut_commit",
+    toolCallId: "toolu_commit",
+    ops: [{ type: "start_next_item" }],
+    responseDetail: "execution_packet",
+  });
+});
+
+test("plan_commit cloud errors complete as errored tool results", async () => {
+  const tools = [];
+  registerPlanTools({ registerTool: (tool) => tools.push(tool) }, planEnv);
+  const commit = tools.find((tool) => tool.name === "plan_commit");
+  assert.ok(commit);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: false,
+      error: { code: "lease_conflict", message: "Lease expired", retryable: true },
+    });
+  try {
+    const result = await commit.execute("toolu_commit", {
+      mutationId: "mut_commit",
+      ops: [{ type: "start_next_item" }],
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.details.error, {
+      code: "lease_conflict",
+      message: "Lease expired",
+      retryable: true,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("plan mutation tools call agent plan api with bearer token", async () => {

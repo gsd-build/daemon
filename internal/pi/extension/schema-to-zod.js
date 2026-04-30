@@ -30,6 +30,10 @@ export function schemaToZod(schema) {
     return z.union(values.map((value) => z.literal(value)));
   }
 
+  if (Object.hasOwn(schema, "const")) {
+    return z.literal(schema.const);
+  }
+
   switch (schema.type) {
     case "object":
       return objectToZod(schema);
