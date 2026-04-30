@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,16 +19,23 @@ import (
 func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	var mu sync.Mutex
 	var payloads []planEvidencePayload
+	handlerErrors := make(chan error, planEvidenceMaxFlushPosts*4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/agent-plan/evidence" {
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			reportPlanEvidenceHandlerError(handlerErrors, fmt.Errorf("unexpected path %s", r.URL.Path))
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer gsd_plan_test" {
-			t.Fatalf("authorization = %q", got)
+			reportPlanEvidenceHandlerError(handlerErrors, fmt.Errorf("authorization = %q", got))
+			http.Error(w, "bad authorization", http.StatusUnauthorized)
+			return
 		}
 		var payload planEvidencePayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode payload: %v", err)
+			reportPlanEvidenceHandlerError(handlerErrors, fmt.Errorf("decode payload: %w", err))
+			http.Error(w, "bad payload", http.StatusBadRequest)
+			return
 		}
 		mu.Lock()
 		payloads = append(payloads, payload)
@@ -54,16 +62,24 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 			ToolName:   "bash",
 		})
 	}
+	totalEntries := len(reporter.snapshot(0))
+	expectedSecondFlush := totalEntries - planEvidenceMaxFlushPosts
+	if expectedSecondFlush > planEvidenceMaxFlushPosts {
+		expectedSecondFlush = planEvidenceMaxFlushPosts
+	}
 
 	reporter.Flush(context.Background())
+	assertNoPlanEvidenceHandlerErrors(t, handlerErrors)
 
 	mu.Lock()
-	if len(payloads) != planEvidenceMaxFlushPosts {
-		t.Fatalf("posted evidence count = %d, want %d", len(payloads), planEvidenceMaxFlushPosts)
+	firstPayloads := append([]planEvidencePayload(nil), payloads...)
+	mu.Unlock()
+	if len(firstPayloads) != planEvidenceMaxFlushPosts {
+		t.Fatalf("posted evidence count = %d, want %d", len(firstPayloads), planEvidenceMaxFlushPosts)
 	}
 	seenToolCall := false
 	seenTest := false
-	for _, payload := range payloads {
+	for _, payload := range firstPayloads {
 		switch payload.Kind {
 		case "tool_call":
 			seenToolCall = true
@@ -80,21 +96,26 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	if !seenToolCall || !seenTest {
 		t.Fatalf("posted kinds missing tool_call=%v test=%v", seenToolCall, seenTest)
 	}
-	firstFlushIDs := make(map[string]bool, len(payloads))
-	for _, payload := range payloads {
+	firstFlushIDs := make(map[string]bool, len(firstPayloads))
+	for _, payload := range firstPayloads {
 		firstFlushIDs[payload.ID] = true
 	}
-	mu.Unlock()
 
 	reporter.Flush(context.Background())
+	assertNoPlanEvidenceHandlerErrors(t, handlerErrors)
 
 	mu.Lock()
-	for _, payload := range payloads[planEvidenceMaxFlushPosts:] {
+	allPayloads := append([]planEvidencePayload(nil), payloads...)
+	mu.Unlock()
+	secondPayloads := allPayloads[planEvidenceMaxFlushPosts:]
+	if len(secondPayloads) != expectedSecondFlush {
+		t.Fatalf("second flush posted %d entries, want %d", len(secondPayloads), expectedSecondFlush)
+	}
+	for _, payload := range secondPayloads {
 		if firstFlushIDs[payload.ID] {
 			t.Fatalf("evidence %s was posted more than once", payload.ID)
 		}
 	}
-	mu.Unlock()
 }
 
 func TestPlanRuntimeReporterRecordsFileChanges(t *testing.T) {
@@ -138,6 +159,7 @@ func TestActorPlanEvidencePostFailureDoesNotFailTask(t *testing.T) {
 	var countsMu sync.Mutex
 	var evidencePosts int
 	var revokePosts int
+	handlerErrors := make(chan error, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/agent-plan/evidence":
@@ -151,7 +173,8 @@ func TestActorPlanEvidencePostFailureDoesNotFailTask(t *testing.T) {
 			countsMu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			reportPlanEvidenceHandlerError(handlerErrors, fmt.Errorf("unexpected path %s", r.URL.Path))
+			http.Error(w, "unexpected path", http.StatusNotFound)
 		}
 	}))
 	defer server.Close()
@@ -184,6 +207,7 @@ func TestActorPlanEvidencePostFailureDoesNotFailTask(t *testing.T) {
 	if !fakeRelayHasTaskComplete(relay, "33333333-3333-4333-8333-333333333333") {
 		t.Fatalf("expected task complete frame")
 	}
+	assertNoPlanEvidenceHandlerErrors(t, handlerErrors)
 	countsMu.Lock()
 	gotEvidencePosts := evidencePosts
 	gotRevokePosts := revokePosts
@@ -199,12 +223,15 @@ func TestActorPlanEvidencePostFailureDoesNotFailTask(t *testing.T) {
 func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
 	var pathsMu sync.Mutex
 	var paths []string
+	handlerErrors := make(chan error, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pathsMu.Lock()
 		paths = append(paths, r.URL.Path)
 		pathsMu.Unlock()
 		if got := r.Header.Get("Authorization"); got != "Bearer gsd_plan_revoke" {
-			t.Fatalf("authorization = %q", got)
+			reportPlanEvidenceHandlerError(handlerErrors, fmt.Errorf("authorization = %q", got))
+			http.Error(w, "bad authorization", http.StatusUnauthorized)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -238,6 +265,7 @@ func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
 	if !fakeRelayHasTaskComplete(relay, "44444444-4444-4444-8444-444444444444") {
 		t.Fatalf("expected task complete frame")
 	}
+	assertNoPlanEvidenceHandlerErrors(t, handlerErrors)
 
 	pathsMu.Lock()
 	gotPaths := append([]string(nil), paths...)
@@ -250,6 +278,22 @@ func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
 	}
 	if revokeCount != 1 {
 		t.Fatalf("revoke count = %d, paths=%v", revokeCount, gotPaths)
+	}
+}
+
+func reportPlanEvidenceHandlerError(errs chan<- error, err error) {
+	select {
+	case errs <- err:
+	default:
+	}
+}
+
+func assertNoPlanEvidenceHandlerErrors(t *testing.T, errs <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errs:
+		t.Fatalf("plan evidence handler error: %v", err)
+	default:
 	}
 }
 
