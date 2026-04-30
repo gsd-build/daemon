@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { schemaToZod } from "./schema-to-zod.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,6 +37,144 @@ const PlanItemResult = Type.Object({
   blockers: Type.Optional(Type.Array(Type.String())),
 });
 
+const ExecutionSubTask = Type.Object({
+  id: Type.Optional(Type.String()),
+  text: Type.String(),
+});
+
+const ExecutionCriterion = Type.Object({
+  id: Type.Optional(Type.String()),
+  text: Type.String(),
+});
+
+const PlanCommitOperation = Type.Union([
+  Type.Object({
+    type: Type.Literal("create_plan"),
+    title: Type.String(),
+    items: Type.Array(
+      Type.Object({
+        title: Type.String(),
+        description: Type.Optional(Type.String()),
+        dependsOn: Type.Optional(Type.Array(Type.String())),
+      }),
+      { minItems: 1, maxItems: 100 },
+    ),
+    explicitSwitch: Type.Optional(Type.Boolean()),
+  }),
+  Type.Object({
+    type: Type.Literal("start_next_item"),
+    selector: Type.Optional(
+      Type.Object({
+        titleIncludes: Type.Optional(Type.String()),
+        itemId: Type.Optional(Type.String()),
+      }),
+    ),
+    leaseTtlSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 900 })),
+  }),
+  Type.Object({
+    type: Type.Literal("start_item"),
+    itemId: Type.String(),
+    leaseTtlSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 900 })),
+    allowUnmetDependencies: Type.Optional(Type.Boolean()),
+  }),
+  Type.Object({
+    type: Type.Literal("set_execution_contract"),
+    itemId: Type.String(),
+    leaseId: Type.Optional(Type.String()),
+    subTasks: Type.Array(ExecutionSubTask, { maxItems: 20 }),
+    agentCriteria: Type.Array(ExecutionCriterion, { maxItems: 10 }),
+    verificationPlan: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
+  }),
+  Type.Object({
+    type: Type.Literal("complete_item"),
+    itemId: Type.String(),
+    leaseId: Type.Optional(Type.String()),
+    result: Type.Object({
+      summary: Type.String(),
+      blockers: Type.Optional(Type.Array(Type.String())),
+      criteriaMet: Type.Optional(Type.Array(Type.String())),
+      evidenceRefs: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
+    }),
+  }),
+  Type.Object({
+    type: Type.Literal("block_item"),
+    itemId: Type.String(),
+    leaseId: Type.Optional(Type.String()),
+    reason: Type.String(),
+    nextAction: Type.Optional(Type.String()),
+    evidenceRefs: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
+  }),
+  Type.Object({
+    type: Type.Literal("cancel_item"),
+    itemId: Type.String(),
+    reason: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    type: Type.Literal("add_items"),
+    afterItemId: Type.Optional(Type.String()),
+    items: Type.Array(
+      Type.Object({
+        title: Type.String(),
+        description: Type.Optional(Type.String()),
+        dependsOn: Type.Optional(Type.Array(Type.String())),
+      }),
+      { minItems: 1, maxItems: 100 },
+    ),
+  }),
+  Type.Object({
+    type: Type.Literal("reorder_items"),
+    orderedItemIds: Type.Array(Type.String(), { minItems: 1, maxItems: 100 }),
+  }),
+  Type.Object({
+    type: Type.Literal("update_notes"),
+    target: Type.Union([
+      Type.Object({ type: Type.Literal("plan") }),
+      Type.Object({
+        type: Type.Literal("item"),
+        itemId: Type.String(),
+        leaseId: Type.Optional(Type.String()),
+      }),
+    ]),
+    agentNotes: Type.String(),
+  }),
+  Type.Object({
+    type: Type.Literal("update_dependencies"),
+    itemId: Type.String(),
+    dependsOn: Type.Array(Type.String(), { maxItems: 10 }),
+  }),
+  Type.Object({
+    type: Type.Literal("archive_plan"),
+    allowIncomplete: Type.Optional(Type.Boolean()),
+    reason: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    type: Type.Literal("pause_plan"),
+    note: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    type: Type.Literal("resume_plan"),
+    planId: Type.String(),
+    explicitSwitch: Type.Optional(Type.Boolean()),
+  }),
+]);
+
+const PlanCommitParams = Type.Object({
+  planId: Type.Optional(Type.String()),
+  mutationId: Type.String(),
+  toolCallId: Type.Optional(Type.String()),
+  reason: Type.Optional(Type.String()),
+  ops: Type.Array(PlanCommitOperation, { minItems: 1, maxItems: 20 }),
+  responseDetail: Type.Optional(
+    Type.Union([
+      Type.Literal("execution_packet"),
+      Type.Literal("compact_snapshot"),
+      Type.Literal("full_snapshot"),
+    ]),
+  ),
+});
+
+const planCommitValidator = schemaToZod(PlanCommitParams);
+
 export function hasPlanCapability(env = process.env) {
   return Boolean(
     env.GSD_PLAN_API_BASE_URL &&
@@ -66,9 +205,48 @@ async function requestPlan(path, { method = "GET", body, signal } = {}, env = pr
   const { res, json } = await fetchPlanJson(path, { method, body, signal }, env);
   return {
     content: [{ type: "text", text: JSON.stringify(json) }],
-    isError: !res.ok || Boolean(json.error),
+    isError: !res.ok || Boolean(json.error) || json?.ok === false,
     details: json,
   };
+}
+
+function completedPlanError(error) {
+  const body = { ok: false, error };
+  return {
+    content: [{ type: "text", text: JSON.stringify(body) }],
+    isError: true,
+    details: body,
+  };
+}
+
+function zodIssuesToFieldErrors(issues) {
+  return issues.map((issue) => ({
+    path: issue.path.map(String).join("."),
+    expected: issue.code,
+    received: "invalid",
+    message: issue.message,
+  }));
+}
+
+function normalizePlanCommitParams(toolCallId, params) {
+  const body = {
+    ...params,
+    toolCallId: params?.toolCallId ?? toolCallId,
+    responseDetail: params?.responseDetail ?? "execution_packet",
+  };
+  const parsed = planCommitValidator.safeParse(body);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      result: completedPlanError({
+        code: "invalid_arguments",
+        message: "Invalid plan_commit arguments",
+        retryable: false,
+        fieldErrors: zodIssuesToFieldErrors(parsed.error.issues),
+      }),
+    };
+  }
+  return { ok: true, body: parsed.data };
 }
 
 function pickDefined(fields) {
@@ -253,7 +431,8 @@ export function registerPlanTools(pi, env = process.env) {
       detail: Type.Optional(Type.Union([Type.Literal("compact"), Type.Literal("full")])),
     }),
     execute: async (_id, params, signal) => {
-      const result = await requestPlan("/project-state", { signal }, env);
+      const detail = params?.detail === "full" ? "full" : "compact";
+      const result = await requestPlan(`/project-state?detail=${detail}`, { signal }, env);
       if (params?.detail === "full" || result.isError) return result;
       const compact = compactProjectState(result.details);
       return {
@@ -276,9 +455,21 @@ export function registerPlanTools(pi, env = process.env) {
   });
 
   pi.registerTool({
+    name: "plan_commit",
+    label: "Commit project plan operation",
+    description: "Mutate project plans through the command runtime.",
+    parameters: PlanCommitParams,
+    execute: (_id, params, signal) => {
+      const normalized = normalizePlanCommitParams(_id, params);
+      if (!normalized.ok) return normalized.result;
+      return requestPlan("/commit", { method: "POST", body: normalized.body, signal }, env);
+    },
+  });
+
+  pi.registerTool({
     name: "plan_create",
     label: "Create project plan",
-    description: "Create a new active project plan with ordered items.",
+    description: "Compatibility: create a new active project plan with ordered items.",
     parameters: Type.Object({
       title: Type.String(),
       items: Type.Array(
@@ -297,7 +488,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_rename",
     label: "Rename project plan",
-    description: "Rename an existing project plan.",
+    description: "Compatibility: rename an existing project plan.",
     parameters: Type.Object({
       planId: Type.String(),
       title: Type.String(),
@@ -314,7 +505,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_pause",
     label: "Pause project plan",
-    description: "Pause an active project plan.",
+    description: "Compatibility: pause an active project plan.",
     parameters: Type.Object({
       planId: Type.String(),
       note: Type.Optional(Type.String()),
@@ -331,7 +522,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_resume",
     label: "Resume project plan",
-    description: "Resume a paused project plan.",
+    description: "Compatibility: resume a paused project plan.",
     parameters: Type.Object({
       planId: Type.String(),
       ...MutationMetaParams,
@@ -347,7 +538,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_archive",
     label: "Archive project plan",
-    description: "Archive a project plan.",
+    description: "Compatibility: archive a project plan.",
     parameters: Type.Object({
       planId: Type.String(),
       ...MutationMetaParams,
@@ -363,7 +554,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_add_item",
     label: "Add project plan item",
-    description: "Add a new item to a project plan.",
+    description: "Compatibility: add a new item to a project plan.",
     parameters: Type.Object({
       planId: Type.String(),
       title: Type.String(),
@@ -383,7 +574,7 @@ export function registerPlanTools(pi, env = process.env) {
     name: "plan_update_item",
     label: "Update project plan item",
     description:
-      "Update a project plan item title, description, status, notes, dependencies, or completion result.",
+      "Compatibility: update a project plan item title, description, status, notes, dependencies, or completion result.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -406,7 +597,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_update_sub_tasks",
     label: "Update project plan sub-tasks",
-    description: "Replace all agent-owned execution sub-tasks for a project plan item.",
+    description: "Compatibility: replace all agent-owned execution sub-tasks for a project plan item.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -424,7 +615,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_update_agent_criteria",
     label: "Update project plan agent criteria",
-    description: "Replace all agent-owned acceptance criteria for a project plan item.",
+    description: "Compatibility: replace all agent-owned acceptance criteria for a project plan item.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -442,7 +633,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_check_sub_task",
     label: "Check project plan sub-task",
-    description: "Mark one project plan sub-task done or open.",
+    description: "Compatibility: mark one project plan sub-task done or open.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -461,7 +652,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_check_criterion",
     label: "Check project plan criterion",
-    description: "Mark one agent-owned project plan criterion met or open.",
+    description: "Compatibility: mark one agent-owned project plan criterion met or open.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -480,7 +671,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_cancel_item",
     label: "Cancel project plan item",
-    description: "Cancel a project plan item.",
+    description: "Compatibility: cancel a project plan item.",
     parameters: Type.Object({
       planId: Type.String(),
       itemId: Type.String(),
@@ -498,7 +689,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_reorder_items",
     label: "Reorder project plan items",
-    description: "Replace the item order for a project plan.",
+    description: "Compatibility: replace the item order for a project plan.",
     parameters: Type.Object({
       planId: Type.String(),
       orderedItemIds: Type.Array(Type.String()),
@@ -515,7 +706,7 @@ export function registerPlanTools(pi, env = process.env) {
   pi.registerTool({
     name: "plan_update_user_context",
     label: "Update project plan user context",
-    description: "Update human-provided context for a plan or item.",
+    description: "Compatibility: update human-provided context for a plan or item.",
     parameters: Type.Object({
       planId: Type.String(),
       target: Type.Union([
