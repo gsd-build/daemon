@@ -20,11 +20,13 @@ type ManagerOptions struct {
 }
 
 type sessionState struct {
-	openRequest OpenRequest
-	browserID   string
-	owner       ControlOwner
-	expiresAt   time.Time
-	frameCancel context.CancelFunc
+	openRequest    OpenRequest
+	browserID      string
+	owner          ControlOwner
+	controlVersion int64
+	expiresAt      time.Time
+	frameCancel    context.CancelFunc
+	lastFrameSeq   int64
 }
 
 type Manager struct {
@@ -73,6 +75,9 @@ func (m *Manager) Open(ctx context.Context, msg *protocol.BrowserSessionOpen) er
 		MachineID:  msg.MachineID,
 		IdentityID: msg.IdentityID,
 		Mode:       msg.Mode,
+		InitialURL: msg.InitialURL,
+		BridgeMode: msg.BridgeMode,
+		PreviewID:  msg.PreviewID,
 		ExpiresAt:  msg.ExpiresAt,
 	}
 	result, err := m.service.Open(ctx, req)
@@ -168,17 +173,25 @@ func (m *Manager) sendFrame(ctx context.Context, browserID string) {
 		return
 	}
 	_ = m.sender.Send(ctx, &protocol.BrowserFrame{
-		Type:        protocol.MsgTypeBrowserFrame,
-		BrowserID:   browserID,
-		SessionID:   req.SessionID,
-		ChannelID:   req.ChannelID,
-		Seq:         frame.Sequence,
-		ContentType: frame.ContentType,
-		DataBase64:  frame.DataBase64,
-		Width:       frame.Width,
-		Height:      frame.Height,
-		CapturedAt:  frame.CapturedAt,
+		Type:             protocol.MsgTypeBrowserFrame,
+		BrowserID:        browserID,
+		SessionID:        req.SessionID,
+		ChannelID:        req.ChannelID,
+		Seq:              frame.Sequence,
+		ContentType:      frame.ContentType,
+		DataBase64:       frame.DataBase64,
+		Width:            frame.Width,
+		Height:           frame.Height,
+		ViewportWidth:    frame.ViewportWidth,
+		ViewportHeight:   frame.ViewportHeight,
+		DevicePixelRatio: frame.DevicePixelRatio,
+		CapturedAt:       frame.CapturedAt,
 	})
+	m.mu.Lock()
+	if current := m.byID[browserID]; current == state && frame.Sequence > current.lastFrameSeq {
+		current.lastFrameSeq = frame.Sequence
+	}
+	m.mu.Unlock()
 	if frame.URL != "" {
 		_ = m.sender.Send(ctx, &protocol.BrowserNavigation{
 			Type:      protocol.MsgTypeBrowserNavigation,
@@ -223,27 +236,65 @@ func (m *Manager) grantForStateLocked(state *sessionState) (Grant, bool) {
 }
 
 func (m *Manager) Claim(ctx context.Context, msg *protocol.BrowserControlClaim) error {
+	owner, ok := parseControlOwner(msg.Owner)
+	if !ok {
+		return fmt.Errorf("invalid browser control owner: %s", msg.Owner)
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	state, ok := m.byID[msg.BrowserID]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("browser session not found")
 	}
-	state.owner = ControlOwner(msg.Owner)
-	return nil
+	if msg.ControlVersion != 0 && msg.ControlVersion != state.controlVersion {
+		m.mu.Unlock()
+		return fmt.Errorf("stale browser control version")
+	}
+	state.owner = owner
+	state.controlVersion++
+	out := &protocol.BrowserControlClaim{
+		Type:           protocol.MsgTypeBrowserControlClaim,
+		BrowserID:      msg.BrowserID,
+		SessionID:      state.openRequest.SessionID,
+		ChannelID:      state.openRequest.ChannelID,
+		Owner:          string(owner),
+		Reason:         msg.Reason,
+		ControlVersion: state.controlVersion,
+	}
+	m.mu.Unlock()
+	return m.sender.Send(ctx, out)
 }
 
 func (m *Manager) Release(ctx context.Context, msg *protocol.BrowserControlRelease) error {
+	owner, ok := parseControlOwner(msg.Owner)
+	if !ok {
+		return fmt.Errorf("invalid browser control owner: %s", msg.Owner)
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	state, ok := m.byID[msg.BrowserID]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("browser session not found")
 	}
-	if ControlOwner(msg.Owner) == state.owner {
-		state.owner = OwnerAgent
+	if msg.ControlVersion != 0 && msg.ControlVersion != state.controlVersion {
+		m.mu.Unlock()
+		return fmt.Errorf("stale browser control version")
 	}
-	return nil
+	if owner == state.owner {
+		state.owner = OwnerAgent
+		state.controlVersion++
+	}
+	out := &protocol.BrowserControlRelease{
+		Type:           protocol.MsgTypeBrowserControlRelease,
+		BrowserID:      msg.BrowserID,
+		SessionID:      state.openRequest.SessionID,
+		ChannelID:      state.openRequest.ChannelID,
+		Owner:          string(state.owner),
+		Reason:         msg.Reason,
+		ControlVersion: state.controlVersion,
+	}
+	m.mu.Unlock()
+	return m.sender.Send(ctx, out)
 }
 
 func (m *Manager) UserInput(ctx context.Context, msg *protocol.BrowserUserInput) error {
@@ -254,15 +305,70 @@ func (m *Manager) UserInput(ctx context.Context, msg *protocol.BrowserUserInput)
 		return fmt.Errorf("browser session not found")
 	}
 	if time.Now().After(state.expiresAt) {
+		req := state.openRequest
+		version := state.controlVersion
 		m.mu.Unlock()
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectExpiredGrant, version)
 		return fmt.Errorf("browser grant expired")
 	}
-	if state.owner != OwnerLex {
+	inputOwner, ownerOK := parseControlOwner(msg.Owner)
+	if !ownerOK || inputOwner != OwnerLex || state.owner != OwnerLex {
+		req := state.openRequest
+		version := state.controlVersion
 		m.mu.Unlock()
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectOwnerMismatch, version)
 		return fmt.Errorf("browser control belongs to %s", state.owner)
 	}
+	if msg.ControlVersion != 0 && msg.ControlVersion != state.controlVersion {
+		req := state.openRequest
+		version := state.controlVersion
+		m.mu.Unlock()
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectStaleFrame, version)
+		return fmt.Errorf("stale browser control version")
+	}
+	if msg.FrameSeq != 0 && state.lastFrameSeq != 0 && msg.FrameSeq < state.lastFrameSeq-2 {
+		req := state.openRequest
+		version := state.controlVersion
+		m.mu.Unlock()
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectStaleFrame, version)
+		return fmt.Errorf("stale browser frame")
+	}
+	req := state.openRequest
+	version := state.controlVersion
 	m.mu.Unlock()
-	return m.service.UserInput(ctx, msg.BrowserID, msg)
+	if err := m.service.UserInput(ctx, msg.BrowserID, msg); err != nil {
+		return err
+	}
+	return m.sendInputAck(ctx, req, msg, true, "", version)
+}
+
+func parseControlOwner(owner string) (ControlOwner, bool) {
+	switch owner {
+	case string(OwnerAgent):
+		return OwnerAgent, true
+	case string(OwnerLex):
+		return OwnerLex, true
+	case string(OwnerPaused):
+		return OwnerPaused, true
+	case string(OwnerApproval):
+		return OwnerApproval, true
+	default:
+		return "", false
+	}
+}
+
+func (m *Manager) sendInputAck(ctx context.Context, req OpenRequest, msg *protocol.BrowserUserInput, accepted bool, reason string, version int64) error {
+	return m.sender.Send(ctx, &protocol.BrowserUserInputAck{
+		Type:           protocol.MsgTypeBrowserUserInputAck,
+		BrowserID:      msg.BrowserID,
+		SessionID:      req.SessionID,
+		ChannelID:      req.ChannelID,
+		InputID:        msg.InputID,
+		Accepted:       accepted,
+		Reason:         reason,
+		ControlVersion: version,
+		AckedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }
 
 func (m *Manager) Close(ctx context.Context, msg *protocol.BrowserSessionClose) error {

@@ -87,33 +87,46 @@ func (s LocalService) Tool(ctx context.Context, browserID string, method string,
 
 func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error) {
 	var out struct {
-		Sequence     int64  `json:"sequence"`
-		ContentType  string `json:"contentType"`
-		DataBase64   string `json:"dataBase64"`
-		Width        int    `json:"width"`
-		Height       int    `json:"height"`
-		CapturedAtMs int64  `json:"capturedAtMs"`
-		URL          string `json:"url"`
-		Title        string `json:"title"`
+		Sequence         int64   `json:"sequence"`
+		ContentType      string  `json:"contentType"`
+		DataBase64       string  `json:"dataBase64"`
+		Width            int     `json:"width"`
+		Height           int     `json:"height"`
+		ViewportWidth    int     `json:"viewportWidth"`
+		ViewportHeight   int     `json:"viewportHeight"`
+		DevicePixelRatio float64 `json:"devicePixelRatio"`
+		CapturedAtMs     int64   `json:"capturedAtMs"`
+		URL              string  `json:"url"`
+		Title            string  `json:"title"`
 	}
 	if err := s.rpc(ctx, browserID, "cloud_frame", map[string]any{"quality": 70}, &out); err != nil {
 		return Frame{}, err
 	}
 	return Frame{
-		Sequence:    out.Sequence,
-		ContentType: out.ContentType,
-		DataBase64:  out.DataBase64,
-		Width:       out.Width,
-		Height:      out.Height,
-		CapturedAt:  time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano),
-		URL:         out.URL,
-		Title:       out.Title,
+		Sequence:         out.Sequence,
+		ContentType:      out.ContentType,
+		DataBase64:       out.DataBase64,
+		Width:            out.Width,
+		Height:           out.Height,
+		ViewportWidth:    out.ViewportWidth,
+		ViewportHeight:   out.ViewportHeight,
+		DevicePixelRatio: out.DevicePixelRatio,
+		CapturedAt:       time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano),
+		URL:              out.URL,
+		Title:            out.Title,
 	}, nil
 }
 
 func (s LocalService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
+	return s.rpc(ctx, browserID, "cloud_user_input", browserUserInputParams(input), nil)
+}
+
+func browserUserInputParams(input *protocol.BrowserUserInput) map[string]any {
 	params := map[string]any{
 		"kind": input.Kind,
+	}
+	if input.InputID != "" {
+		params["inputId"] = input.InputID
 	}
 	if input.X != nil {
 		params["x"] = *input.X
@@ -133,7 +146,41 @@ func (s LocalService) UserInput(ctx context.Context, browserID string, input *pr
 	if input.DeltaY != nil {
 		params["deltaY"] = *input.DeltaY
 	}
-	return s.rpc(ctx, browserID, "cloud_user_input", params, nil)
+	if input.FrameSeq != 0 {
+		params["frameSeq"] = input.FrameSeq
+	}
+	if input.ControlVersion != 0 {
+		params["controlVersion"] = input.ControlVersion
+	}
+	if input.CoordinateSpace != "" {
+		params["coordinateSpace"] = input.CoordinateSpace
+	}
+	if input.ViewportWidth != 0 {
+		params["viewportWidth"] = input.ViewportWidth
+	}
+	if input.ViewportHeight != 0 {
+		params["viewportHeight"] = input.ViewportHeight
+	}
+	if input.FrameWidth != 0 {
+		params["frameWidth"] = input.FrameWidth
+	}
+	if input.FrameHeight != 0 {
+		params["frameHeight"] = input.FrameHeight
+	}
+	if input.DevicePixelRatio != 0 {
+		params["devicePixelRatio"] = input.DevicePixelRatio
+	}
+	if input.CoordinateSpace != "" || input.RenderedWidth != 0 || input.RenderedHeight != 0 {
+		params["renderedLeft"] = input.RenderedLeft
+		params["renderedTop"] = input.RenderedTop
+	}
+	if input.RenderedWidth != 0 {
+		params["renderedWidth"] = input.RenderedWidth
+	}
+	if input.RenderedHeight != 0 {
+		params["renderedHeight"] = input.RenderedHeight
+	}
+	return params
 }
 
 func (s LocalService) Close(ctx context.Context, browserID string) error {
