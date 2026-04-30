@@ -10,21 +10,23 @@ import (
 )
 
 type WorkerKey struct {
-	BinaryPath         string
-	CWD                string
-	Model              string
-	ResumeSession      string
-	CustomInstructions string
-	ExtensionPath      string
-	Provider           string
-	SkillPaths         string
-	DisableSkills      bool
-	BrowserGrantID     string
-	BrowserID          string
-	BrowserSessionID   string
-	PlanAPIBaseURL     string
-	PlanTokenHash      string
-	PlanExpiresAt      string
+	BinaryPath          string
+	CWD                 string
+	Model               string
+	ResumeSession       string
+	CustomInstructions  string
+	ExtensionPath       string
+	Provider            string
+	SkillPaths          string
+	DisableSkills       bool
+	BrowserGrantID      string
+	BrowserID           string
+	BrowserSessionID    string
+	PlanAPIBaseURL      string
+	PlanTokenHash       string
+	PlanExpiresAt       string
+	AgentToolsSocket    string
+	AgentToolsTokenHash string
 }
 
 type WorkerSnapshot struct {
@@ -60,6 +62,10 @@ func NewWorkerKey(opts Options) WorkerKey {
 		key.PlanAPIBaseURL = opts.PlanCapability.APIBaseURL
 		key.PlanTokenHash = hashString(opts.PlanCapability.Token)
 		key.PlanExpiresAt = opts.PlanCapability.ExpiresAt
+	}
+	key.AgentToolsSocket = opts.AgentToolsSocket
+	if opts.AgentToolsToken != "" {
+		key.AgentToolsTokenHash = hashString(opts.AgentToolsToken)
 	}
 	return key
 }

@@ -109,6 +109,7 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 		Capabilities: &protocol.HelloCapabilities{
 			Stop:                           true,
 			Terminal:                       true,
+			AgentTerminalJobs:              true,
 			ContextRefs:                    true,
 			PreviewTunnel:                  true,
 			PreviewMaxFrameBytes:           preview.DefaultMaxFrameBytes,

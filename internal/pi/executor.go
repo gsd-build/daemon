@@ -63,6 +63,8 @@ type Options struct {
 	Model              string // forwarded as --model
 	ResumeSession      string // forwarded as --session <path>; empty = --no-session
 	TaskID             string
+	SessionID          string
+	ChannelID          string
 	Prompt             string
 	CustomInstructions string
 	ExtensionPath      string // forwarded as -e <path>
@@ -78,6 +80,8 @@ type Options struct {
 	ParentSessionID    string
 	AgentDir           string
 	SubagentsPrompt    string
+	AgentToolsSocket   string
+	AgentToolsToken    string
 }
 
 // ProviderOrDefault returns the Pi provider name to use for a task.
@@ -206,7 +210,10 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 		warmClaudeSDKEnv(
 			planCapabilityEnv(
 				browserEnv(
-					providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
+					agentToolsEnv(
+						providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
+						opts,
+					),
 					opts.BrowserGrantID,
 					opts.BrowserID,
 					opts.BrowserSessionID,
@@ -241,6 +248,36 @@ func subagentEnv(base []string, opts Options) []string {
 	}
 	if opts.AgentDir != "" {
 		out = append(out, "GSD_AGENT_DIR="+opts.AgentDir)
+	}
+	return out
+}
+
+func agentToolsEnv(base []string, opts Options) []string {
+	out := make([]string, 0, len(base)+5)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GSD_AGENT_TOOLS_SOCKET=") ||
+			strings.HasPrefix(entry, "GSD_AGENT_TOOLS_TOKEN=") ||
+			strings.HasPrefix(entry, "GSD_SESSION_ID=") ||
+			strings.HasPrefix(entry, "GSD_CHANNEL_ID=") ||
+			strings.HasPrefix(entry, "GSD_TASK_ID=") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	if opts.AgentToolsSocket != "" {
+		out = append(out, "GSD_AGENT_TOOLS_SOCKET="+opts.AgentToolsSocket)
+	}
+	if opts.AgentToolsToken != "" {
+		out = append(out, "GSD_AGENT_TOOLS_TOKEN="+opts.AgentToolsToken)
+	}
+	if opts.SessionID != "" {
+		out = append(out, "GSD_SESSION_ID="+opts.SessionID)
+	}
+	if opts.ChannelID != "" {
+		out = append(out, "GSD_CHANNEL_ID="+opts.ChannelID)
+	}
+	if opts.TaskID != "" {
+		out = append(out, "GSD_TASK_ID="+opts.TaskID)
 	}
 	return out
 }

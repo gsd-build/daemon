@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
@@ -49,31 +50,33 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg               *config.Config
-	version           string
-	manager           SessionManager
-	terminalManager   *terminal.Manager
-	client            *relay.Client
-	startedAt         time.Time
-	channelRoots      sync.Map
-	uploader          *upload.Client
-	piBinaryPath      string
-	piExtensionPath   string
-	forcePi           bool
-	previewRegistry   *preview.Registry
-	previewHTTP       *preview.HTTPHandler
-	previewWS         *preview.WebSocketBridge
-	previewWork       chan struct{}
-	browserManager    *browser.Manager
-	agentTouchedFiles agentTouchedFileStore
-	runCtxMu          sync.RWMutex
-	runCtx            context.Context
-	sockPath          string
-	agentDir          string
-	subagentMu        sync.Mutex
-	subagentStreams   map[string]*pi.ChildTranslator
-	subagentSeq       map[string]int64
-	subagentProcesses map[string]int
+	cfg                  *config.Config
+	version              string
+	manager              SessionManager
+	terminalManager      *terminal.Manager
+	agentTerminalManager *agentterminal.Manager
+	agentToolControl     *agentterminal.ControlServer
+	client               *relay.Client
+	startedAt            time.Time
+	channelRoots         sync.Map
+	uploader             *upload.Client
+	piBinaryPath         string
+	piExtensionPath      string
+	forcePi              bool
+	previewRegistry      *preview.Registry
+	previewHTTP          *preview.HTTPHandler
+	previewWS            *preview.WebSocketBridge
+	previewWork          chan struct{}
+	browserManager       *browser.Manager
+	agentTouchedFiles    agentTouchedFileStore
+	runCtxMu             sync.RWMutex
+	runCtx               context.Context
+	sockPath             string
+	agentDir             string
+	subagentMu           sync.Mutex
+	subagentStreams      map[string]*pi.ChildTranslator
+	subagentSeq          map[string]int64
+	subagentProcesses    map[string]int
 }
 
 const (
@@ -230,6 +233,144 @@ func (s terminalRelaySender) SendTerminalError(requestID, terminalID, sessionID,
 	})
 }
 
+type agentTerminalRelaySender struct {
+	client interface {
+		Send(context.Context, any) error
+	}
+}
+
+func (s agentTerminalRelaySender) SendAgentTerminalStarted(job agentterminal.Job) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.AgentTerminalStarted{
+		Type:           protocol.MsgTypeAgentTerminalStarted,
+		JobID:          job.JobID,
+		TerminalID:     job.TerminalID,
+		SessionID:      job.SessionID,
+		ChannelID:      job.ChannelID,
+		TaskID:         job.TaskID,
+		ToolCallID:     job.ToolCallID,
+		ProjectID:      job.ProjectID,
+		CommandPreview: job.CommandPreview,
+		Title:          job.Title,
+		CWD:            job.CWD,
+		Status:         job.Status,
+		Readiness:      protocolReadiness(job.Readiness),
+		Ports:          protocolPorts(job.Ports),
+		URLs:           job.URLs,
+		Seq:            job.Seq,
+		StartedAt:      job.StartedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (s agentTerminalRelaySender) SendAgentTerminalUpdated(job agentterminal.Job) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.AgentTerminalUpdated{
+		Type:       protocol.MsgTypeAgentTerminalUpdated,
+		JobID:      job.JobID,
+		TerminalID: job.TerminalID,
+		SessionID:  job.SessionID,
+		ChannelID:  job.ChannelID,
+		Status:     job.Status,
+		Readiness:  protocolReadiness(job.Readiness),
+		Ports:      protocolPorts(job.Ports),
+		URLs:       job.URLs,
+		Seq:        job.Seq,
+		UpdatedAt:  job.UpdatedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (s agentTerminalRelaySender) SendTerminalOutput(terminalID, sessionID, channelID string, seq int64, data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalOutput{
+		Type:       protocol.MsgTypeTerminalOutput,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		Seq:        seq,
+		DataBase64: terminal.Encode(data),
+	})
+}
+
+func (s agentTerminalRelaySender) SendTerminalSnapshot(terminalID, sessionID, channelID string, seq int64, data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalSnapshot{
+		Type:       protocol.MsgTypeTerminalSnapshot,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		Seq:        seq,
+		DataBase64: terminal.Encode(data),
+	})
+}
+
+func (s agentTerminalRelaySender) SendTerminalExit(terminalID, sessionID, channelID, reason string, exitCode int, signal string, endedAt time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalExit{
+		Type:       protocol.MsgTypeTerminalExit,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		ExitCode:   &exitCode,
+		Signal:     signal,
+		Reason:     reason,
+		EndedAt:    endedAt.Format(time.RFC3339Nano),
+	})
+}
+
+func (s agentTerminalRelaySender) SendTerminalError(requestID, terminalID, sessionID, channelID, message string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.TerminalError{
+		Type:       protocol.MsgTypeTerminalError,
+		RequestID:  requestID,
+		TerminalID: terminalID,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		Error:      message,
+	})
+}
+
+func (s agentTerminalRelaySender) SendLocalServerDetected(sessionID, channelID, taskID, toolCallID, host string, port int, url, command, source string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.client.Send(ctx, &protocol.LocalServerDetected{
+		Type:       protocol.MsgTypeLocalServerDetected,
+		SessionID:  sessionID,
+		ChannelID:  channelID,
+		TaskID:     taskID,
+		ToolUseID:  toolCallID,
+		Host:       host,
+		Port:       port,
+		URL:        url,
+		Command:    command,
+		Source:     source,
+		DetectedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func protocolReadiness(in agentterminal.Readiness) protocol.AgentTerminalReadiness {
+	return protocol.AgentTerminalReadiness{
+		State:       in.State,
+		Source:      in.Source,
+		MatchedText: in.MatchedText,
+		ReadyAt:     in.ReadyAt,
+		TimeoutMs:   in.TimeoutMs,
+	}
+}
+
+func protocolPorts(in []agentterminal.Port) []protocol.AgentTerminalPort {
+	out := make([]protocol.AgentTerminalPort, len(in))
+	for i, p := range in {
+		out[i] = protocol.AgentTerminalPort{Host: p.Host, Port: p.Port, URL: p.URL}
+	}
+	return out
+}
+
 // buildRelayURL constructs the WebSocket URL with machineId query param only.
 // The auth token is sent exclusively in the Authorization header (relay/client.go)
 // and must NOT appear in the URL where it would leak into server logs, proxy logs,
@@ -318,6 +459,8 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		}
 	}
 	forcePi := os.Getenv("GSD_FORCE_PI") == "1"
+	agentMgr := agentterminal.NewManager(agentTerminalRelaySender{client: client}, agentterminal.DefaultLimits())
+	agentControl := agentterminal.NewControlServer(agentMgr, "")
 
 	homeDir, homeErr := os.UserHomeDir()
 	if homeErr != nil || homeDir == "" {
@@ -342,6 +485,7 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		Uploader:         uploader,
 		DaemonSocketPath: sockPath,
 		AgentDir:         agentDir,
+		AgentTools:       agentControl,
 	})
 	previewRegistry := preview.NewRegistry()
 	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
@@ -350,24 +494,27 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	}
 
 	d := &Daemon{
-		cfg:             cfg,
-		version:         version,
-		manager:         manager,
-		terminalManager: terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
-		client:          client,
-		startedAt:       time.Now(),
-		uploader:        uploader,
-		piBinaryPath:    piBinaryPath,
-		piExtensionPath: piExtensionPath,
-		forcePi:         forcePi,
-		previewRegistry: previewRegistry,
-		previewHTTP:     &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
-		previewWS:       preview.NewWebSocketBridge(previewRegistry, client),
-		previewWork:     make(chan struct{}, preview.DefaultMaxActiveStreams),
-		sockPath:        sockPath,
-		agentDir:        agentDir,
-		subagentStreams: make(map[string]*pi.ChildTranslator),
-		subagentSeq:     make(map[string]int64),
+		cfg:                  cfg,
+		version:              version,
+		manager:              manager,
+		terminalManager:      terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
+		agentTerminalManager: agentMgr,
+		agentToolControl:     agentControl,
+		client:               client,
+		startedAt:            time.Now(),
+		uploader:             uploader,
+		piBinaryPath:         piBinaryPath,
+		piExtensionPath:      piExtensionPath,
+		forcePi:              forcePi,
+		previewRegistry:      previewRegistry,
+		previewHTTP:          &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
+		previewWS:            preview.NewWebSocketBridge(previewRegistry, client),
+		previewWork:          make(chan struct{}, preview.DefaultMaxActiveStreams),
+		sockPath:             sockPath,
+		agentDir:             agentDir,
+		subagentStreams:      make(map[string]*pi.ChildTranslator),
+		subagentSeq:          make(map[string]int64),
+		subagentProcesses:    make(map[string]int),
 		browserManager: browser.NewManager(browser.ManagerOptions{
 			Service: browser.LocalService{BinaryPath: "gsd-browser", StateDir: browserStateDir},
 			Sender:  client,
@@ -604,6 +751,10 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleTerminalResize(msg)
 	case *protocol.TerminalClose:
 		return d.handleTerminalClose(msg)
+	case *protocol.AgentTerminalAttach:
+		return d.agentTerminalManager.Snapshot(msg.TerminalID)
+	case *protocol.AgentTerminalSnapshotRequest:
+		return d.agentTerminalManager.Snapshot(msg.TerminalID)
 	case *protocol.CompactRequest:
 		return d.handleCompactRequest(msg)
 	case *protocol.ContextStatsRequest:
@@ -787,6 +938,10 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		}
 	}
 	if actor == nil {
+		machineID := ""
+		if d.cfg != nil {
+			machineID = d.cfg.MachineID
+		}
 		var err error
 		serverURL := ""
 		machineID := ""
@@ -813,6 +968,7 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			BrowserGrantID:    browserGrantID,
 			BrowserID:         browserID,
 			RecordTouchedFile: d.recordAgentTouchedFile,
+			MachineID:         machineID,
 		})
 		if err != nil {
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -884,14 +1040,24 @@ func (d *Daemon) handleTerminalInput(msg *protocol.TerminalInput) error {
 	if err != nil {
 		return nil
 	}
+	if d.agentTerminalManager != nil && d.agentTerminalManager.HasTerminal(msg.TerminalID) {
+		return d.agentTerminalManager.Input(msg.TerminalID, data)
+	}
 	return d.terminalManager.Input(msg.TerminalID, data)
 }
 
 func (d *Daemon) handleTerminalResize(msg *protocol.TerminalResize) error {
+	if d.agentTerminalManager != nil && d.agentTerminalManager.HasTerminal(msg.TerminalID) {
+		return d.agentTerminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows)
+	}
 	return d.terminalManager.Resize(msg.TerminalID, msg.Cols, msg.Rows)
 }
 
 func (d *Daemon) handleTerminalClose(msg *protocol.TerminalClose) error {
+	if d.agentTerminalManager != nil && d.agentTerminalManager.HasTerminal(msg.TerminalID) {
+		d.agentTerminalManager.Close(msg.TerminalID, terminal.ReasonClosedByUser)
+		return nil
+	}
 	d.terminalManager.Close(msg.TerminalID, terminal.ReasonClosedByUser)
 	return nil
 }
@@ -1127,6 +1293,11 @@ func (d *Daemon) gracefulShutdown(ctx context.Context) {
 		terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		d.terminalManager.CloseAll(terminalCtx, terminal.ReasonDaemonShutdown)
 		terminalCancel()
+	}
+	if d.agentTerminalManager != nil {
+		agentTerminalCtx, agentTerminalCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.agentTerminalManager.CloseAll(agentTerminalCtx, terminal.ReasonDaemonShutdown)
+		agentTerminalCancel()
 	}
 
 	// Close WebSocket cleanly.
