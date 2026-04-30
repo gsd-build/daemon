@@ -51,7 +51,7 @@ func TestPlanRuntimeReporterFlushesBoundedEvidencePosts(t *testing.T) {
 	})
 	reporter.now = fixedPlanEvidenceClock()
 	for i := 0; i < planEvidenceMaxFlushPosts+10; i++ {
-		toolCallID := "toolu_test_" + string(rune('a'+(i%26)))
+		toolCallID := fmt.Sprintf("toolu_test_%d", i)
 		reporter.RecordToolStart(pi.ToolExecutionStart{
 			ToolCallID: toolCallID,
 			ToolName:   "bash",
@@ -233,7 +233,13 @@ func TestActorTerminalTaskRevokesPlanCapability(t *testing.T) {
 			http.Error(w, "bad authorization", http.StatusUnauthorized)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		switch r.URL.Path {
+		case "/api/agent-plan/evidence", "/api/agent-plan/capability/revoke":
+			w.WriteHeader(http.StatusOK)
+		default:
+			reportPlanEvidenceHandlerError(handlerErrors, fmt.Errorf("unexpected path %s", r.URL.Path))
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
 
