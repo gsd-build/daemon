@@ -19,6 +19,7 @@ import (
 	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/claude"
 	daemonfs "github.com/gsd-build/daemon/internal/fs"
+	daemonlogging "github.com/gsd-build/daemon/internal/logging"
 	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/pidfile"
 	"github.com/gsd-build/daemon/internal/skills"
@@ -134,6 +135,11 @@ type pendingFileTool struct {
 
 type taskContext struct {
 	TaskID             string
+	SessionID          string
+	AttemptID          string
+	AttemptNumber      int
+	TurnKind           protocol.TurnKind
+	Deadlines          protocol.TaskDeadlines
 	ChannelID          string
 	ActorContext       context.Context
 	StartedAt          time.Time
@@ -548,13 +554,17 @@ func (a *Actor) Run(ctx context.Context) error {
 				slog.Error("task failed", "taskId", task.TaskID, "sessionId", a.opts.SessionID, "err", err)
 				sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 				_ = a.opts.Relay.Send(sendCtx, &protocol.TaskError{
-					Type:        protocol.MsgTypeTaskError,
-					TaskID:      task.TaskID,
-					SessionID:   a.opts.SessionID,
-					ChannelID:   task.ChannelID,
-					Error:       err.Error(),
-					RequestID:   task.RequestID,
-					Traceparent: task.Traceparent,
+					Type:          protocol.MsgTypeTaskError,
+					TaskID:        task.TaskID,
+					AttemptID:     task.AttemptID,
+					AttemptNumber: task.AttemptNumber,
+					SessionID:     a.opts.SessionID,
+					ChannelID:     task.ChannelID,
+					Error:         err.Error(),
+					FailureCode:   taskFailureCode(err),
+					Retryable:     taskFailureRetryable(err),
+					RequestID:     task.RequestID,
+					Traceparent:   task.Traceparent,
 				})
 				sendCancel()
 			}
@@ -600,6 +610,11 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 	executionPrompt := contextBlock + task.Prompt
 	tc := &taskContext{
 		TaskID:             task.TaskID,
+		SessionID:          a.opts.SessionID,
+		AttemptID:          task.AttemptID,
+		AttemptNumber:      task.AttemptNumber,
+		TurnKind:           task.TurnKind,
+		Deadlines:          task.DeadlineProfile,
 		ChannelID:          task.ChannelID,
 		ActorContext:       ctx,
 		StartedAt:          time.Now(),
@@ -635,13 +650,15 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 
 	sendCtx, sendCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := a.opts.Relay.Send(sendCtx, &protocol.TaskStarted{
-		Type:        protocol.MsgTypeTaskStarted,
-		TaskID:      task.TaskID,
-		SessionID:   a.opts.SessionID,
-		ChannelID:   tc.ChannelID,
-		StartedAt:   tc.StartedAt.UTC().Format(time.RFC3339Nano),
-		RequestID:   tc.RequestID,
-		Traceparent: tc.Traceparent,
+		Type:          protocol.MsgTypeTaskStarted,
+		TaskID:        task.TaskID,
+		AttemptID:     task.AttemptID,
+		AttemptNumber: task.AttemptNumber,
+		SessionID:     a.opts.SessionID,
+		ChannelID:     tc.ChannelID,
+		StartedAt:     tc.StartedAt.UTC().Format(time.RFC3339Nano),
+		RequestID:     tc.RequestID,
+		Traceparent:   tc.Traceparent,
 	}); err != nil {
 		sendCancel()
 		return fmt.Errorf("send taskStarted: %w", err)
@@ -656,25 +673,31 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		if taskCtx.Err() == context.DeadlineExceeded {
 			errCtx, errCancel := context.WithTimeout(ctx, 30*time.Second)
 			_ = a.opts.Relay.Send(errCtx, &protocol.TaskError{
-				Type:        protocol.MsgTypeTaskError,
-				TaskID:      task.TaskID,
-				SessionID:   a.opts.SessionID,
-				ChannelID:   tc.ChannelID,
-				Error:       fmt.Sprintf("task timed out after %s", a.taskTimeout),
-				RequestID:   task.RequestID,
-				Traceparent: tc.Traceparent,
+				Type:          protocol.MsgTypeTaskError,
+				TaskID:        task.TaskID,
+				AttemptID:     task.AttemptID,
+				AttemptNumber: task.AttemptNumber,
+				SessionID:     a.opts.SessionID,
+				ChannelID:     tc.ChannelID,
+				Error:         fmt.Sprintf("task timed out after %s", a.taskTimeout),
+				FailureCode:   "task_deadline_exceeded",
+				Retryable:     false,
+				RequestID:     task.RequestID,
+				Traceparent:   tc.Traceparent,
 			})
 			errCancel()
 			return nil
 		}
 		cancelCtx, cancelCancel := context.WithTimeout(ctx, 30*time.Second)
 		_ = a.opts.Relay.Send(cancelCtx, &protocol.TaskCancelled{
-			Type:        protocol.MsgTypeTaskCancelled,
-			TaskID:      task.TaskID,
-			SessionID:   a.opts.SessionID,
-			ChannelID:   tc.ChannelID,
-			RequestID:   task.RequestID,
-			Traceparent: tc.Traceparent,
+			Type:          protocol.MsgTypeTaskCancelled,
+			TaskID:        task.TaskID,
+			AttemptID:     task.AttemptID,
+			AttemptNumber: task.AttemptNumber,
+			SessionID:     a.opts.SessionID,
+			ChannelID:     tc.ChannelID,
+			RequestID:     task.RequestID,
+			Traceparent:   tc.Traceparent,
 		})
 		cancelCancel()
 		return nil
@@ -690,6 +713,146 @@ func taskActorContext(tc *taskContext, fallback context.Context) context.Context
 		return tc.ActorContext
 	}
 	return fallback
+}
+
+type actorLifecycleSink struct {
+	relay    RelaySender
+	tc       *taskContext
+	model    string
+	provider string
+}
+
+func (s actorLifecycleSink) Phase(phase string, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	elapsedMs, _ := fields["elapsedMs"].(int64)
+	pid, _ := fields["pid"].(int)
+	failureCode, _ := fields["failureCode"].(string)
+	retryable, _ := fields["retryable"].(bool)
+	cleanup, _ := fields["cleanup"].(string)
+	traceID := protocol.TraceID(s.tc.Traceparent)
+	logEvent := daemonlogging.NewTaskLifecycleLog(daemonlogging.TaskLifecycleLogInput{
+		Phase:         phase,
+		Status:        string(taskAttemptStatusForPhase(phase)),
+		TaskID:        s.tc.TaskID,
+		SessionID:     s.tc.SessionID,
+		ChannelID:     s.tc.ChannelID,
+		RequestID:     s.tc.RequestID,
+		TraceID:       traceID,
+		AttemptID:     s.tc.AttemptID,
+		AttemptNumber: s.tc.AttemptNumber,
+		TurnKind:      turnKindString(s.tc.TurnKind),
+		ElapsedMs:     elapsedMs,
+		Model:         s.model,
+		Provider:      s.provider,
+		PID:           pid,
+		FailureCode:   failureCode,
+		Retryable:     retryable,
+		PromptText:    s.tc.OriginalPrompt,
+		Cleanup:       cleanup,
+	})
+	slog.Info("task lifecycle",
+		"event", logEvent.Event,
+		"phase", logEvent.Phase,
+		"status", logEvent.Status,
+		"taskId", logEvent.TaskID,
+		"sessionId", logEvent.SessionID,
+		"channelId", logEvent.ChannelID,
+		"requestId", logEvent.RequestID,
+		"traceId", logEvent.TraceID,
+		"attemptId", logEvent.AttemptID,
+		"attemptNumber", logEvent.AttemptNumber,
+		"turnKind", logEvent.TurnKind,
+		"elapsedMs", logEvent.ElapsedMs,
+		"model", logEvent.Model,
+		"provider", logEvent.Provider,
+		"pid", logEvent.PID,
+		"failureCode", logEvent.FailureCode,
+		"retryable", logEvent.Retryable,
+		"promptPreview", logEvent.PromptPreview,
+		"cleanup", logEvent.Cleanup,
+	)
+	if s.tc.AttemptID == "" || s.relay == nil {
+		return
+	}
+	msg := &protocol.TaskLifecycle{
+		Type:          protocol.MsgTypeTaskLifecycle,
+		TaskID:        s.tc.TaskID,
+		AttemptID:     s.tc.AttemptID,
+		AttemptNumber: s.tc.AttemptNumber,
+		SessionID:     logEvent.SessionID,
+		ChannelID:     s.tc.ChannelID,
+		Phase:         taskLifecyclePhase(phase),
+		Status:        taskAttemptStatusForPhase(phase),
+		Retryable:     retryable,
+		FailureCode:   failureCode,
+		ObservedAt:    time.Now().UTC(),
+		PID:           pid,
+		Provider:      s.provider,
+		Model:         s.model,
+		RequestID:     s.tc.RequestID,
+		Traceparent:   s.tc.Traceparent,
+	}
+	sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.relay.Send(sendCtx, msg); err != nil {
+		slog.Warn("send task lifecycle failed", "taskId", s.tc.TaskID, "attemptId", s.tc.AttemptID, "phase", phase, "err", err)
+	}
+}
+
+func turnKindString(kind protocol.TurnKind) string {
+	if kind == "" {
+		return "user"
+	}
+	return string(kind)
+}
+
+func taskLifecyclePhase(phase string) protocol.TaskLifecyclePhase {
+	switch phase {
+	case "task_started":
+		return protocol.TaskLifecyclePhaseStarted
+	case "pi_process_started":
+		return protocol.TaskLifecyclePhasePiStarted
+	case "task_timed_out":
+		return protocol.TaskLifecyclePhaseTimedOut
+	default:
+		return protocol.TaskLifecyclePhase(phase)
+	}
+}
+
+func taskAttemptStatusForPhase(phase string) protocol.TaskAttemptStatus {
+	switch phase {
+	case "task_started":
+		return protocol.TaskAttemptStatusStarted
+	case "pi_process_started":
+		return protocol.TaskAttemptStatusPiStarted
+	case "tool_started":
+		return protocol.TaskAttemptStatusToolRunning
+	case "cleanup_finished":
+		return protocol.TaskAttemptStatusCleanupFinished
+	case "task_timed_out", "timed_out":
+		return protocol.TaskAttemptStatusTimedOut
+	case "task_failed":
+		return protocol.TaskAttemptStatusFailed
+	case "task_completed":
+		return protocol.TaskAttemptStatusCompleted
+	default:
+		return protocol.TaskAttemptStatus(phase)
+	}
+}
+
+func turnDeadlinesFromProtocol(deadlines protocol.TaskDeadlines) TurnDeadlines {
+	return TurnDeadlines{
+		ProcessStart:      time.Duration(deadlines.ProcessStartMs) * time.Millisecond,
+		PromptWrite:       time.Duration(deadlines.PromptWriteMs) * time.Millisecond,
+		FirstEvent:        time.Duration(deadlines.FirstEventMs) * time.Millisecond,
+		FirstVisibleEvent: time.Duration(deadlines.FirstVisibleEventMs) * time.Millisecond,
+		StreamIdle:        time.Duration(deadlines.StreamIdleMs) * time.Millisecond,
+		ToolIdle:          time.Duration(deadlines.ToolIdleMs) * time.Millisecond,
+		UserInput:         time.Duration(deadlines.UserInputMs) * time.Millisecond,
+		CleanupTerm:       time.Duration(deadlines.CleanupTermMs) * time.Millisecond,
+	}
 }
 
 func (a *Actor) runExecutor(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string) error {
@@ -789,11 +952,48 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 
 	exec := pi.NewExecutor(opts)
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
-	exec.OnToolExecutionStart = a.capturePiToolStartWithEvidence(coordinator, tc.PlanRuntime)
-	exec.OnToolExecutionEnd = a.capturePiToolEndWithEvidence(tc.ChannelID, tc.PlanRuntime)
+	lifecycleSink := actorLifecycleSink{relay: a.opts.Relay, tc: tc, model: model, provider: provider}
+	toolStart := a.capturePiToolStartWithEvidence(coordinator, tc.PlanRuntime)
+	toolEnd := a.capturePiToolEndWithEvidence(tc.ChannelID, tc.PlanRuntime)
 
 	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
-		return exec.Run(ctx, onEvent, a.makePiUIHandler(ctx, tc, coordinator))
+		supervisor := NewTurnSupervisor(TurnSupervisorOptions{
+			TaskID:        tc.TaskID,
+			SessionID:     a.opts.SessionID,
+			ChannelID:     tc.ChannelID,
+			RequestID:     tc.RequestID,
+			TraceID:       protocol.TraceID(tc.Traceparent),
+			AttemptID:     tc.AttemptID,
+			AttemptNumber: tc.AttemptNumber,
+			TurnKind:      string(tc.TurnKind),
+			Deadlines:     turnDeadlinesFromProtocol(tc.Deadlines),
+			Sink:          lifecycleSink,
+		})
+		return supervisor.Run(ctx, func(supervisedCtx context.Context, hooks TurnHooks) error {
+			exec.OnLifecycle = pi.LifecycleHooks{
+				ProcessStarted: func(pid int) {
+					lifecycleSink.Phase("pi_process_started", map[string]any{"pid": pid})
+				},
+				PromptWritten:     hooks.PromptWritten,
+				FirstEventSeen:    hooks.FirstEventSeen,
+				FirstVisibleEvent: hooks.FirstVisibleEventSeen,
+				CleanupStarted: func(pid int) {
+					lifecycleSink.Phase("cleanup_started", map[string]any{"pid": pid})
+				},
+				CleanupFinished: func(pid int, cleanup string) {
+					lifecycleSink.Phase("cleanup_finished", map[string]any{"pid": pid, "cleanup": cleanup})
+				},
+			}
+			exec.OnToolExecutionStart = func(event pi.ToolExecutionStart) {
+				hooks.ToolStarted(event.ToolCallID, event.ToolName)
+				toolStart(event)
+			}
+			exec.OnToolExecutionEnd = func(event pi.ToolExecutionEnd) {
+				hooks.ToolFinished(event.ToolCallID, event.ToolName)
+				toolEnd(event)
+			}
+			return exec.Run(supervisedCtx, onEvent, a.makePiUIHandler(supervisedCtx, tc, coordinator))
+		})
 	})
 	if err != nil {
 		return err
@@ -1219,6 +1419,9 @@ func (a *Actor) forwardExecutorEvents(actorCtx context.Context, taskCtx context.
 		// Send to relay
 		frame := &protocol.Stream{
 			Type:           protocol.MsgTypeStream,
+			TaskID:         tc.TaskID,
+			AttemptID:      tc.AttemptID,
+			AttemptNumber:  tc.AttemptNumber,
 			SessionID:      a.opts.SessionID,
 			ChannelID:      tc.ChannelID,
 			SequenceNumber: next,
@@ -1335,6 +1538,8 @@ func (a *Actor) handleResult(ctx context.Context, tc *taskContext, raw json.RawM
 	return a.opts.Relay.Send(sendCtx, &protocol.TaskComplete{
 		Type:            protocol.MsgTypeTaskComplete,
 		TaskID:          tc.TaskID,
+		AttemptID:       tc.AttemptID,
+		AttemptNumber:   tc.AttemptNumber,
 		SessionID:       a.opts.SessionID,
 		ChannelID:       tc.ChannelID,
 		ClaudeSessionID: resultSessionID,
