@@ -216,15 +216,20 @@ export async function runChildAgent({
     }
   }
   const { code, signalName } = await closePromise;
-  if (
-    !agentEnded &&
-    (signal?.aborted || signalName === "SIGTERM" || signalName === "SIGKILL")
-  ) {
-    throw cancelledError();
-  }
-  if (!agentEnded && code !== 0) {
+  if (!agentEnded) {
+    if (
+      signal?.aborted ||
+      signalName === "SIGTERM" ||
+      signalName === "SIGKILL"
+    ) {
+      throw cancelledError();
+    }
+    const stderrText = stderr.join("").trim();
+    const exitDetail = code === 0 ? "code 0" : `code ${code}`;
     throw new Error(
-      stderr.join("").trim() || `subagent exited with code ${code}`,
+      stderrText
+        ? `${stderrText}\nsubagent exited with ${exitDetail} without emitting agent_end`
+        : `subagent exited with ${exitDetail} without emitting agent_end`,
     );
   }
   return { finalText, usage };
@@ -315,19 +320,16 @@ async function runOne({
       rpc,
       signal,
     });
-    const finalized = await rpc.finalize(
-      {
-        runId: created.runId,
-        childSessionId: created.childSessionId,
-        status: "done",
-        totalInputTokens: run.usage.input,
-        totalOutputTokens: run.usage.output,
-        totalCostUsd: String(run.usage.cost || 0),
-        turnCount: Math.max(1, run.usage.turns || 1),
-        finalText: run.finalText,
-      },
-      signal,
-    );
+    const finalized = await rpc.finalize({
+      runId: created.runId,
+      childSessionId: created.childSessionId,
+      status: "done",
+      totalInputTokens: run.usage.input,
+      totalOutputTokens: run.usage.output,
+      totalCostUsd: String(run.usage.cost || 0),
+      turnCount: Math.max(1, run.usage.turns || 1),
+      finalText: run.finalText,
+    });
     return {
       status: finalized.status ?? "succeeded",
       runId: created.runId,

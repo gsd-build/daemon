@@ -300,15 +300,77 @@ test("subagent tool finalizes cancelled child runs as cancelled", async () => {
   assert.equal(finalized[0].runId, "run-cancelled");
 });
 
+test("subagent tool keeps successful finalization independent from late aborts", async () => {
+  const tools = [];
+  const controller = new AbortController();
+  const rpc = {
+    async createChild(body) {
+      return {
+        runId: "run-late-abort",
+        childSessionId: "child-late-abort",
+        parentSessionId: body.parentSessionId,
+        projectId: "project-1",
+        parentToolCallId: body.parentToolCallId,
+        runIndex: body.runIndex,
+        mode: body.mode,
+        agent: snapshot(body.agentName),
+      };
+    },
+    async finalize(body, signal) {
+      assert.equal(signal, undefined);
+      return {
+        ok: true,
+        status: "succeeded",
+        runId: body.runId,
+        childSessionId: body.childSessionId,
+        parentSessionId: "parent-1",
+        projectId: "project-1",
+      };
+    },
+  };
+  registerSubagentTool(
+    { registerTool: (tool) => tools.push(tool) },
+    {
+      GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
+      GSD_PARENT_SESSION_ID: "parent-1",
+      GSD_AGENT_DIR: "/tmp/agents",
+    },
+    {
+      rpc,
+      async runChildAgent() {
+        controller.abort();
+        return {
+          finalText: "Finished before cancellation arrived.",
+          usage: { input: 3, output: 4, cost: 0.000007, turns: 1 },
+        };
+      },
+    },
+  );
+
+  const result = await tools[0].execute(
+    "toolu_late_abort",
+    {
+      agentName: "explorer",
+      task: "Map files.",
+    },
+    controller.signal,
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details.status, "succeeded");
+});
+
 test("runChildAgent sends the child task as an RPC prompt frame", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "gsd-subagent-prompt-"));
-  const binary = join(tempDir, "fake-pi.mjs");
+  const script = join(tempDir, "fake-pi.mjs");
+  const binary =
+    process.platform === "win32" ? join(tempDir, "fake-pi.cmd") : script;
   const recordPath = join(tempDir, "record.json");
   const previousBinary = process.env.GSD_PI_BINARY;
   const previousRecordPath = process.env.GSD_FAKE_PI_RECORD;
 
   await writeFile(
-    binary,
+    script,
     `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 
@@ -334,13 +396,16 @@ function emit() {
 
 process.stdin.on("data", (chunk) => {
   stdin += chunk.toString();
-  if (stdin.trim()) emit();
 });
 process.stdin.on("end", emit);
 setTimeout(emit, 250);
 `,
   );
-  await chmod(binary, 0o755);
+  if (process.platform === "win32") {
+    await writeFile(binary, '@echo off\r\nnode "%~dp0fake-pi.mjs" %*\r\n');
+  } else {
+    await chmod(binary, 0o755);
+  }
 
   process.env.GSD_PI_BINARY = binary;
   process.env.GSD_FAKE_PI_RECORD = recordPath;
@@ -386,6 +451,50 @@ setTimeout(emit, 250);
     else process.env.GSD_PI_BINARY = previousBinary;
     if (previousRecordPath === undefined) delete process.env.GSD_FAKE_PI_RECORD;
     else process.env.GSD_FAKE_PI_RECORD = previousRecordPath;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runChildAgent fails when the child exits without agent_end", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "gsd-subagent-no-end-"));
+  const script = join(tempDir, "fake-pi.mjs");
+  const binary =
+    process.platform === "win32" ? join(tempDir, "fake-pi.cmd") : script;
+  const previousBinary = process.env.GSD_PI_BINARY;
+
+  await writeFile(
+    script,
+    `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on("end", () => process.exit(0));
+`,
+  );
+  if (process.platform === "win32") {
+    await writeFile(binary, '@echo off\r\nnode "%~dp0fake-pi.mjs" %*\r\n');
+  } else {
+    await chmod(binary, 0o755);
+  }
+
+  process.env.GSD_PI_BINARY = binary;
+
+  try {
+    await assert.rejects(
+      runChildAgent({
+        agent: snapshot("explorer"),
+        task: "Map files.",
+        childSessionId: "child-1",
+        runId: "run-1",
+        rpc: {
+          async registerProcess() {},
+          async heartbeat() {},
+          async forwardEvent() {},
+        },
+      }),
+      /without emitting agent_end/,
+    );
+  } finally {
+    if (previousBinary === undefined) delete process.env.GSD_PI_BINARY;
+    else process.env.GSD_PI_BINARY = previousBinary;
     await rm(tempDir, { recursive: true, force: true });
   }
 });
