@@ -74,6 +74,10 @@ type Options struct {
 	BrowserSessionID   string
 	WarmClaudeSDK      bool
 	PlanCapability     *protocol.PlanCapability
+	DaemonSocketPath   string
+	ParentSessionID    string
+	AgentDir           string
+	SubagentsPrompt    string
 }
 
 // ProviderOrDefault returns the Pi provider name to use for a task.
@@ -147,6 +151,9 @@ func appendedSystemPrompt(opts Options) string {
 	if customInstructions := strings.TrimSpace(opts.CustomInstructions); customInstructions != "" {
 		sections = append(sections, customInstructions)
 	}
+	if subagentsPrompt := strings.TrimSpace(opts.SubagentsPrompt); subagentsPrompt != "" {
+		sections = append(sections, subagentsPrompt)
+	}
 	sections = append(sections, runtimeIdentityPrompt(opts, time.Now()))
 	return strings.Join(sections, "\n\n")
 }
@@ -195,18 +202,43 @@ func cleanRuntimeValue(value string) string {
 }
 
 func processEnv(ctx context.Context, base []string, opts Options) []string {
-	return warmClaudeSDKEnv(
-		planCapabilityEnv(
-			browserEnv(
-				providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
-				opts.BrowserGrantID,
-				opts.BrowserID,
-				opts.BrowserSessionID,
+	return subagentEnv(
+		warmClaudeSDKEnv(
+			planCapabilityEnv(
+				browserEnv(
+					providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
+					opts.BrowserGrantID,
+					opts.BrowserID,
+					opts.BrowserSessionID,
+				),
+				opts.PlanCapability,
 			),
-			opts.PlanCapability,
+			opts.WarmClaudeSDK,
 		),
-		opts.WarmClaudeSDK,
+		opts,
 	)
+}
+
+func subagentEnv(base []string, opts Options) []string {
+	out := make([]string, 0, len(base)+3)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GSD_DAEMON_SOCKET=") ||
+			strings.HasPrefix(entry, "GSD_PARENT_SESSION_ID=") ||
+			strings.HasPrefix(entry, "GSD_AGENT_DIR=") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	if opts.DaemonSocketPath != "" {
+		out = append(out, "GSD_DAEMON_SOCKET="+opts.DaemonSocketPath)
+	}
+	if opts.ParentSessionID != "" {
+		out = append(out, "GSD_PARENT_SESSION_ID="+opts.ParentSessionID)
+	}
+	if opts.AgentDir != "" {
+		out = append(out, "GSD_AGENT_DIR="+opts.AgentDir)
+	}
+	return out
 }
 
 func warmClaudeSDKEnv(base []string, enabled bool) []string {

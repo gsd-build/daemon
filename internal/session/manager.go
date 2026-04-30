@@ -15,12 +15,14 @@ import (
 
 // ManagerOptions configures a new Manager.
 type ManagerOptions struct {
-	PiBinaryPath    string
-	PiExtensionPath string
-	Relay           RelaySender
-	Config          *config.Config
-	PIDDir          string        // directory for child PID files; empty disables
-	Uploader        ImageUploader // nil = image upload disabled
+	PiBinaryPath     string
+	PiExtensionPath  string
+	Relay            RelaySender
+	Config           *config.Config
+	PIDDir           string        // directory for child PID files; empty disables
+	Uploader         ImageUploader // nil = image upload disabled
+	DaemonSocketPath string
+	AgentDir         string
 }
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -28,24 +30,28 @@ type Manager struct {
 	mu     sync.Mutex
 	actors map[string]*Actor
 
-	relay           RelaySender
-	piBinaryPath    string
-	piExtensionPath string
-	cfg             *config.Config
-	pidDir          string
-	uploader        ImageUploader
+	relay            RelaySender
+	piBinaryPath     string
+	piExtensionPath  string
+	cfg              *config.Config
+	pidDir           string
+	uploader         ImageUploader
+	daemonSocketPath string
+	agentDir         string
 }
 
 // NewManager constructs a Manager.
 func NewManager(opts ManagerOptions) *Manager {
 	return &Manager{
-		actors:          make(map[string]*Actor),
-		relay:           opts.Relay,
-		piBinaryPath:    opts.PiBinaryPath,
-		piExtensionPath: opts.PiExtensionPath,
-		cfg:             opts.Config,
-		pidDir:          opts.PIDDir,
-		uploader:        opts.Uploader,
+		actors:           make(map[string]*Actor),
+		relay:            opts.Relay,
+		piBinaryPath:     opts.PiBinaryPath,
+		piExtensionPath:  opts.PiExtensionPath,
+		cfg:              opts.Config,
+		pidDir:           opts.PIDDir,
+		uploader:         opts.Uploader,
+		daemonSocketPath: opts.DaemonSocketPath,
+		agentDir:         opts.AgentDir,
 	}
 }
 
@@ -129,6 +135,21 @@ func (m *Manager) Spawn(
 	}
 	if opts.Uploader == nil {
 		opts.Uploader = m.uploader
+	}
+	if opts.ServerURL == "" && m.cfg != nil {
+		opts.ServerURL = m.cfg.ServerURL
+	}
+	if opts.MachineID == "" && m.cfg != nil {
+		opts.MachineID = m.cfg.MachineID
+	}
+	if opts.AuthToken == "" && m.cfg != nil {
+		opts.AuthToken = m.cfg.AuthToken
+	}
+	if opts.DaemonSocketPath == "" {
+		opts.DaemonSocketPath = m.daemonSocketPath
+	}
+	if opts.AgentDir == "" {
+		opts.AgentDir = m.agentDir
 	}
 	warmWorkersEnabled := m.cfg.EffectiveWarmWorkersEnabled()
 	opts.WarmPiWorkers = warmWorkersEnabled

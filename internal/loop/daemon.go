@@ -68,6 +68,12 @@ type Daemon struct {
 	agentTouchedFiles agentTouchedFileStore
 	runCtxMu          sync.RWMutex
 	runCtx            context.Context
+	sockPath          string
+	agentDir          string
+	subagentMu        sync.Mutex
+	subagentStreams   map[string]*pi.ChildTranslator
+	subagentSeq       map[string]int64
+	subagentProcesses map[string]int
 }
 
 const (
@@ -313,15 +319,6 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	}
 	forcePi := os.Getenv("GSD_FORCE_PI") == "1"
 
-	manager := session.NewManager(session.ManagerOptions{
-		PiBinaryPath:    piBinaryPath,
-		PiExtensionPath: piExtensionPath,
-		Relay:           client,
-		Config:          cfg,
-		PIDDir:          pidDir,
-		Uploader:        uploader,
-	})
-	previewRegistry := preview.NewRegistry()
 	homeDir, homeErr := os.UserHomeDir()
 	if homeErr != nil || homeDir == "" {
 		homeDir = os.TempDir()
@@ -333,6 +330,20 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 			homeDir = os.TempDir()
 		}
 	}
+	sockPath := filepath.Join(homeDir, ".gsd-cloud", "daemon.sock")
+	agentDir := filepath.Join(homeDir, ".gsd-cloud", "agents")
+
+	manager := session.NewManager(session.ManagerOptions{
+		PiBinaryPath:     piBinaryPath,
+		PiExtensionPath:  piExtensionPath,
+		Relay:            client,
+		Config:           cfg,
+		PIDDir:           pidDir,
+		Uploader:         uploader,
+		DaemonSocketPath: sockPath,
+		AgentDir:         agentDir,
+	})
+	previewRegistry := preview.NewRegistry()
 	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
 	if absDir, err := filepath.Abs(browserStateDir); err == nil {
 		browserStateDir = absDir
@@ -353,6 +364,10 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		previewHTTP:     &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
 		previewWS:       preview.NewWebSocketBridge(previewRegistry, client),
 		previewWork:     make(chan struct{}, preview.DefaultMaxActiveStreams),
+		sockPath:        sockPath,
+		agentDir:        agentDir,
+		subagentStreams: make(map[string]*pi.ChildTranslator),
+		subagentSeq:     make(map[string]int64),
 		browserManager: browser.NewManager(browser.ManagerOptions{
 			Service: browser.LocalService{BinaryPath: "gsd-browser", StateDir: browserStateDir},
 			Sender:  client,
@@ -512,12 +527,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.checkAndRefreshToken()
 
 	// Start Unix socket status API.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("user home: %w", err)
-	}
-	sockPath := filepath.Join(home, ".gsd-cloud", "daemon.sock")
-	sockSrv := sockapi.NewServer(sockPath, d)
+	sockSrv := sockapi.NewServer(d.sockPath, d)
 	go func() {
 		if err := sockSrv.ListenAndServe(ctx); err != nil {
 			slog.Warn("socket API failed", "error", err)
@@ -533,7 +543,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	slog.Info("connecting to relay", "url", d.cfg.RelayURL, "machine", d.cfg.MachineID)
 
-	err = d.client.Run(ctx, d.getActiveTasks)
+	err := d.client.Run(ctx, d.getActiveTasks)
 	if err != nil && strings.Contains(err.Error(), "token_expired") {
 		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
@@ -778,6 +788,14 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	}
 	if actor == nil {
 		var err error
+		serverURL := ""
+		machineID := ""
+		authToken := ""
+		if d.cfg != nil {
+			serverURL = d.cfg.ServerURL
+			machineID = d.cfg.MachineID
+			authToken = d.cfg.AuthToken
+		}
 		actor, err = d.manager.Spawn(ctx, session.Options{
 			SessionID:         msg.SessionID,
 			CWD:               msg.CWD,
@@ -787,6 +805,11 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			ResumeSession:     msg.ClaudeSessionID,
 			PiBinaryPath:      d.piBinaryPath,
 			PiExtensionPath:   d.piExtensionPath,
+			ServerURL:         serverURL,
+			MachineID:         machineID,
+			AuthToken:         authToken,
+			DaemonSocketPath:  d.sockPath,
+			AgentDir:          d.agentDir,
 			BrowserGrantID:    browserGrantID,
 			BrowserID:         browserID,
 			RecordTouchedFile: d.recordAgentTouchedFile,
@@ -827,6 +850,10 @@ func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
 		actor.CancelTask()
+		return nil
+	}
+	if d.cancelSubagentChild(msg.SessionID) {
+		return nil
 	}
 	return nil
 }

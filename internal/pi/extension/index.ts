@@ -42,6 +42,7 @@ import { registerPlanTools } from "./plan-tools.js";
 import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
+import { registerSubagentTool } from "./subagent.js";
 import { Type } from "@sinclair/typebox";
 
 const CLAUDE_BUILTINS = [
@@ -801,6 +802,7 @@ export default function (pi: ExtensionAPI) {
   registerBrowserTool(pi);
   pi.registerTool(askUserQuestionsTool as any);
   registerPlanTools(pi as any);
+  registerSubagentTool(pi as any);
   pi.registerProvider("claude-cli", {
     baseUrl: "http://localhost/unused",
     apiKey: "CLAUDE_CLI_KEY",
