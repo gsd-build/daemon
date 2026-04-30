@@ -78,6 +78,7 @@ type Daemon struct {
 	subagentStreams      map[string]*pi.ChildTranslator
 	subagentSeq          map[string]int64
 	subagentProcesses    map[string]int
+	subagentRunIDs       map[string]string
 }
 
 const (
@@ -516,6 +517,7 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		subagentStreams:      make(map[string]*pi.ChildTranslator),
 		subagentSeq:          make(map[string]int64),
 		subagentProcesses:    make(map[string]int),
+		subagentRunIDs:       make(map[string]string),
 		browserManager: browser.NewManager(browser.ManagerOptions{
 			Service: browser.LocalService{BinaryPath: "gsd-browser", StateDir: browserStateDir},
 			Sender:  client,

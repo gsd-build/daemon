@@ -17,15 +17,28 @@ import (
 	protocol "github.com/gsd-build/protocol-go"
 )
 
+var subagentStatusSendTimeout = 5 * time.Second
+var subagentCancelFinalizeDelay = 3 * time.Second
+
 func (d *Daemon) CreateSubagentChild(r *http.Request, req sockapi.CreateSubagentChildRequest) (sockapi.CreateSubagentChildResponse, error) {
 	if req.ParentSessionID == "" || req.ParentToolCallID == "" || req.AgentName == "" || req.Task == "" {
 		return sockapi.CreateSubagentChildResponse{}, fmt.Errorf("%w: missing required child fields", sockapi.ErrBadSubagentRequest)
+	}
+	runIndex := req.RunIndex
+	if runIndex <= 0 {
+		runIndex = 1
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = "single"
 	}
 	resp, err := api.NewClient(d.cfg.ServerURL).CreateSubagentChild(r.Context(), api.CreateSubagentChildRequest{
 		MachineID:        d.cfg.MachineID,
 		AuthToken:        d.cfg.AuthToken,
 		ParentSessionID:  req.ParentSessionID,
 		ParentToolCallID: req.ParentToolCallID,
+		RunIndex:         runIndex,
+		Mode:             mode,
 		AgentName:        req.AgentName,
 		Task:             req.Task,
 	})
@@ -43,20 +56,49 @@ func (d *Daemon) CreateSubagentChild(r *http.Request, req sockapi.CreateSubagent
 	if d.subagentProcesses == nil {
 		d.subagentProcesses = make(map[string]int)
 	}
+	if d.subagentRunIDs == nil {
+		d.subagentRunIDs = make(map[string]string)
+	}
 	d.subagentStreams[resp.ChildSessionID] = pi.NewChildTranslator(resp.ChildSessionID, "", resp.Agent.Model)
 	d.subagentSeq[resp.ChildSessionID] = 0
+	d.subagentRunIDs[resp.ChildSessionID] = resp.RunID
 	d.subagentMu.Unlock()
 
-	if err := d.sendSubagentStarted(r.Context(), req.ParentSessionID, req.ParentToolCallID, resp.ChildSessionID, resp.ProjectID, resp.Agent.Name, resp.Agent.Model); err != nil {
+	if err := d.sendSubagentStarted(r.Context(), resp.RunID, req.ParentSessionID, req.ParentToolCallID, resp.ChildSessionID, resp.ProjectID, runIndex, mode, req.Task, resp.Agent.Name, resp.Agent.Model); err != nil {
 		slog.Warn("send subagent started status failed", "parentSessionId", req.ParentSessionID, "childSessionId", resp.ChildSessionID, "err", err)
+	}
+	respParentToolCallID := resp.ParentToolCallID
+	if respParentToolCallID == "" {
+		respParentToolCallID = req.ParentToolCallID
+	}
+	respRunIndex := resp.RunIndex
+	if respRunIndex <= 0 {
+		respRunIndex = runIndex
+	}
+	respMode := resp.Mode
+	if respMode == "" {
+		respMode = mode
 	}
 
 	return sockapi.CreateSubagentChildResponse{
-		ChildSessionID:  resp.ChildSessionID,
-		ParentSessionID: resp.ParentSessionID,
-		ProjectID:       resp.ProjectID,
-		AgentName:       resp.Agent.Name,
-		Model:           resp.Agent.Model,
+		ChildSessionID:   resp.ChildSessionID,
+		ParentSessionID:  resp.ParentSessionID,
+		ProjectID:        resp.ProjectID,
+		RunID:            resp.RunID,
+		ParentToolCallID: respParentToolCallID,
+		RunIndex:         respRunIndex,
+		Mode:             respMode,
+		AgentName:        resp.Agent.Name,
+		Model:            resp.Agent.Model,
+		Agent: sockapi.SubagentSnapshot{
+			ID:           resp.Agent.ID,
+			Name:         resp.Agent.Name,
+			Description:  resp.Agent.Description,
+			SystemPrompt: resp.Agent.SystemPrompt,
+			Model:        resp.Agent.Model,
+			Tools:        resp.Agent.Tools,
+			VersionHash:  resp.Agent.VersionHash,
+		},
 	}, nil
 }
 
@@ -69,8 +111,33 @@ func (d *Daemon) RegisterSubagentProcess(_ *http.Request, req sockapi.RegisterSu
 		d.subagentProcesses = make(map[string]int)
 	}
 	d.subagentProcesses[req.ChildSessionID] = req.PID
+	if req.RunID != "" {
+		if d.subagentRunIDs == nil {
+			d.subagentRunIDs = make(map[string]string)
+		}
+		d.subagentRunIDs[req.ChildSessionID] = req.RunID
+	}
 	d.subagentMu.Unlock()
 	return nil
+}
+
+func (d *Daemon) HeartbeatSubagentChild(r *http.Request, req sockapi.HeartbeatSubagentChildRequest) error {
+	if req.RunID == "" {
+		return fmt.Errorf("%w: runId is required", sockapi.ErrBadSubagentRequest)
+	}
+	status := req.Status
+	if status == "" {
+		status = "running"
+	}
+	_, err := api.NewClient(d.cfg.ServerURL).HeartbeatSubagentChild(r.Context(), api.HeartbeatSubagentChildRequest{
+		MachineID:      d.cfg.MachineID,
+		AuthToken:      d.cfg.AuthToken,
+		RunID:          req.RunID,
+		ChildSessionID: req.ChildSessionID,
+		PID:            req.PID,
+		Status:         status,
+	})
+	return err
 }
 
 func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubagentEventRequest) error {
@@ -107,7 +174,7 @@ func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubage
 	return nil
 }
 
-func (d *Daemon) sendSubagentStarted(ctx context.Context, parentSessionID string, parentToolCallID string, childSessionID string, projectID string, agentName string, model string) error {
+func (d *Daemon) sendSubagentStarted(ctx context.Context, runID string, parentSessionID string, parentToolCallID string, childSessionID string, projectID string, runIndex int, mode string, task string, agentName string, model string) error {
 	if d.manager == nil {
 		return nil
 	}
@@ -118,10 +185,14 @@ func (d *Daemon) sendSubagentStarted(ctx context.Context, parentSessionID string
 	payload := map[string]any{
 		"type":             "subagent_status",
 		"status":           "started",
+		"runId":            runID,
 		"parentSessionId":  parentSessionID,
 		"parentToolCallId": parentToolCallID,
 		"childSessionId":   childSessionID,
 		"projectId":        projectID,
+		"runIndex":         runIndex,
+		"mode":             mode,
+		"task":             task,
 		"agentName":        agentName,
 		"model":            model,
 	}
@@ -147,6 +218,7 @@ func (d *Daemon) FinalizeSubagentChild(r *http.Request, req sockapi.FinalizeSuba
 	resp, err := api.NewClient(d.cfg.ServerURL).FinalizeSubagentChild(r.Context(), api.FinalizeSubagentChildRequest{
 		MachineID:         d.cfg.MachineID,
 		AuthToken:         d.cfg.AuthToken,
+		RunID:             req.RunID,
 		ChildSessionID:    req.ChildSessionID,
 		Status:            status,
 		TotalInputTokens:  req.TotalInputTokens,
@@ -166,14 +238,16 @@ func (d *Daemon) FinalizeSubagentChild(r *http.Request, req sockapi.FinalizeSuba
 	delete(d.subagentStreams, req.ChildSessionID)
 	delete(d.subagentSeq, req.ChildSessionID)
 	delete(d.subagentProcesses, req.ChildSessionID)
+	delete(d.subagentRunIDs, req.ChildSessionID)
 	d.subagentMu.Unlock()
 	if sendErr != nil {
-		return sockapi.FinalizeSubagentChildResponse{}, sendErr
+		slog.Warn("send subagent terminal status failed", "childSessionId", req.ChildSessionID, "err", sendErr)
 	}
 
 	return sockapi.FinalizeSubagentChildResponse{
 		OK:              resp.OK,
 		Status:          resp.Status,
+		RunID:           resp.RunID,
 		ChildSessionID:  resp.ChildSessionID,
 		ParentSessionID: resp.ParentSessionID,
 		ProjectID:       resp.ProjectID,
@@ -211,7 +285,7 @@ func (d *Daemon) sendSubagentStatus(sessionID string, status string, inputTokens
 	if err != nil {
 		return err
 	}
-	sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	sendCtx, cancel := context.WithTimeout(context.Background(), subagentStatusSendTimeout)
 	defer cancel()
 	return d.client.Send(sendCtx, &protocol.Stream{
 		Type:           protocol.MsgTypeStream,
@@ -228,6 +302,10 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 	if d.subagentProcesses != nil {
 		pid = d.subagentProcesses[sessionID]
 	}
+	runID := ""
+	if d.subagentRunIDs != nil {
+		runID = d.subagentRunIDs[sessionID]
+	}
 	d.subagentMu.Unlock()
 	if pid <= 0 {
 		return false
@@ -241,12 +319,14 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 			return false
 		}
 		d.deleteSubagentProcess(sessionID)
+		d.scheduleCancelledSubagentFallback(sessionID, runID)
 		return true
 	}
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		return false
 	}
 	d.deleteSubagentProcess(sessionID)
+	d.scheduleCancelledSubagentFallback(sessionID, runID)
 	go func() {
 		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
@@ -254,6 +334,51 @@ func (d *Daemon) cancelSubagentChild(sessionID string) bool {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}()
 	return true
+}
+
+func (d *Daemon) scheduleCancelledSubagentFallback(sessionID string, runID string) {
+	if runID == "" {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(subagentCancelFinalizeDelay)
+		defer timer.Stop()
+		<-timer.C
+
+		d.subagentMu.Lock()
+		stillTracked := d.subagentRunIDs != nil && d.subagentRunIDs[sessionID] == runID
+		d.subagentMu.Unlock()
+		if !stillTracked {
+			return
+		}
+		d.finalizeCancelledSubagent(sessionID, runID)
+	}()
+}
+
+func (d *Daemon) finalizeCancelledSubagent(sessionID string, runID string) {
+	if runID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := api.NewClient(d.cfg.ServerURL).FinalizeSubagentChild(ctx, api.FinalizeSubagentChildRequest{
+		MachineID:      d.cfg.MachineID,
+		AuthToken:      d.cfg.AuthToken,
+		RunID:          runID,
+		ChildSessionID: sessionID,
+		Status:         "cancelled",
+		TotalCostUSD:   "0",
+		TurnCount:      1,
+		ErrorMessage:   "subagent cancelled",
+	})
+	if err != nil {
+		slog.Warn("finalize cancelled subagent failed", "childSessionId", sessionID, "err", err)
+	}
+	d.subagentMu.Lock()
+	delete(d.subagentStreams, sessionID)
+	delete(d.subagentSeq, sessionID)
+	delete(d.subagentRunIDs, sessionID)
+	d.subagentMu.Unlock()
 }
 
 func (d *Daemon) deleteSubagentProcess(sessionID string) {

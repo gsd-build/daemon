@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/pi"
+	"github.com/gsd-build/daemon/internal/relay"
 	"github.com/gsd-build/daemon/internal/session"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	protocol "github.com/gsd-build/protocol-go"
@@ -27,6 +29,8 @@ func TestCreateSubagentChildEmitsStartedStatusToParentSession(t *testing.T) {
 			MachineID        string `json:"machineId"`
 			ParentSessionID  string `json:"parentSessionId"`
 			ParentToolCallID string `json:"parentToolCallId"`
+			RunIndex         int    `json:"runIndex"`
+			Mode             string `json:"mode"`
 			AgentName        string `json:"agentName"`
 			Task             string `json:"task"`
 		}
@@ -36,17 +40,27 @@ func TestCreateSubagentChildEmitsStartedStatusToParentSession(t *testing.T) {
 		if body.ParentSessionID != "parent-session-1" || body.ParentToolCallID != "tool-subagent-1" {
 			t.Fatalf("body = %#v", body)
 		}
+		if body.RunIndex != 1 || body.Mode != "single" {
+			t.Fatalf("run identity = %#v", body)
+		}
 		w.Header().Set("content-type", "application/json")
 		fmt.Fprint(w, `{
+			"runId":"run-1",
 			"childSessionId":"child-session-1",
 			"parentSessionId":"parent-session-1",
 			"projectId":"project-1",
+			"parentToolCallId":"tool-subagent-1",
+			"runIndex":1,
+			"mode":"single",
+			"status":"queued",
 			"agent":{
+				"id":"agent-1",
 				"name":"scout",
 				"description":"Read-only scout",
 				"systemPrompt":"Read only.",
 				"model":"anthropic/claude-haiku-4-5",
-				"tools":["read","grep"]
+				"tools":["read","grep"],
+				"versionHash":"agent-version-1"
 			}
 		}`)
 	}))
@@ -91,6 +105,12 @@ func TestCreateSubagentChildEmitsStartedStatusToParentSession(t *testing.T) {
 	if resp.ChildSessionID != "child-session-1" {
 		t.Fatalf("child session = %q", resp.ChildSessionID)
 	}
+	if resp.RunID != "run-1" || resp.RunIndex != 1 || resp.Mode != "single" {
+		t.Fatalf("run response = %#v", resp)
+	}
+	if resp.Agent.SystemPrompt != "Read only." || resp.Agent.VersionHash != "agent-version-1" {
+		t.Fatalf("agent snapshot = %#v", resp.Agent)
+	}
 
 	stream := waitForLoopStream(t, parentRelay, time.Second, func(frame *protocol.Stream) bool {
 		return frame.SessionID == "parent-session-1"
@@ -105,10 +125,14 @@ func TestCreateSubagentChildEmitsStartedStatusToParentSession(t *testing.T) {
 	want := map[string]any{
 		"type":             "subagent_status",
 		"status":           "started",
+		"runId":            "run-1",
 		"parentSessionId":  "parent-session-1",
 		"parentToolCallId": "tool-subagent-1",
 		"childSessionId":   "child-session-1",
 		"projectId":        "project-1",
+		"runIndex":         float64(1),
+		"mode":             "single",
+		"task":             "Inspect README",
 		"agentName":        "scout",
 		"model":            "anthropic/claude-haiku-4-5",
 	}
@@ -116,6 +140,71 @@ func TestCreateSubagentChildEmitsStartedStatusToParentSession(t *testing.T) {
 		if event[key] != value {
 			t.Fatalf("event[%s] = %#v, want %#v in %#v", key, event[key], value, event)
 		}
+	}
+}
+
+func TestFinalizeSubagentChildIgnoresLiveStatusFailureAfterCloudSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/daemon/subagents/finalize" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var body struct {
+			MachineID      string `json:"machineId"`
+			RunID          string `json:"runId"`
+			ChildSessionID string `json:"childSessionId"`
+			Status         string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.RunID != "run-1" || body.ChildSessionID != "child-session-1" || body.Status != "done" {
+			t.Fatalf("body = %#v", body)
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{
+			"ok":true,
+			"status":"succeeded",
+			"runId":"run-1",
+			"childSessionId":"child-session-1",
+			"parentSessionId":"parent-session-1",
+			"projectId":"project-1",
+			"finalText":"Done."
+		}`)
+	}))
+	defer server.Close()
+
+	oldTimeout := subagentStatusSendTimeout
+	subagentStatusSendTimeout = time.Millisecond
+	defer func() { subagentStatusSendTimeout = oldTimeout }()
+
+	d := &Daemon{
+		cfg: &config.Config{
+			MachineID: "machine-1",
+			AuthToken: "machine-token",
+			ServerURL: server.URL,
+		},
+		client:            &relay.Client{},
+		subagentStreams:   map[string]*pi.ChildTranslator{},
+		subagentSeq:       map[string]int64{},
+		subagentProcesses: map[string]int{},
+		subagentRunIDs:    map[string]string{},
+	}
+
+	resp, err := d.FinalizeSubagentChild(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", nil), sockapi.FinalizeSubagentChildRequest{
+		RunID:             "run-1",
+		ChildSessionID:    "child-session-1",
+		Status:            "done",
+		TotalInputTokens:  10,
+		TotalOutputTokens: 5,
+		TotalCostUSD:      "0.0001",
+		TurnCount:         1,
+		FinalText:         "Done.",
+	})
+	if err != nil {
+		t.Fatalf("FinalizeSubagentChild: %v", err)
+	}
+	if resp.Status != "succeeded" || resp.RunID != "run-1" {
+		t.Fatalf("response = %#v", resp)
 	}
 }
 

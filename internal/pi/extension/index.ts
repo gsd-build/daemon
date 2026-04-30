@@ -44,6 +44,13 @@ import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
 import { registerSubagentTool } from "./subagent.js";
+import {
+  filterToolsByPolicy,
+  hasSubagentToolPolicy,
+  isToolAllowed,
+  parseAllowedTools,
+  registerIfAllowed,
+} from "./tool-policy.js";
 import { Type } from "@sinclair/typebox";
 
 const CLAUDE_BUILTINS = [
@@ -130,11 +137,16 @@ function piToolName(toolDef: PiTool | ReturnType<typeof browserToolDefinition>) 
 }
 
 export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserGrant?: BrowserGrant) {
+  const allowed = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
   const merged: PiTool[] = [];
   const seenNames = new Set<string>();
-  const browserTools = buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[];
+  const browserTools =
+    !hasSubagentToolPolicy() || isToolAllowed("browser", allowed)
+      ? (buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[])
+      : [];
+  const visibleContextTools = filterToolsByPolicy((contextTools ?? []) as any[], allowed) as PiTool[];
 
-  for (const toolDef of [...(contextTools ?? []), ...browserTools]) {
+  for (const toolDef of [...visibleContextTools, ...browserTools]) {
     const name = piToolName(toolDef);
     if (name) {
       if (seenNames.has(name)) continue;
@@ -144,6 +156,14 @@ export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserG
   }
 
   return merged;
+}
+
+function registerVisibleTool(pi: ExtensionAPI, allowed: Set<string>, category: string, definition: any) {
+  if (!hasSubagentToolPolicy()) {
+    pi.registerTool(definition);
+    return true;
+  }
+  return registerIfAllowed(pi, allowed, category, definition);
 }
 
 function browserGrantFromEnv() {
@@ -799,14 +819,21 @@ function registerBrowserTool(pi: ExtensionAPI) {
 }
 
 export default function (pi: ExtensionAPI) {
+  const subagentAllowedTools = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
   registerAskHumanTool(pi);
-  registerBrowserTool(pi);
+  if (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy()) {
+    registerBrowserTool(pi);
+  }
   pi.registerTool(askUserQuestionsTool as any);
   for (const backgroundTool of backgroundTools) {
-    pi.registerTool(backgroundTool as any);
+    registerVisibleTool(pi, subagentAllowedTools, "shell", backgroundTool as any);
   }
-  registerPlanTools(pi as any);
-  registerSubagentTool(pi as any);
+  if (isToolAllowed("plan", subagentAllowedTools) || !hasSubagentToolPolicy()) {
+    registerPlanTools(pi as any);
+  }
+  if (!hasSubagentToolPolicy()) {
+    registerSubagentTool(pi as any);
+  }
   pi.registerProvider("claude-cli", {
     baseUrl: "http://localhost/unused",
     apiKey: "CLAUDE_CLI_KEY",

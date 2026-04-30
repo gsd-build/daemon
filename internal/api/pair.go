@@ -59,11 +59,13 @@ type RefreshTokenResponse struct {
 }
 
 type SubagentDefinition struct {
+	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	Description  string   `json:"description"`
 	SystemPrompt string   `json:"systemPrompt"`
 	Model        string   `json:"model"`
 	Tools        []string `json:"tools"`
+	VersionHash  string   `json:"versionHash"`
 }
 
 type ListSubagentsRequest struct {
@@ -84,20 +86,43 @@ type CreateSubagentChildRequest struct {
 	ParentSessionID  string `json:"parentSessionId"`
 	ParentMessageID  string `json:"parentMessageId,omitempty"`
 	ParentToolCallID string `json:"parentToolCallId"`
+	RunIndex         int    `json:"runIndex"`
+	Mode             string `json:"mode"`
 	AgentName        string `json:"agentName"`
 	Task             string `json:"task"`
 }
 
 type CreateSubagentChildResponse struct {
-	ChildSessionID  string             `json:"childSessionId"`
-	ParentSessionID string             `json:"parentSessionId"`
-	ProjectID       string             `json:"projectId"`
-	Agent           SubagentDefinition `json:"agent"`
+	RunID            string             `json:"runId"`
+	ChildSessionID   string             `json:"childSessionId"`
+	ParentSessionID  string             `json:"parentSessionId"`
+	ProjectID        string             `json:"projectId"`
+	ParentToolCallID string             `json:"parentToolCallId"`
+	RunIndex         int                `json:"runIndex"`
+	Mode             string             `json:"mode"`
+	Status           string             `json:"status"`
+	Agent            SubagentDefinition `json:"agent"`
+}
+
+type HeartbeatSubagentChildRequest struct {
+	MachineID      string `json:"machineId"`
+	AuthToken      string `json:"-"`
+	RunID          string `json:"runId"`
+	ChildSessionID string `json:"childSessionId,omitempty"`
+	PID            int    `json:"pid,omitempty"`
+	Status         string `json:"status,omitempty"`
+}
+
+type HeartbeatSubagentChildResponse struct {
+	OK     bool   `json:"ok"`
+	RunID  string `json:"runId"`
+	Status string `json:"status"`
 }
 
 type FinalizeSubagentChildRequest struct {
 	MachineID         string `json:"machineId"`
 	AuthToken         string `json:"-"`
+	RunID             string `json:"runId,omitempty"`
 	ChildSessionID    string `json:"childSessionId"`
 	Status            string `json:"status"`
 	TotalInputTokens  int64  `json:"totalInputTokens"`
@@ -111,6 +136,7 @@ type FinalizeSubagentChildRequest struct {
 type FinalizeSubagentChildResponse struct {
 	OK              bool   `json:"ok"`
 	Status          string `json:"status"`
+	RunID           string `json:"runId"`
 	ChildSessionID  string `json:"childSessionId"`
 	ParentSessionID string `json:"parentSessionId"`
 	ProjectID       string `json:"projectId"`
@@ -200,6 +226,14 @@ func (c *Client) CreateSubagentChild(ctx context.Context, req CreateSubagentChil
 	var out CreateSubagentChildResponse
 	if err := c.postBearer(ctx, "/api/daemon/subagents/child", req.AuthToken, req, &out); err != nil {
 		return nil, fmt.Errorf("create subagent child: %w", err)
+	}
+	return &out, nil
+}
+
+func (c *Client) HeartbeatSubagentChild(ctx context.Context, req HeartbeatSubagentChildRequest) (*HeartbeatSubagentChildResponse, error) {
+	var out HeartbeatSubagentChildResponse
+	if err := c.postBearer(ctx, "/api/daemon/subagents/heartbeat", req.AuthToken, req, &out); err != nil {
+		return nil, fmt.Errorf("heartbeat subagent child: %w", err)
 	}
 	return &out, nil
 }

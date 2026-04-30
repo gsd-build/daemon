@@ -70,6 +70,19 @@ func newHandler(p StatusProvider) http.Handler {
 		}
 		writeSubagentResponse(w, map[string]bool{"ok": true}, provider.RegisterSubagentProcess(r, req))
 	})
+	mux.HandleFunc("POST /subagents/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		provider, ok := p.(SubagentProvider)
+		if !ok {
+			http.Error(w, "subagent provider unavailable", http.StatusNotFound)
+			return
+		}
+		var req HeartbeatSubagentChildRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeInvalidSubagentJSON(w, err)
+			return
+		}
+		writeSubagentResponse(w, map[string]bool{"ok": true}, provider.HeartbeatSubagentChild(r, req))
+	})
 	mux.HandleFunc("POST /subagents/finalize", func(w http.ResponseWriter, r *http.Request) {
 		provider, ok := p.(SubagentProvider)
 		if !ok {
