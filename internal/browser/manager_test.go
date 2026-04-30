@@ -64,6 +64,25 @@ func (failingSender) Send(ctx context.Context, msg any) error {
 	return errors.New("send failed")
 }
 
+func TestBrowserUserInputParamsPreservesZeroRenderedOrigin(t *testing.T) {
+	params := browserUserInputParams(&protocol.BrowserUserInput{
+		Type:            protocol.MsgTypeBrowserUserInput,
+		Kind:            protocol.BrowserInputKindClick,
+		CoordinateSpace: protocol.BrowserCoordinateSpaceFrameCssPixels,
+		RenderedLeft:    0,
+		RenderedTop:     0,
+		RenderedWidth:   800,
+		RenderedHeight:  600,
+	})
+
+	if value, ok := params["renderedLeft"]; !ok || value != float64(0) {
+		t.Fatalf("renderedLeft = %#v, %v; want 0 and present", value, ok)
+	}
+	if value, ok := params["renderedTop"]; !ok || value != float64(0) {
+		t.Fatalf("renderedTop = %#v, %v; want 0 and present", value, ok)
+	}
+}
+
 func TestManagerPausesToolCallsWhileLexControlsBrowser(t *testing.T) {
 	svc := &fakeService{}
 	sent := &recordingSender{}

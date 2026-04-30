@@ -118,6 +118,10 @@ func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error
 }
 
 func (s LocalService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
+	return s.rpc(ctx, browserID, "cloud_user_input", browserUserInputParams(input), nil)
+}
+
+func browserUserInputParams(input *protocol.BrowserUserInput) map[string]any {
 	params := map[string]any{
 		"kind": input.Kind,
 	}
@@ -166,10 +170,8 @@ func (s LocalService) UserInput(ctx context.Context, browserID string, input *pr
 	if input.DevicePixelRatio != 0 {
 		params["devicePixelRatio"] = input.DevicePixelRatio
 	}
-	if input.RenderedLeft != 0 {
+	if input.CoordinateSpace != "" || input.RenderedWidth != 0 || input.RenderedHeight != 0 {
 		params["renderedLeft"] = input.RenderedLeft
-	}
-	if input.RenderedTop != 0 {
 		params["renderedTop"] = input.RenderedTop
 	}
 	if input.RenderedWidth != 0 {
@@ -178,7 +180,7 @@ func (s LocalService) UserInput(ctx context.Context, browserID string, input *pr
 	if input.RenderedHeight != 0 {
 		params["renderedHeight"] = input.RenderedHeight
 	}
-	return s.rpc(ctx, browserID, "cloud_user_input", params, nil)
+	return params
 }
 
 func (s LocalService) Close(ctx context.Context, browserID string) error {
