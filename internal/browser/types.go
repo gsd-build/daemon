@@ -20,6 +20,9 @@ type OpenRequest struct {
 	MachineID  string
 	IdentityID string
 	Mode       string
+	InitialURL string
+	BridgeMode string
+	PreviewID  string
 	ExpiresAt  string
 }
 
@@ -30,14 +33,17 @@ type OpenResult struct {
 }
 
 type Frame struct {
-	Sequence    int64
-	ContentType string
-	DataBase64  string
-	Width       int
-	Height      int
-	CapturedAt  string
-	URL         string
-	Title       string
+	Sequence         int64
+	ContentType      string
+	DataBase64       string
+	Width            int
+	Height           int
+	ViewportWidth    int
+	ViewportHeight   int
+	DevicePixelRatio float64
+	CapturedAt       string
+	URL              string
+	Title            string
 }
 
 type ToolResult struct {

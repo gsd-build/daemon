@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,12 +27,15 @@ func (f *fakeService) Close(ctx context.Context, browserID string) error {
 func (f *fakeService) Frame(ctx context.Context, browserID string) (Frame, error) {
 	f.calls = append(f.calls, "frame:"+browserID)
 	return Frame{
-		Sequence:    1,
-		ContentType: "image/jpeg",
-		DataBase64:  "aGVsbG8=",
-		Width:       1280,
-		Height:      720,
-		CapturedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Sequence:         1,
+		ContentType:      "image/jpeg",
+		DataBase64:       "aGVsbG8=",
+		Width:            1280,
+		Height:           720,
+		ViewportWidth:    1280,
+		ViewportHeight:   720,
+		DevicePixelRatio: 2,
+		CapturedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil
 }
 
@@ -247,6 +251,87 @@ func TestManagerRejectsExpiredUserInput(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected expired user input to fail")
+	}
+}
+
+func TestClaimRejectsInvalidOwner(t *testing.T) {
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	manager := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+	if err := manager.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	err := manager.Claim(context.Background(), &protocol.BrowserControlClaim{
+		Type:      protocol.MsgTypeBrowserControlClaim,
+		BrowserID: "browser_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Owner:     "mallory",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid browser control owner") {
+		t.Fatalf("expected invalid owner error, got %v", err)
+	}
+}
+
+func TestUserInputRejectsStaleControlVersion(t *testing.T) {
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	manager := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+	if err := manager.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	err := manager.Claim(context.Background(), &protocol.BrowserControlClaim{
+		Type:      protocol.MsgTypeBrowserControlClaim,
+		BrowserID: "browser_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Owner:     protocol.BrowserOwnerLex,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = manager.UserInput(context.Background(), &protocol.BrowserUserInput{
+		Type:           protocol.MsgTypeBrowserUserInput,
+		InputID:        "input-1",
+		BrowserID:      "browser_1",
+		SessionID:      "session_1",
+		ChannelID:      "channel_1",
+		Owner:          protocol.BrowserOwnerLex,
+		Kind:           protocol.BrowserInputKindClick,
+		ControlVersion: 99,
+	})
+	if err == nil || !strings.Contains(err.Error(), "stale browser control version") {
+		t.Fatalf("expected stale control version error, got %v", err)
+	}
+	if hasCall(svc.calls, "input:click") {
+		t.Fatalf("stale input reached service")
+	}
+	var foundAck bool
+	for _, msg := range sent.msgs {
+		ack, ok := msg.(*protocol.BrowserUserInputAck)
+		if ok && ack.InputID == "input-1" {
+			foundAck = true
+			if ack.Accepted || ack.Reason != protocol.BrowserInputRejectStaleFrame {
+				t.Fatalf("ack = %+v", ack)
+			}
+		}
+	}
+	if !foundAck {
+		t.Fatalf("expected stale input ack in %#v", sent.msgs)
 	}
 }
 
