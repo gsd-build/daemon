@@ -160,6 +160,11 @@ func processArgs(opts Options) []string {
 	return args
 }
 
+// ProcessArgs returns the daemon Pi flags shared by RPC and TUI launchers.
+func ProcessArgs(opts Options) []string {
+	return processArgs(opts)
+}
+
 func appendedSystemPrompt(opts Options) string {
 	sections := make([]string, 0, 2)
 	if customInstructions := strings.TrimSpace(opts.CustomInstructions); customInstructions != "" {
@@ -234,6 +239,11 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 		),
 		opts,
 	)
+}
+
+// ProcessEnv returns the daemon Pi environment shared by RPC and TUI launchers.
+func ProcessEnv(ctx context.Context, base []string, opts Options) []string {
+	return processEnv(ctx, base, opts)
 }
 
 func subagentEnv(base []string, opts Options) []string {
