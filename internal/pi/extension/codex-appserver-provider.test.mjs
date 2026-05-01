@@ -14,10 +14,10 @@ import {
   registerCodexAppServerProvider,
 } from "./codex-appserver-provider.ts";
 
-test("codexModelDefinitions exposes GPT-5.5 and GPT-5.4", () => {
+test("codexModelDefinitions exposes cloud-selectable Codex AppServer models", () => {
   assert.deepEqual(
     codexModelDefinitions.map((model) => model.id),
-    ["gpt-5.5", "gpt-5.4"],
+    ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"],
   );
   for (const model of codexModelDefinitions) {
     assert.equal(model.provider, "codex-appserver");
@@ -409,6 +409,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (message.method === "turn/start") {
     send({ id: message.id, result: { turn: { id: "turn_1" } } });
+    send({ method: "turn/started", params: { turn: { id: "turn_1" } } });
+    send({ method: "item/started", params: { item: { id: "item_1", type: "agentMessage" } } });
+    send({ method: "item/agentMessage/delta", params: { itemId: "item_1", delta: "ok" } });
+    send({ method: "item/completed", params: { item: { id: "item_1", type: "agentMessage" } } });
     send({ method: "turn/completed", params: { turn: { id: "turn_1", status: "completed" } } });
     setTimeout(() => process.exit(0), 20);
   }
@@ -446,5 +450,57 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     else process.env.FAKE_CODEX_STATS_FILE = previousStats;
     if (previousGrant === undefined) delete process.env.GSD_CODEX_FULL_ACCESS_GRANT;
     else process.env.GSD_CODEX_FULL_ACCESS_GRANT = previousGrant;
+  }
+});
+
+test("codex appserver provider surfaces empty completed turns as errors", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "fake-codex-appserver-empty-"));
+  const codexBin = path.join(dir, "codex");
+  await writeFile(codexBin, `#!/usr/bin/env node
+const { createInterface } = await import("node:readline");
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "initialized") return;
+  if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread_empty" } } });
+    return;
+  }
+  if (message.method === "turn/start") {
+    process.stderr.write("selected model produced no events\\n");
+    send({ id: message.id, result: { turn: { id: "turn_empty" } } });
+    send({ method: "turn/completed", params: { turn: { id: "turn_empty", status: "completed" } } });
+    setTimeout(() => process.exit(0), 20);
+  }
+});
+`);
+  await chmod(codexBin, 0o700);
+
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${previousPath ?? ""}`;
+  try {
+    let provider;
+    registerCodexAppServerProvider({
+      registerProvider(name, definition) {
+        if (name === "codex-appserver") provider = definition;
+      },
+    });
+
+    const model = { id: "gpt-5.4-mini", api: "openai-responses", provider: "codex-appserver" };
+    const events = await collectStream(provider.streamSimple(model, {
+      messages: [{ role: "user", content: [{ type: "text", text: "first" }] }],
+      tools: [],
+    }));
+
+    assert.equal(events.at(-1)?.type, "error");
+    assert.match(events.at(-1)?.error?.errorMessage, /completed without assistant content/);
+    assert.match(events.at(-1)?.error?.errorMessage, /selected model produced no events/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
   }
 });

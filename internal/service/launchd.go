@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -48,6 +49,23 @@ func (l *launchdPlatform) generatePlist() string {
 	if userPath == "" {
 		userPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	}
+	userName := os.Getenv("USER")
+	if userName == "" {
+		if current, err := user.Current(); err == nil {
+			userName = strings.TrimSpace(current.Username)
+			if idx := strings.LastIndexAny(userName, `\`); idx >= 0 {
+				userName = userName[idx+1:]
+			}
+		}
+	}
+	logName := os.Getenv("LOGNAME")
+	if logName == "" {
+		logName = userName
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -62,7 +80,15 @@ func (l *launchdPlatform) generatePlist() string {
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>HOME</key>
+		<string>%s</string>
 		<key>PATH</key>
+		<string>%s</string>
+		<key>USER</key>
+		<string>%s</string>
+		<key>LOGNAME</key>
+		<string>%s</string>
+		<key>SHELL</key>
 		<string>%s</string>
 	</dict>
 	<key>KeepAlive</key>
@@ -75,7 +101,7 @@ func (l *launchdPlatform) generatePlist() string {
 	<integer>10</integer>
 </dict>
 </plist>
-`, launchdLabel, BinaryPath(), userPath, LogPath(), LogPath())
+`, launchdLabel, BinaryPath(), HomeDir(), userPath, userName, logName, shell, LogPath(), LogPath())
 }
 
 func (l *launchdPlatform) Install() error {

@@ -393,6 +393,20 @@ func TestProcessEnvExcludesUnrelatedSecrets(t *testing.T) {
 	}
 }
 
+func TestProcessEnvBackfillsUserIdentity(t *testing.T) {
+	env := processEnv(context.Background(), []string{"PATH=/usr/bin"}, Options{Provider: "claude-cli"})
+	got := strings.Join(env, "\n")
+	if !strings.Contains(got, "HOME=") {
+		t.Fatalf("env missing HOME: %s", got)
+	}
+	if !strings.Contains(got, "USER=") {
+		t.Fatalf("env missing USER: %s", got)
+	}
+	if !strings.Contains(got, "LOGNAME=") {
+		t.Fatalf("env missing LOGNAME: %s", got)
+	}
+}
+
 func TestExecutorControlsWarmClaudeSDKEnv(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin",

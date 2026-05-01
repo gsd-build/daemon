@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
 	"strings"
 	"syscall"
@@ -223,7 +224,7 @@ func cleanRuntimeValue(value string) string {
 
 func processEnv(ctx context.Context, base []string, opts Options) []string {
 	provider := ProviderOrDefault(opts.Provider)
-	allowedBase := allowlistedBaseEnv(base, provider)
+	allowedBase := ensureUserIdentityEnv(allowlistedBaseEnv(base, provider))
 	return subagentEnv(
 		warmClaudeSDKEnv(
 			planCapabilityEnv(
@@ -244,6 +245,45 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 	)
 }
 
+func ensureUserIdentityEnv(env []string) []string {
+	seen := make(map[string]bool, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && key != "" {
+			seen[key] = true
+		}
+	}
+
+	if !seen["HOME"] {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			env = append(env, "HOME="+home)
+			seen["HOME"] = true
+		}
+	}
+
+	username := strings.TrimSpace(os.Getenv("USER"))
+	if username == "" {
+		if current, err := user.Current(); err == nil {
+			username = strings.TrimSpace(current.Username)
+			if idx := strings.LastIndexAny(username, `\`); idx >= 0 {
+				username = username[idx+1:]
+			}
+		}
+	}
+	if username != "" {
+		if !seen["USER"] {
+			env = append(env, "USER="+username)
+			seen["USER"] = true
+		}
+		if !seen["LOGNAME"] {
+			env = append(env, "LOGNAME="+username)
+			seen["LOGNAME"] = true
+		}
+	}
+
+	return env
+}
+
 func allowlistedBaseEnv(base []string, provider string) []string {
 	providerKey := providerCredentialKey(provider)
 	out := make([]string, 0, len(base))
@@ -261,7 +301,7 @@ func allowlistedBaseEnv(base []string, provider string) []string {
 
 func isAllowedBaseEnvKey(key string) bool {
 	switch key {
-	case "PATH", "HOME", "SHELL", "TERM", "LANG", "LANGUAGE":
+	case "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE":
 		return true
 	}
 	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "FAKE_PI_")

@@ -69,6 +69,50 @@ export const codexModelDefinitions = [
     contextWindow: 400_000,
     maxTokens: 128_000,
   },
+  {
+    id: "gpt-5.4-mini",
+    name: "GPT-5.4 Mini",
+    api: "openai-responses" as any,
+    provider: "codex-appserver",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  },
+  {
+    id: "gpt-5.3-codex",
+    name: "GPT-5.3 Codex",
+    api: "openai-responses" as any,
+    provider: "codex-appserver",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  },
+  {
+    id: "gpt-5.3-codex-spark",
+    name: "GPT-5.3 Codex Spark",
+    api: "openai-responses" as any,
+    provider: "codex-appserver",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  },
+  {
+    id: "gpt-5.2",
+    name: "GPT-5.2",
+    api: "openai-responses" as any,
+    provider: "codex-appserver",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  },
 ] as const;
 
 function emptyUsage() {
@@ -93,6 +137,14 @@ export function codexOutputForModel(model: Pick<Model<any>, "id" | "api">): Assi
     stopReason: "stop",
     timestamp: Date.now(),
   };
+}
+
+function assistantMessageHasPayload(message: AssistantMessage) {
+  return message.content.some((block: any) => {
+    if (block?.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    if (block?.type === "toolCall") return typeof block.name === "string" && block.name.length > 0;
+    return Boolean(block);
+  });
 }
 
 export function codexDynamicToolsFromContext(context: Pick<Context, "tools">) {
@@ -447,6 +499,7 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
   let activeTurnId: string | null = null;
   let activeRun: ActiveRun | null = null;
   let pendingBridge: PendingBridge | null = null;
+  let codexStderrTail = "";
   const pendingRequests = new Map<string | number, RpcPending>();
 
   function sendToCodex(message: any) {
@@ -503,10 +556,14 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
   function endActiveRunWithError(message: string) {
     if (!activeRun) return;
     activeRun.output.stopReason = "error";
-    activeRun.output.errorMessage = message;
+    activeRun.output.errorMessage = codexStderrTail ? `${message}\n\nCodex stderr:\n${codexStderrTail}` : message;
     activeRun.stream.push({ type: "error", reason: "error", error: activeRun.output });
     activeRun.stream.end();
     activeRun = null;
+  }
+
+  function rememberCodexStderr(chunk: unknown) {
+    codexStderrTail = `${codexStderrTail}${String(chunk)}`.slice(-4_000);
   }
 
   function resetCodexState(error: Error, killProcess = false) {
@@ -739,6 +796,18 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
       }
       case "turn/completed":
         run.output.stopReason = params.turn?.status === "interrupted" ? "aborted" : "stop";
+        if (run.output.stopReason === "stop" && !assistantMessageHasPayload(run.output)) {
+          run.output.stopReason = "error";
+          run.output.errorMessage = codexStderrTail
+            ? `Codex AppServer completed without assistant content.\n\nCodex stderr:\n${codexStderrTail}`
+            : "Codex AppServer completed without assistant content.";
+          run.stream.push({ type: "error", reason: "error", error: run.output });
+          run.stream.end();
+          activeRun = null;
+          activeTurnId = null;
+          pendingBridge = null;
+          break;
+        }
         run.stream.push({ type: "done", reason: run.output.stopReason === "stop" ? "stop" : "length", message: run.output });
         run.stream.end();
         activeRun = null;
@@ -753,13 +822,14 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
     if (initPromise) return initPromise;
 
     initPromise = (async () => {
+      codexStderrTail = "";
       codex = spawn(CODEX_BIN, ["app-server", "--listen", "stdio://"], {
         cwd: process.cwd(),
         stdio: ["pipe", "pipe", "pipe"],
       });
       rl = createInterface({ input: codex.stdout! });
       rl.on("line", handleCodexLine);
-      codex.stderr?.on("data", () => {});
+      codex.stderr?.on("data", rememberCodexStderr);
       codex.on("close", () => {
         resetCodexState(new Error("Codex process exited"));
       });
