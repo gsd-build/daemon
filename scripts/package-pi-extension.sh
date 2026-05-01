@@ -31,6 +31,7 @@ done < <(
     find . -maxdepth 1 -type f \( -name '*.js' -o -name '*.ts' \) \
       ! -name '*.test.*' \
       -print | sed 's#^\./##'
+    find gsd-browser-skill -type f -print
   } | sort -u
 )
 

@@ -20,6 +20,19 @@ exit 1
 	}
 }
 
+func TestProbeRuntimeInstalledWithSessionHealth(t *testing.T) {
+	bin := writeFakeBrowser(t, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "gsd-browser 0.1.20"; exit 0; fi
+if [ "$1" = "cloud-methods" ]; then echo '{"manifestVersion":1}'; exit 0; fi
+if [ "$1" = "daemon" ] && [ "$2" = "health" ]; then echo '{"session":{"browserConnected":true,"status":"healthy"}}'; exit 0; fi
+exit 1
+`)
+	got := ProbeRuntime(context.Background(), bin)
+	if !got.Ready || !got.Installed || !got.ChromeAvailable {
+		t.Fatalf("ProbeRuntime = %+v", got)
+	}
+}
+
 func TestProbeRuntimeMissingBinary(t *testing.T) {
 	got := ProbeRuntime(context.Background(), filepath.Join(t.TempDir(), "missing"))
 	if got.ErrorCode != "browser_not_installed" || got.Ready {
@@ -59,6 +72,19 @@ exit 1
 `)
 	got := ProbeRuntime(context.Background(), bin)
 	if got.ErrorCode != "chrome_missing" || got.Ready {
+		t.Fatalf("ProbeRuntime = %+v", got)
+	}
+}
+
+func TestProbeRuntimeSessionHealthChromeMissing(t *testing.T) {
+	bin := writeFakeBrowser(t, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "gsd-browser 0.1.20"; exit 0; fi
+if [ "$1" = "cloud-methods" ]; then echo '{"manifestVersion":1}'; exit 0; fi
+if [ "$1" = "daemon" ] && [ "$2" = "health" ]; then echo '{"session":{"browserConnected":false,"status":"stopped","reason":"daemon stopped"}}'; exit 0; fi
+exit 1
+`)
+	got := ProbeRuntime(context.Background(), bin)
+	if got.ErrorCode != "chrome_missing" || got.ErrorMessage != "daemon stopped" || got.Ready {
 		t.Fatalf("ProbeRuntime = %+v", got)
 	}
 }
