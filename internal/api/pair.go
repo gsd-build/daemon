@@ -35,6 +35,7 @@ type PairRequest struct {
 	OS               string `json:"os"`
 	Arch             string `json:"arch"`
 	DaemonVersion    string `json:"daemonVersion"`
+	InstallationID   string `json:"installationId,omitempty"`
 	CurrentMachineID string `json:"currentMachineId,omitempty"`
 }
 
