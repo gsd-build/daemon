@@ -49,6 +49,23 @@ test("codexDynamicToolsFromContext maps Pi tools into the gsd namespace", () => 
   assert.equal(dynamicTools[0].inputSchema.properties.questions.type, "array");
 });
 
+test("codexDynamicToolsFromContext hides tools for minimal profile", () => {
+  const previous = process.env.GSD_TOOL_PROFILE;
+  try {
+    process.env.GSD_TOOL_PROFILE = "minimal";
+    const dynamicTools = codexDynamicToolsFromContext({
+      tools: [{ name: "ask_user_questions", parameters: { type: "object" } }],
+    });
+    assert.deepEqual(dynamicTools, []);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.GSD_TOOL_PROFILE;
+    } else {
+      process.env.GSD_TOOL_PROFILE = previous;
+    }
+  }
+});
+
 test("codexOutputForModel stamps provider and empty usage", () => {
   const output = codexOutputForModel({ id: "gpt-5.5", api: "openai-responses" });
   assert.equal(output.provider, "codex-appserver");

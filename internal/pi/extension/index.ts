@@ -53,9 +53,11 @@ import {
 import {
   filterToolsByPolicy,
   hasSubagentToolPolicy,
+  isMinimalToolProfile,
   isToolAllowed,
   parseAllowedTools,
   registerIfAllowed,
+  toolProfile,
 } from "./tool-policy.js";
 import { Type } from "@sinclair/typebox";
 
@@ -156,6 +158,7 @@ function piToolName(toolDef: PiTool | ReturnType<typeof browserToolDefinition>) 
 }
 
 export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserGrant?: BrowserGrant) {
+  if (isMinimalToolProfile()) return [];
   const allowed = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
   const merged: PiTool[] = [];
   const seenNames = new Set<string>();
@@ -179,12 +182,124 @@ export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserG
   return merged;
 }
 
-function registerVisibleTool(pi: ExtensionAPI, allowed: Set<string>, category: string, definition: any) {
+type ToolRegistrationDiagnostic = {
+  name: string;
+  category: string;
+  schemaBytes: number;
+  descriptionBytes: number;
+};
+
+function jsonBytes(value: unknown) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? {}), "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+function describeRegisteredTool(category: string, definition: any): ToolRegistrationDiagnostic {
+  return {
+    name: String(definition?.name ?? ""),
+    category,
+    schemaBytes: jsonBytes(definition?.parameters ?? definition?.input_schema ?? {}),
+    descriptionBytes: Buffer.byteLength(String(definition?.description ?? ""), "utf8"),
+  };
+}
+
+function emitScaffoldDiagnostics(profile: string, registeredTools: ToolRegistrationDiagnostic[]) {
+  const totals = registeredTools.reduce(
+    (acc, toolDef) => {
+      acc.schemaBytes += toolDef.schemaBytes;
+      acc.descriptionBytes += toolDef.descriptionBytes;
+      acc.toolNameBytes += Buffer.byteLength(toolDef.name, "utf8");
+      return acc;
+    },
+    { schemaBytes: 0, descriptionBytes: 0, toolNameBytes: 0 },
+  );
+  process.stdout.write(JSON.stringify({
+    type: "scaffold_diagnostics",
+    source: "extension",
+    phase: "registered_tools",
+    taskId: process.env.GSD_TASK_ID ?? null,
+    sessionId: process.env.GSD_SESSION_ID ?? null,
+    channelId: process.env.GSD_CHANNEL_ID ?? null,
+    toolProfile: profile,
+    registeredToolCount: registeredTools.length,
+    registeredTools,
+    totals,
+    providers: ["claude-cli", "codex-appserver", "openrouter"],
+  }) + "\n");
+}
+
+function contextMessageChars(context: Context) {
+  return ((context.messages as any[]) ?? []).reduce(
+    (total, message) => total + Buffer.byteLength(JSON.stringify(message?.content ?? ""), "utf8"),
+    0,
+  );
+}
+
+function toolSchemaBytes(tools: any[]) {
+  return tools.reduce(
+    (total, toolDef) => total + jsonBytes(toolDef?.parameters ?? toolDef?.input_schema ?? {}),
+    0,
+  );
+}
+
+function emitProviderContextDiagnostics(
+  provider: string,
+  model: Model<any>,
+  context: Context,
+  mergedTools: any[],
+) {
+  const contextTools = (context.tools as PiTool[] | undefined) ?? [];
+  process.stdout.write(JSON.stringify({
+    type: "scaffold_diagnostics",
+    source: "extension",
+    phase: "provider_context",
+    taskId: process.env.GSD_TASK_ID ?? null,
+    sessionId: process.env.GSD_SESSION_ID ?? null,
+    channelId: process.env.GSD_CHANNEL_ID ?? null,
+    provider,
+    model: model.id,
+    toolProfile: toolProfile(),
+    systemPromptChars: Buffer.byteLength(String(context.systemPrompt ?? ""), "utf8"),
+    deliveredSystemPromptChars: isMinimalToolProfile()
+      ? 0
+      : Buffer.byteLength(String(context.systemPrompt ?? ""), "utf8"),
+    messageCount: ((context.messages as any[]) ?? []).length,
+    messageContentChars: contextMessageChars(context),
+    contextToolCount: contextTools.length,
+    contextToolSchemaBytes: toolSchemaBytes(contextTools as any[]),
+    mergedToolCount: mergedTools.length,
+    mergedToolSchemaBytes: toolSchemaBytes(mergedTools),
+  }) + "\n");
+}
+
+function registerTrackedTool(
+  pi: ExtensionAPI,
+  registeredTools: ToolRegistrationDiagnostic[],
+  category: string,
+  definition: any,
+) {
+  pi.registerTool(definition);
+  registeredTools.push(describeRegisteredTool(category, definition));
+}
+
+function registerVisibleTool(
+  pi: ExtensionAPI,
+  allowed: Set<string>,
+  category: string,
+  definition: any,
+  registeredTools?: ToolRegistrationDiagnostic[],
+) {
   if (!hasSubagentToolPolicy()) {
     pi.registerTool(definition);
+    registeredTools?.push(describeRegisteredTool(category, definition));
     return true;
   }
-  return registerIfAllowed(pi, allowed, category, definition);
+  const registered = registerIfAllowed(pi, allowed, category, definition);
+  if (registered) registeredTools?.push(describeRegisteredTool(category, definition));
+  return registered;
 }
 
 function browserGrantFromEnv() {
@@ -571,6 +686,7 @@ function streamClaudeSdk(
     const browserGrant = browserGrantFromEnv();
     const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
     const sdkTools = piTools.map((t) => piToolToSdkTool(t));
+    emitProviderContextDiagnostics("claude-cli", model, context, piTools as any[]);
 
     const piMcp = createSdkMcpServer({
       name: "pi-tools",
@@ -595,7 +711,7 @@ function streamClaudeSdk(
         permissionMode: "bypassPermissions",
         stderr: rememberSdkStderr,
       };
-      if (context.systemPrompt) {
+      if (context.systemPrompt && !isMinimalToolProfile()) {
         sdkOptions.systemPrompt = context.systemPrompt;
       }
 
@@ -812,6 +928,7 @@ function streamWarmClaudeSdk(
   const browserGrant = browserGrantFromEnv();
   const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
   const sdkTools = piTools.map((t) => piToolToSdkTool(t));
+  emitProviderContextDiagnostics("claude-cli", model, context, piTools as any[]);
   const allowedTools = sdkTools.map((t: any) => `${MCP_PREFIX}${(t as any).name}`);
   const piMcp = createSdkMcpServer({ name: "pi-tools", version: "0.0.1", tools: sdkTools });
   const sdkAbort = new AbortController();
@@ -832,7 +949,7 @@ function streamWarmClaudeSdk(
     permissionMode: "bypassPermissions",
     stderr: rememberSdkStderr,
   };
-  if (context.systemPrompt) sdkOptions.systemPrompt = context.systemPrompt;
+  if (context.systemPrompt && !isMinimalToolProfile()) sdkOptions.systemPrompt = context.systemPrompt;
 
   const signature = warmClaudeOptionsKey(model, context);
   if (warmClaudeOptionsSignature && warmClaudeOptionsSignature !== signature) {
@@ -871,8 +988,8 @@ const AskHumanParams = Type.Object({
   context: Type.Optional(Type.String({ description: "Optional background context." })),
 });
 
-function registerAskHumanTool(pi: ExtensionAPI) {
-  pi.registerTool({
+function registerAskHumanTool(pi: ExtensionAPI, registeredTools?: ToolRegistrationDiagnostic[]) {
+  const definition = {
     name: "ask_human",
     label: "Ask the human",
     description:
@@ -894,12 +1011,14 @@ function registerAskHumanTool(pi: ExtensionAPI) {
         details: {},
       };
     },
-  });
+  };
+  pi.registerTool(definition);
+  registeredTools?.push(describeRegisteredTool("human", definition));
 }
 
-function registerBrowserTool(pi: ExtensionAPI) {
+function registerBrowserTool(pi: ExtensionAPI, registeredTools?: ToolRegistrationDiagnostic[]) {
   const definition = browserToolDefinition();
-  pi.registerTool({
+  const registeredDefinition = {
     name: definition.name,
     label: definition.label,
     description: definition.description,
@@ -928,26 +1047,39 @@ function registerBrowserTool(pi: ExtensionAPI) {
         };
       }
     },
-  } as any);
+  };
+  pi.registerTool(registeredDefinition as any);
+  registeredTools?.push(describeRegisteredTool("browser", registeredDefinition));
 }
 
 export default function (pi: ExtensionAPI) {
   const subagentAllowedTools = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
   const browserGrant = browserGrantFromEnv();
-  registerAskHumanTool(pi);
-  if (browserGrant && (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy())) {
-    registerBrowserTool(pi);
+  const profile = toolProfile();
+  const registeredTools: ToolRegistrationDiagnostic[] = [];
+  if (!isMinimalToolProfile()) {
+    registerAskHumanTool(pi, registeredTools);
+    if (browserGrant && (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy())) {
+      registerBrowserTool(pi, registeredTools);
+    }
+    registerTrackedTool(pi, registeredTools, "human", askUserQuestionsTool as any);
+    for (const backgroundTool of backgroundTools) {
+      registerVisibleTool(pi, subagentAllowedTools, "shell", backgroundTool as any, registeredTools);
+    }
+    if (isToolAllowed("plan", subagentAllowedTools) || !hasSubagentToolPolicy()) {
+      registerPlanTools(pi as any, process.env, (category: string, definition: any) => {
+        registeredTools.push(describeRegisteredTool(category, definition));
+      });
+    }
+    if (!hasSubagentToolPolicy()) {
+      registerSubagentTool(pi as any, process.env, {
+        onRegister: (category: string, definition: any) => {
+          registeredTools.push(describeRegisteredTool(category, definition));
+        },
+      });
+    }
   }
-  pi.registerTool(askUserQuestionsTool as any);
-  for (const backgroundTool of backgroundTools) {
-    registerVisibleTool(pi, subagentAllowedTools, "shell", backgroundTool as any);
-  }
-  if (isToolAllowed("plan", subagentAllowedTools) || !hasSubagentToolPolicy()) {
-    registerPlanTools(pi as any);
-  }
-  if (!hasSubagentToolPolicy()) {
-    registerSubagentTool(pi as any);
-  }
+  emitScaffoldDiagnostics(profile, registeredTools);
   pi.registerProvider("claude-cli", {
     baseUrl: "http://localhost/unused",
     apiKey: "CLAUDE_CLI_KEY",

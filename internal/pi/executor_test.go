@@ -335,6 +335,25 @@ func TestExecutorPassesAgentToolsEnv(t *testing.T) {
 	}
 }
 
+func TestProcessEnvControlsToolProfile(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"GSD_TOOL_PROFILE=stale",
+	}
+	cold := processEnv(context.Background(), base, Options{Provider: "claude-cli"})
+	if strings.Contains(strings.Join(cold, "\n"), "GSD_TOOL_PROFILE=") {
+		t.Fatalf("empty tool profile should remove stale profile: %v", cold)
+	}
+
+	minimal := processEnv(context.Background(), base, Options{
+		Provider:    "claude-cli",
+		ToolProfile: " minimal ",
+	})
+	if !strings.Contains(strings.Join(minimal, "\n"), "GSD_TOOL_PROFILE=minimal") {
+		t.Fatalf("minimal env missing tool profile: %v", minimal)
+	}
+}
+
 func TestProcessEnvExcludesUnrelatedSecrets(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin",

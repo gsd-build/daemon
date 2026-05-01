@@ -164,6 +164,14 @@ type taskContext struct {
 	PlanRuntime        *planRuntimeReporter
 }
 
+func inferToolProfile(prompt string) string {
+	normalized := strings.ToLower(strings.TrimSpace(prompt))
+	if strings.HasPrefix(normalized, "reply exactly:") {
+		return "minimal"
+	}
+	return ""
+}
+
 // pendingDenial tracks a task waiting on permission/question responses.
 type pendingDenial struct {
 	Denials []string
@@ -943,6 +951,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		ParentSessionID:    a.opts.SessionID,
 		AgentDir:           a.opts.AgentDir,
 		SubagentsPrompt:    subagentsPrompt,
+		ToolProfile:        inferToolProfile(prompt),
 	}
 	if a.opts.AgentTools != nil {
 		control, err := a.opts.AgentTools.StartTask(taskCtx, agentterminal.TaskScope{

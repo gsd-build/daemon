@@ -114,7 +114,7 @@ function requestPlanIntent(tool, toolCallId, params, signal, env) {
   );
 }
 
-export function registerPlanTools(pi, env = process.env) {
+export function registerPlanTools(pi, env = process.env, onRegister) {
   if (!hasPlanCapability(env)) return false;
 
   const intentTools = [
@@ -176,11 +176,13 @@ export function registerPlanTools(pi, env = process.env) {
   ];
 
   for (const tool of intentTools) {
-    pi.registerTool({
+    const definition = {
       ...tool,
       execute: (toolCallId, params, signal) =>
         requestPlanIntent(tool.name, toolCallId, params, signal, env),
-    });
+    };
+    pi.registerTool(definition);
+    onRegister?.("plan", definition);
   }
 
   return true;

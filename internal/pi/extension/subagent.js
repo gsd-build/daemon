@@ -509,7 +509,7 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
   const rpc = deps.rpc ?? createDaemonRpc(env.GSD_DAEMON_SOCKET);
   if (!rpc) return false;
 
-  pi.registerTool({
+  const definition = {
     name: "subagent",
     label: "Subagent",
     description: "Delegate bounded work to configured project subagents.",
@@ -640,6 +640,8 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
         };
       }
     },
-  });
+  };
+  pi.registerTool(definition);
+  deps.onRegister?.("subagent", definition);
   return true;
 }
