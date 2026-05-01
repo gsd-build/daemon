@@ -1171,7 +1171,7 @@ func (d *Daemon) handleContextStatsRequest(msg *protocol.ContextStatsRequest) er
 }
 
 func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
-	scopeRoot, rootErr := d.scopeRootForChannel(msg.ChannelID)
+	scopeRoot, rootErr := d.scopeRootForBrowseChannel(msg.ChannelID)
 	page := fs.BrowseDirPage{}
 	err := rootErr
 	if err == nil {
@@ -1198,7 +1198,7 @@ func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
 }
 
 func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
-	scopeRoot, err := d.scopeRootForChannel(msg.ChannelID)
+	scopeRoot, err := d.scopeRootForBrowseChannel(msg.ChannelID)
 	if err == nil {
 		err = fs.MkDir(msg.Path, scopeRoot)
 	}
@@ -1300,6 +1300,21 @@ func (d *Daemon) scopeRootForChannel(channelID string) (string, error) {
 		return "", fmt.Errorf("missing channel root for channel %q", channelID)
 	}
 	return rootStr, nil
+}
+
+func (d *Daemon) scopeRootForBrowseChannel(channelID string) (string, error) {
+	root, err := d.scopeRootForChannel(channelID)
+	if err == nil {
+		return root, nil
+	}
+	if !strings.HasPrefix(channelID, "browse-") {
+		return "", err
+	}
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		return "", fmt.Errorf("resolve home dir: %w", homeErr)
+	}
+	return terminal.ValidateCWD(home)
 }
 
 func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {

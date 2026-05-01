@@ -270,6 +270,129 @@ func TestScopeRootForChannelUsesStoredRoot(t *testing.T) {
 	}
 }
 
+func TestHandleBrowseUsesHomeRootForBrowseOnlyChannel(t *testing.T) {
+	home := t.TempDir()
+	projectPath := filepath.Join(home, "example-project")
+	if err := os.Mkdir(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	resolvedProjectPath, err := filepath.EvalSymlinks(projectPath)
+	if err != nil {
+		t.Fatalf("resolve project path: %v", err)
+	}
+	t.Setenv("HOME", home)
+
+	client := relayClientStub(false)
+	d := &Daemon{client: client}
+
+	if err := d.handleBrowse(&protocol.BrowseDir{
+		Type:      protocol.MsgTypeBrowseDir,
+		RequestID: "req-browse-home",
+		ChannelID: "browse-project-picker",
+		Path:      "~",
+	}); err != nil {
+		t.Fatalf("handleBrowse: %v", err)
+	}
+	env, err := drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain browse result: %v", err)
+	}
+	result, ok := env.Payload.(*protocol.BrowseDirResult)
+	if !ok {
+		t.Fatalf("payload = %T, want BrowseDirResult", env.Payload)
+	}
+	if !result.OK {
+		t.Fatalf("browse result error = %q, want success", result.Error)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Path != resolvedProjectPath || !result.Entries[0].IsDirectory {
+		t.Fatalf("browse entries = %#v, want example-project directory", result.Entries)
+	}
+}
+
+func TestHandleMkDirUsesHomeRootForBrowseOnlyChannel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	client := relayClientStub(false)
+	d := &Daemon{client: client}
+	folderPath := filepath.Join(home, "new-project")
+
+	if err := d.handleMkDir(&protocol.MkDir{
+		Type:      protocol.MsgTypeMkDir,
+		RequestID: "req-mkdir-home",
+		ChannelID: "browse-project-picker",
+		Path:      folderPath,
+	}); err != nil {
+		t.Fatalf("handleMkDir: %v", err)
+	}
+	env, err := drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain mkdir result: %v", err)
+	}
+	result, ok := env.Payload.(*protocol.MkDirResult)
+	if !ok {
+		t.Fatalf("payload = %T, want MkDirResult", env.Payload)
+	}
+	if !result.OK {
+		t.Fatalf("mkdir result error = %q, want success", result.Error)
+	}
+	info, err := os.Stat(folderPath)
+	if err != nil {
+		t.Fatalf("stat created folder: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("created path is not a directory")
+	}
+}
+
+func TestBrowseOnlyHomeRootRequiresBrowseChannel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	client := relayClientStub(false)
+	d := &Daemon{client: client}
+
+	if err := d.handleBrowse(&protocol.BrowseDir{
+		Type:      protocol.MsgTypeBrowseDir,
+		RequestID: "req-browse-project-channel",
+		ChannelID: "project-channel",
+		Path:      "~",
+	}); err != nil {
+		t.Fatalf("handleBrowse: %v", err)
+	}
+	env, err := drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain browse result: %v", err)
+	}
+	browseResult, ok := env.Payload.(*protocol.BrowseDirResult)
+	if !ok {
+		t.Fatalf("payload = %T, want BrowseDirResult", env.Payload)
+	}
+	if browseResult.OK || !strings.Contains(browseResult.Error, "missing channel root") {
+		t.Fatalf("browse result = %#v, want missing channel root", browseResult)
+	}
+
+	if err := d.handleMkDir(&protocol.MkDir{
+		Type:      protocol.MsgTypeMkDir,
+		RequestID: "req-mkdir-project-channel",
+		ChannelID: "project-channel",
+		Path:      filepath.Join(home, "new-project"),
+	}); err != nil {
+		t.Fatalf("handleMkDir: %v", err)
+	}
+	env, err = drainQueuedMessage(t, client)
+	if err != nil {
+		t.Fatalf("drain mkdir result: %v", err)
+	}
+	mkdirResult, ok := env.Payload.(*protocol.MkDirResult)
+	if !ok {
+		t.Fatalf("payload = %T, want MkDirResult", env.Payload)
+	}
+	if mkdirResult.OK || !strings.Contains(mkdirResult.Error, "missing channel root") {
+		t.Fatalf("mkdir result = %#v, want missing channel root", mkdirResult)
+	}
+}
+
 func TestHandleReadAllowsExactAgentTouchedFileOutsideScope(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
