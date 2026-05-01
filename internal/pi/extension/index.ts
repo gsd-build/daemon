@@ -45,6 +45,12 @@ import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
 import { registerSubagentTool } from "./subagent.js";
 import {
+  BROWSER_TOOL_CATEGORIES,
+  BROWSER_TOOL_METHODS,
+  BrowserToolCategorySchema,
+  BrowserToolMethodSchema,
+} from "./browser-methods.js";
+import {
   filterToolsByPolicy,
   hasSubagentToolPolicy,
   isToolAllowed,
@@ -105,34 +111,9 @@ function installClaudeSdkPipeGuard() {
 
 installClaudeSdkPipeGuard();
 
-const BROWSER_TOOL_METHODS = [
-  "navigate",
-  "back",
-  "forward",
-  "reload",
-  "click",
-  "type",
-  "press",
-  "hover",
-  "scroll",
-  "snapshot",
-  "get_ref",
-  "click_ref",
-  "hover_ref",
-  "fill_ref",
-  "wait_for",
-  "extract",
-  "assert",
-  "screenshot",
-  "console",
-  "network",
-  "dialog",
-] as const;
-
-const BrowserToolMethod = Type.Union(BROWSER_TOOL_METHODS.map((method) => Type.Literal(method)) as any);
-
 const BrowserToolParams = Type.Object({
-  method: BrowserToolMethod,
+  method: BrowserToolMethodSchema,
+  category: Type.Optional(BrowserToolCategorySchema),
   params: Type.Optional(Type.Record(Type.String(), Type.Any())),
 });
 
@@ -141,7 +122,7 @@ function browserToolDefinition() {
     name: "gsd_browser",
     label: "GSD Browser",
     description:
-      "Use the active task-scoped GSD shared browser session. Pass bare method names such as navigate, snapshot, console, or network; do not prefix methods with browser.",
+      "Use the active task-scoped GSD shared browser session for page navigation, inspection, ref-based interaction, screenshots, network controls, auth state, traces, and artifacts. Prefer snapshot with refs before interacting. Pass bare method names such as navigate, snapshot, click_ref, visual_diff, or vault_login; do not prefix methods with browser.",
     parameters: BrowserToolParams,
     input_schema: {
       type: "object",
@@ -152,6 +133,12 @@ function browserToolDefinition() {
           enum: BROWSER_TOOL_METHODS,
           description:
             "Bare browser operation name. Use navigate, not browser.navigate.",
+        },
+        category: {
+          type: "string",
+          enum: BROWSER_TOOL_CATEGORIES,
+          description:
+            "Optional method classification for UI and policy. The daemon executes method and params.",
         },
         params: { type: "object", additionalProperties: true },
       },
