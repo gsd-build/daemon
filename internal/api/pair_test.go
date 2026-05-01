@@ -20,6 +20,9 @@ func TestPairSuccess(t *testing.T) {
 		if body["currentMachineId"] != "m-old" {
 			t.Errorf("unexpected currentMachineId: %s", body["currentMachineId"])
 		}
+		if body["installationId"] != "install-abc" {
+			t.Errorf("unexpected installationId: %s", body["installationId"])
+		}
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"machineId": "m-123",
@@ -36,6 +39,7 @@ func TestPairSuccess(t *testing.T) {
 		OS:               "darwin",
 		Arch:             "arm64",
 		DaemonVersion:    "0.1.0",
+		InstallationID:   "install-abc",
 		CurrentMachineID: "m-old",
 	})
 	if err != nil {

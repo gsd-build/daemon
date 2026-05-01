@@ -12,10 +12,11 @@ func TestSaveAndLoad(t *testing.T) {
 	t.Setenv("HOME", dir)
 
 	cfg := &Config{
-		MachineID: "m-123",
-		AuthToken: "tok-abc",
-		ServerURL: "https://app.gsd.build",
-		RelayURL:  "wss://relay.gsd.build/ws/daemon",
+		MachineID:      "m-123",
+		InstallationID: "install-123",
+		AuthToken:      "tok-abc",
+		ServerURL:      "https://app.gsd.build",
+		RelayURL:       "wss://relay.gsd.build/ws/daemon",
 	}
 	if err := Save(cfg); err != nil {
 		t.Fatalf("save: %v", err)
@@ -27,6 +28,27 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	if loaded.MachineID != "m-123" || loaded.AuthToken != "tok-abc" {
 		t.Errorf("unexpected loaded config: %+v", loaded)
+	}
+	if loaded.InstallationID != "install-123" {
+		t.Errorf("InstallationID = %q, want install-123", loaded.InstallationID)
+	}
+}
+
+func TestEnsureInstallationID(t *testing.T) {
+	cfg := &Config{}
+	id, err := cfg.EnsureInstallationID()
+	if err != nil {
+		t.Fatalf("EnsureInstallationID: %v", err)
+	}
+	if len(id) != 32 {
+		t.Fatalf("id length = %d, want 32", len(id))
+	}
+	again, err := cfg.EnsureInstallationID()
+	if err != nil {
+		t.Fatalf("EnsureInstallationID second call: %v", err)
+	}
+	if again != id {
+		t.Fatalf("second id = %q, want %q", again, id)
 	}
 }
 

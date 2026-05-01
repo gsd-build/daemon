@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -57,6 +58,7 @@ Generate a code in the web app under Machines → Add Machine.`,
 
 		cfg := &config.Config{
 			MachineID:      resp.MachineID,
+			InstallationID: req.InstallationID,
 			AuthToken:      resp.AuthToken,
 			TokenExpiresAt: resp.TokenExpiresAt,
 			ServerURL:      loginServerURL,
@@ -106,19 +108,32 @@ const (
 )
 
 func buildPairRequest(code string, hostname string) (api.PairRequest, error) {
+	installationID, err := config.NewInstallationID()
+	if err != nil {
+		return api.PairRequest{}, err
+	}
 	req := api.PairRequest{
-		Code:          code,
-		Hostname:      hostname,
-		OS:            runtime.GOOS,
-		Arch:          runtime.GOARCH,
-		DaemonVersion: Version,
+		Code:           code,
+		Hostname:       hostname,
+		OS:             runtime.GOOS,
+		Arch:           runtime.GOARCH,
+		DaemonVersion:  Version,
+		InstallationID: installationID,
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return api.PairRequest{}, err
+		}
 		return req, nil
 	}
+	installationID, err = cfg.EnsureInstallationID()
+	if err != nil {
+		return api.PairRequest{}, err
+	}
 	req.CurrentMachineID = cfg.MachineID
+	req.InstallationID = installationID
 	return req, nil
 }
 

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gsd-build/daemon/internal/config"
@@ -58,7 +60,10 @@ func (f *fakePlatform) IsRunning() bool {
 
 func TestBuildPairRequestIncludesExistingMachineID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := config.Save(&config.Config{MachineID: "machine-existing"}); err != nil {
+	if err := config.Save(&config.Config{
+		MachineID:      "machine-existing",
+		InstallationID: "install-existing",
+	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
 
@@ -69,6 +74,9 @@ func TestBuildPairRequestIncludesExistingMachineID(t *testing.T) {
 
 	if req.CurrentMachineID != "machine-existing" {
 		t.Fatalf("CurrentMachineID = %q, want %q", req.CurrentMachineID, "machine-existing")
+	}
+	if req.InstallationID != "install-existing" {
+		t.Fatalf("InstallationID = %q, want %q", req.InstallationID, "install-existing")
 	}
 }
 
@@ -82,6 +90,46 @@ func TestBuildPairRequestOmitsExistingMachineIDWhenConfigMissing(t *testing.T) {
 
 	if req.CurrentMachineID != "" {
 		t.Fatalf("CurrentMachineID = %q, want empty", req.CurrentMachineID)
+	}
+	if len(req.InstallationID) != 32 {
+		t.Fatalf("InstallationID length = %d, want 32", len(req.InstallationID))
+	}
+}
+
+func TestBuildPairRequestMintsInstallationIDForLegacyConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := config.Save(&config.Config{MachineID: "machine-existing"}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	req, err := buildPairRequest("ABC234", "test-host")
+	if err != nil {
+		t.Fatalf("buildPairRequest: %v", err)
+	}
+
+	if req.CurrentMachineID != "machine-existing" {
+		t.Fatalf("CurrentMachineID = %q, want %q", req.CurrentMachineID, "machine-existing")
+	}
+	if len(req.InstallationID) != 32 {
+		t.Fatalf("InstallationID length = %d, want 32", len(req.InstallationID))
+	}
+}
+
+func TestBuildPairRequestErrorsOnMalformedConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := config.Path()
+	if err != nil {
+		t.Fatalf("config path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{bad json"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := buildPairRequest("ABC234", "test-host"); err == nil {
+		t.Fatal("buildPairRequest error = nil, want malformed config error")
 	}
 }
 

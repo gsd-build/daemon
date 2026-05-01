@@ -200,7 +200,28 @@ func checkConfig() checkResult {
 			fixHint: "re-pair: gsd-cloud login <CODE>",
 		}
 	}
-	return checkResult{name: "machine paired", passed: true, detail: fmt.Sprintf("(machine %s)", cfg.MachineID[:8])}
+	return checkResult{name: "machine paired", passed: true, detail: fmt.Sprintf("(machine %s)", shortID(cfg.MachineID))}
+}
+
+func checkInstallationIdentity() checkResult {
+	cfg, err := config.Load()
+	if err != nil {
+		return checkResult{
+			name:    "stable machine identity",
+			passed:  false,
+			detail:  "(no config)",
+			fixHint: "run: gsd-cloud login <CODE>",
+		}
+	}
+	if cfg.InstallationID == "" {
+		return checkResult{
+			name:    "stable machine identity",
+			passed:  false,
+			detail:  "(missing installationId)",
+			fixHint: "re-pair this daemon: gsd-cloud login <CODE>",
+		}
+	}
+	return checkResult{name: "stable machine identity", passed: true, detail: fmt.Sprintf("(%s)", shortID(cfg.InstallationID))}
 }
 
 func checkDaemonRunning() checkResult {
@@ -244,6 +265,7 @@ var doctorCmd = &cobra.Command{
 			checkPi(),
 			checkPiExtension(),
 			checkConfig(),
+			checkInstallationIdentity(),
 			checkDaemonRunning(),
 		}
 		failed := 0

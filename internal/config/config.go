@@ -3,6 +3,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +16,7 @@ import (
 // Config is the on-disk daemon state.
 type Config struct {
 	MachineID             string `json:"machineId"`
+	InstallationID        string `json:"installationId,omitempty"`
 	AuthToken             string `json:"authToken"`
 	TokenExpiresAt        string `json:"tokenExpiresAt,omitempty"`
 	ServerURL             string `json:"serverUrl"`
@@ -24,6 +27,26 @@ type Config struct {
 	WarmWorkerIdleMinutes int    `json:"warmWorkerIdleMinutes,omitempty"`
 	WarmWorkerIdleCap     *int   `json:"warmWorkerIdleCap,omitempty"`
 	LogLevel              string `json:"logLevel,omitempty"`
+}
+
+func NewInstallationID() (string, error) {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", fmt.Errorf("generate installation id: %w", err)
+	}
+	return hex.EncodeToString(bytes[:]), nil
+}
+
+func (cfg *Config) EnsureInstallationID() (string, error) {
+	if cfg.InstallationID != "" {
+		return cfg.InstallationID, nil
+	}
+	id, err := NewInstallationID()
+	if err != nil {
+		return "", err
+	}
+	cfg.InstallationID = id
+	return id, nil
 }
 
 // DefaultServerURL is the production web app host.
