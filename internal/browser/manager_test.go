@@ -151,6 +151,45 @@ func TestBrowserUserInputParamsPreservesZeroRenderedOrigin(t *testing.T) {
 	}
 }
 
+func TestBrowserUserInputToolRoutesSidebarCommands(t *testing.T) {
+	method, params, ok := browserUserInputTool(&protocol.BrowserUserInput{
+		Type: protocol.MsgTypeBrowserUserInput,
+		Kind: protocol.BrowserInputKindNavigate,
+		Text: "https://example.com",
+	})
+	if !ok {
+		t.Fatal("expected navigate input to route through browser tool")
+	}
+	if method != "navigate" {
+		t.Fatalf("method = %q, want navigate", method)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(params, &payload); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	if payload["url"] != "https://example.com" {
+		t.Fatalf("url = %q", payload["url"])
+	}
+
+	method, params, ok = browserUserInputTool(&protocol.BrowserUserInput{
+		Type: protocol.MsgTypeBrowserUserInput,
+		Kind: protocol.BrowserInputKindRefAction,
+		Text: "@v1:button-primary",
+	})
+	if !ok {
+		t.Fatal("expected ref action input to route through browser tool")
+	}
+	if method != "click_ref" {
+		t.Fatalf("method = %q, want click_ref", method)
+	}
+	if err := json.Unmarshal(params, &payload); err != nil {
+		t.Fatalf("unmarshal ref params: %v", err)
+	}
+	if payload["ref"] != "@v1:button-primary" {
+		t.Fatalf("ref = %q", payload["ref"])
+	}
+}
+
 func openBrowserForTest(t *testing.T, m *Manager, browserID string) {
 	t.Helper()
 	if err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
