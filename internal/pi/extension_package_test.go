@@ -41,6 +41,7 @@ func TestPiExtensionPackageIncludesRuntimeImports(t *testing.T) {
 		"plan-tools.js",
 		"codex-appserver-provider.ts",
 		"openrouter-provider.ts",
+		"gsd-browser-skill/SKILL.md",
 	}
 	for _, name := range required {
 		if !files[name] {

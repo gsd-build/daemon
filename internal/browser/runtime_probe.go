@@ -11,6 +11,7 @@ import (
 )
 
 const RequiredRuntimeVersion = "0.1.20"
+const runtimeProbeStepTimeout = 10 * time.Second
 
 type RuntimeStatus struct {
 	Installed           bool
@@ -33,6 +34,11 @@ type daemonHealth struct {
 	OK              bool   `json:"ok"`
 	ChromeAvailable bool   `json:"chromeAvailable"`
 	Error           string `json:"error"`
+	Session         struct {
+		BrowserConnected bool   `json:"browserConnected"`
+		Status           string `json:"status"`
+		Reason           string `json:"reason"`
+	} `json:"session"`
 }
 
 func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
@@ -43,7 +49,7 @@ func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
 		binaryPath = "gsd-browser"
 	}
 	status := RuntimeStatus{MinVersion: RequiredRuntimeVersion, Path: binaryPath}
-	versionCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	versionCtx, cancel := context.WithTimeout(ctx, runtimeProbeStepTimeout)
 	defer cancel()
 
 	out, err := exec.CommandContext(versionCtx, binaryPath, "--version").CombinedOutput()
@@ -65,7 +71,7 @@ func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
 		return status
 	}
 
-	manifestCtx, manifestCancel := context.WithTimeout(ctx, 3*time.Second)
+	manifestCtx, manifestCancel := context.WithTimeout(ctx, runtimeProbeStepTimeout)
 	defer manifestCancel()
 	manifestOut, err := exec.CommandContext(manifestCtx, binaryPath, "cloud-methods", "--json").CombinedOutput()
 	if err != nil {
@@ -85,7 +91,7 @@ func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
 	}
 	status.CloudMethodsVersion = manifest.ManifestVersion
 
-	healthCtx, healthCancel := context.WithTimeout(ctx, 5*time.Second)
+	healthCtx, healthCancel := context.WithTimeout(ctx, runtimeProbeStepTimeout)
 	defer healthCancel()
 	healthOut, err := exec.CommandContext(healthCtx, binaryPath, "daemon", "health", "--json").CombinedOutput()
 	if err != nil {
@@ -97,12 +103,14 @@ func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
 		return status
 	}
 	var health daemonHealth
-	if err := json.Unmarshal(healthOut, &health); err != nil || !health.OK || !health.ChromeAvailable {
+	if err := json.Unmarshal(healthOut, &health); err != nil || !health.browserAvailable() {
 		status.ErrorCode = "chrome_missing"
 		if health.Error != "" {
 			status.ErrorMessage = health.Error
 		} else if err != nil {
 			status.ErrorMessage = err.Error()
+		} else if health.Session.Reason != "" {
+			status.ErrorMessage = health.Session.Reason
 		} else {
 			status.ErrorMessage = "Chrome/Chromium is unavailable"
 		}
@@ -111,6 +119,13 @@ func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
 	status.ChromeAvailable = true
 	status.Ready = true
 	return status
+}
+
+func (h daemonHealth) browserAvailable() bool {
+	if h.OK && h.ChromeAvailable {
+		return true
+	}
+	return h.Session.BrowserConnected && h.Session.Status == "healthy"
 }
 
 func parseBrowserVersion(out string) string {
