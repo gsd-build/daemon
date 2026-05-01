@@ -151,9 +151,8 @@ func processArgs(opts Options) []string {
 	if systemPrompt := appendedSystemPrompt(opts); systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
 	}
-	if opts.DisableSkills {
-		args = append(args, "--no-skills")
-	} else {
+	args = append(args, "--no-skills")
+	if !opts.DisableSkills {
 		for _, path := range opts.SkillPaths {
 			if path != "" {
 				args = append(args, "--skill", path)

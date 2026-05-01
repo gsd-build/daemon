@@ -236,8 +236,8 @@ func TestActorPiExecutorUsesPersistentSessionFile(t *testing.T) {
 	if args[modelFlag+1] != "claude-opus-4-6" {
 		t.Fatalf("pi model = %q, want claude-opus-4-6", args[modelFlag+1])
 	}
-	if argIndex(args, "--no-skills") >= 0 {
-		t.Fatalf("pi args disable skills: %v", args)
+	if argIndex(args, "--no-skills") < 0 {
+		t.Fatalf("pi args missing --no-skills: %v", args)
 	}
 	if argIndex(args, "--no-extensions") < 0 {
 		t.Fatalf("pi args missing --no-extensions: %v", args)
@@ -470,6 +470,9 @@ func TestActorPiExecutorPassesReferencedClaudeSkillPaths(t *testing.T) {
 	skillPaths := argValues(args, "--skill")
 	if len(skillPaths) != 1 || skillPaths[0] != skillPath {
 		t.Fatalf("pi skill paths = %+v, want only %q", skillPaths, skillPath)
+	}
+	if argIndex(args, "--no-skills") < 0 {
+		t.Fatalf("pi args missing --no-skills with explicit skill: %v", args)
 	}
 }
 
