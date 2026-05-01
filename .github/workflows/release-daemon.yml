@@ -17,9 +17,9 @@ jobs:
     name: Test daemon
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: "1.26"
 
@@ -47,9 +47,9 @@ jobs:
             arch: arm64
             ext: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: "1.26"
 
@@ -91,7 +91,7 @@ jobs:
           cat "${BIN_NAME}.sha256"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: binary-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -99,23 +99,28 @@ jobs:
             dist/gsd-cloud-*-${{ matrix.os }}-${{ matrix.arch }}*.sha256
           if-no-files-found: error
 
-  release:
-    name: Create GitHub Release
+  sign:
+    name: Sign release artifacts
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    environment: daemon-release
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Verify release tag ancestry
+        run: |
+          git fetch origin main --depth=1
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          test "$(git rev-parse "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: dist
           pattern: binary-*
           merge-multiple: true
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: "22"
 
@@ -160,8 +165,44 @@ jobs:
           chmod 600 "$key_path"
           openssl dgst -sha256 -sign "$key_path" -out dist/SHA256SUMS.sig dist/SHA256SUMS
 
+      - name: Upload signed release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signed-release-bundle
+          path: |
+            dist/gsd-cloud-*
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: sign
+    runs-on: ubuntu-latest
+    environment: daemon-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Download signed release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: signed-release-bundle
+          path: dist
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/daemon/}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.+-]+)?$ ]]; then
+            echo "::error::Invalid tag format: $VERSION (expected vMAJOR.MINOR.PATCH[-prerelease])"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: ${{ github.ref_name }}
           name: Daemon ${{ steps.version.outputs.version }}
