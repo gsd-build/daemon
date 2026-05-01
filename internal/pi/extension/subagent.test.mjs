@@ -65,6 +65,7 @@ test("subagent tool creates child session, runs child, and finalizes usage", asy
       GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
       GSD_PARENT_SESSION_ID: "parent-1",
       GSD_AGENT_DIR: "/tmp/agents",
+      GSD_SUBAGENT_AUTH_TOKEN: "token",
     },
     {
       rpc,
@@ -155,6 +156,7 @@ test("subagent tool runs parallel child tasks and aggregates details", async () 
       GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
       GSD_PARENT_SESSION_ID: "parent-1",
       GSD_AGENT_DIR: "/tmp/agents",
+      GSD_SUBAGENT_AUTH_TOKEN: "token",
     },
     {
       rpc,
@@ -220,6 +222,7 @@ test("subagent tool chains prior results into later tasks", async () => {
       GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
       GSD_PARENT_SESSION_ID: "parent-1",
       GSD_AGENT_DIR: "/tmp/agents",
+      GSD_SUBAGENT_AUTH_TOKEN: "token",
     },
     {
       rpc,
@@ -281,6 +284,7 @@ test("subagent tool finalizes cancelled child runs as cancelled", async () => {
       GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
       GSD_PARENT_SESSION_ID: "parent-1",
       GSD_AGENT_DIR: "/tmp/agents",
+      GSD_SUBAGENT_AUTH_TOKEN: "token",
     },
     {
       rpc,
@@ -340,6 +344,7 @@ test("subagent tool keeps successful finalization independent from late aborts",
       GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
       GSD_PARENT_SESSION_ID: "parent-1",
       GSD_AGENT_DIR: "/tmp/agents",
+      GSD_SUBAGENT_AUTH_TOKEN: "token",
     },
     {
       rpc,
@@ -373,7 +378,6 @@ test("runChildAgent sends the child task as an RPC prompt frame", async () => {
     process.platform === "win32" ? join(tempDir, "fake-pi.cmd") : script;
   const recordPath = join(tempDir, "record.json");
   const previousBinary = process.env.GSD_PI_BINARY;
-  const previousRecordPath = process.env.GSD_FAKE_PI_RECORD;
 
   await writeFile(
     script,
@@ -386,7 +390,7 @@ let emitted = false;
 function emit() {
   if (emitted) return;
   emitted = true;
-  writeFileSync(process.env.GSD_FAKE_PI_RECORD, JSON.stringify({
+  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({
     argv: process.argv.slice(2),
     stdin,
   }));
@@ -414,7 +418,6 @@ setTimeout(emit, 250);
   }
 
   process.env.GSD_PI_BINARY = binary;
-  process.env.GSD_FAKE_PI_RECORD = recordPath;
 
   try {
     const forwarded = [];
@@ -455,8 +458,94 @@ setTimeout(emit, 250);
   } finally {
     if (previousBinary === undefined) delete process.env.GSD_PI_BINARY;
     else process.env.GSD_PI_BINARY = previousBinary;
-    if (previousRecordPath === undefined) delete process.env.GSD_FAKE_PI_RECORD;
-    else process.env.GSD_FAKE_PI_RECORD = previousRecordPath;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("runChildAgent excludes unrelated host secrets from child env", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "gsd-subagent-env-"));
+  const script = join(tempDir, "fake-pi.mjs");
+  const binary =
+    process.platform === "win32" ? join(tempDir, "fake-pi.cmd") : script;
+  const recordPath = join(tempDir, "record.json");
+  const previous = {
+    GSD_PI_BINARY: process.env.GSD_PI_BINARY,
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+    SECRET_TOKEN: process.env.SECRET_TOKEN,
+    GSD_PARENT_SESSION_ID: process.env.GSD_PARENT_SESSION_ID,
+    GSD_AGENT_DIR: process.env.GSD_AGENT_DIR,
+    GSD_DAEMON_SOCKET: process.env.GSD_DAEMON_SOCKET,
+    GSD_SUBAGENT_AUTH_TOKEN: process.env.GSD_SUBAGENT_AUTH_TOKEN,
+  };
+
+  await writeFile(
+    script,
+    `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify(process.env));
+process.stdin.resume();
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({
+    type: "agent_end",
+    messages: [{
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      usage: { input: 1, output: 1, cost: { total: 0 } },
+    }],
+  }));
+});
+`,
+  );
+  if (process.platform === "win32") {
+    await writeFile(binary, '@echo off\r\nnode "%~dp0fake-pi.mjs" %*\r\n');
+  } else {
+    await chmod(binary, 0o755);
+  }
+
+  Object.assign(process.env, {
+    GSD_PI_BINARY: binary,
+    OPENROUTER_API_KEY: "sk-or-selected",
+    OPENAI_API_KEY: "sk-openai",
+    ANTHROPIC_API_KEY: "sk-anthropic",
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    SECRET_TOKEN: "arbitrary-secret",
+    GSD_PARENT_SESSION_ID: "parent-1",
+    GSD_AGENT_DIR: "/tmp/agents",
+    GSD_DAEMON_SOCKET: "/tmp/daemon.sock",
+    GSD_SUBAGENT_AUTH_TOKEN: "subagent-token",
+  });
+
+  try {
+    await runChildAgent({
+      agent: snapshot("explorer", { model: "z-ai/glm-4.7-flash" }),
+      task: "Map files.",
+      childSessionId: "child-1",
+      runId: "run-1",
+      rpc: {
+        async registerProcess() {},
+        async heartbeat() {},
+        async forwardEvent() {},
+      },
+    });
+
+    const env = JSON.parse(await readFile(recordPath, "utf8"));
+    assert.equal(env.OPENROUTER_API_KEY, "sk-or-selected");
+    assert.equal(env.GSD_PARENT_SESSION_ID, "child-1");
+    assert.equal(env.GSD_AGENT_DIR, "/tmp/agents");
+    assert.equal(env.GSD_DAEMON_SOCKET, "/tmp/daemon.sock");
+    assert.equal(env.GSD_SUBAGENT_AUTH_TOKEN, "subagent-token");
+    assert.equal(env.OPENAI_API_KEY, undefined);
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
+    assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+    assert.equal(env.SECRET_TOKEN, undefined);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     await rm(tempDir, { recursive: true, force: true });
   }
 });

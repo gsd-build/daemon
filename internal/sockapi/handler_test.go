@@ -23,6 +23,7 @@ func (m *mockProvider) Workers() []WorkerInfo   { return m.workers }
 
 type mockSubagentProvider struct {
 	mockProvider
+	childParents map[string]string
 }
 
 func (m *mockSubagentProvider) CreateSubagentChild(_ *http.Request, _ CreateSubagentChildRequest) (CreateSubagentChildResponse, error) {
@@ -43,6 +44,11 @@ func (m *mockSubagentProvider) HeartbeatSubagentChild(_ *http.Request, _ Heartbe
 
 func (m *mockSubagentProvider) FinalizeSubagentChild(_ *http.Request, _ FinalizeSubagentChildRequest) (FinalizeSubagentChildResponse, error) {
 	return FinalizeSubagentChildResponse{}, nil
+}
+
+func (m *mockSubagentProvider) ParentSessionForSubagentChild(childSessionID string) (string, bool) {
+	parent, ok := m.childParents[childSessionID]
+	return parent, ok
 }
 
 func TestHealthReturnsOK(t *testing.T) {
@@ -184,6 +190,121 @@ func TestSubagentMalformedJSONReturnsJSONError(t *testing.T) {
 	}
 	if !strings.Contains(got["error"], "invalid json") {
 		t.Fatalf("error = %q, want invalid json", got["error"])
+	}
+}
+
+func TestSubagentMutationsRequireBearerToken(t *testing.T) {
+	p := &mockSubagentProvider{}
+	h := newHandler(p, "secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/create-child", strings.NewReader(`{"parentSessionId":"parent-1","parentToolCallId":"tool-1","agentName":"explorer","task":"map"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSubagentMutationsRejectWrongToken(t *testing.T) {
+	p := &mockSubagentProvider{}
+	h := newHandler(p, "secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/create-child", strings.NewReader(`{"parentSessionId":"parent-1","parentToolCallId":"tool-1","agentName":"explorer","task":"map"}`))
+	req.Header.Set("Authorization", "Bearer wrong")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSubagentMutationsRejectExpiredToken(t *testing.T) {
+	p := &mockSubagentProvider{}
+	h := newHandler(p, "secret")
+	token, err := NewSubagentAuthToken("secret", SubagentAuthClaims{
+		ParentSessionID: "parent-1",
+		Operation:       "create-child",
+		ExpiresAt:       time.Now().Add(-time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/create-child", strings.NewReader(`{"parentSessionId":"parent-1","parentToolCallId":"tool-1","agentName":"explorer","task":"map"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSubagentMutationsRejectDifferentParentSession(t *testing.T) {
+	p := &mockSubagentProvider{}
+	h := newHandler(p, "secret")
+	token, err := NewSubagentAuthToken("secret", SubagentAuthClaims{
+		ParentSessionID: "parent-1",
+		Operation:       "create-child",
+		ExpiresAt:       time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/create-child", strings.NewReader(`{"parentSessionId":"parent-2","parentToolCallId":"tool-1","agentName":"explorer","task":"map"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSubagentMutationsRejectDifferentChildSession(t *testing.T) {
+	p := &mockSubagentProvider{childParents: map[string]string{"child-1": "parent-1", "child-2": "parent-2"}}
+	h := newHandler(p, "secret")
+	token, err := NewSubagentAuthToken("secret", SubagentAuthClaims{
+		ParentSessionID: "parent-1",
+		Operation:       "forward-event",
+		ExpiresAt:       time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/forward-event", strings.NewReader(`{"childSessionId":"child-2","event":{"type":"agent_start"}}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSubagentMutationsRejectDifferentOperation(t *testing.T) {
+	p := &mockSubagentProvider{childParents: map[string]string{"child-1": "parent-1"}}
+	h := newHandler(p, "secret")
+	token, err := NewSubagentAuthToken("secret", SubagentAuthClaims{
+		ParentSessionID: "parent-1",
+		Operation:       "finalize",
+		ExpiresAt:       time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/subagents/forward-event", strings.NewReader(`{"childSessionId":"child-1","event":{"type":"agent_start"}}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
 	}
 }
 

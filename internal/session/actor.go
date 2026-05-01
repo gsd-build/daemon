@@ -40,29 +40,30 @@ type ImageUploader interface {
 
 // Options configures a new Actor.
 type Options struct {
-	SessionID         string
-	CWD               string
-	Relay             RelaySender
-	Model             string
-	Effort            string
-	PermissionMode    string
-	WarmPiWorkers     bool
-	WarmClaudeSDK     bool
-	ResumeSession     string
-	PiBinaryPath      string
-	PiExtensionPath   string
-	ServerURL         string
-	MachineID         string
-	AuthToken         string
-	DaemonSocketPath  string
-	AgentDir          string
-	Uploader          ImageUploader // nil = image upload disabled
-	BrowserGrantID    string
-	BrowserID         string
-	RecordTouchedFile func(channelID string, cwd string, path string)
-	OnTaskIdle        func()
-	ProjectID         string
-	AgentTools        AgentToolController
+	SessionID          string
+	CWD                string
+	Relay              RelaySender
+	Model              string
+	Effort             string
+	PermissionMode     string
+	WarmPiWorkers      bool
+	WarmClaudeSDK      bool
+	ResumeSession      string
+	PiBinaryPath       string
+	PiExtensionPath    string
+	ServerURL          string
+	MachineID          string
+	AuthToken          string
+	DaemonSocketPath   string
+	SubagentAuthSecret string
+	AgentDir           string
+	Uploader           ImageUploader // nil = image upload disabled
+	BrowserGrantID     string
+	BrowserID          string
+	RecordTouchedFile  func(channelID string, cwd string, path string)
+	OnTaskIdle         func()
+	ProjectID          string
+	AgentTools         AgentToolController
 }
 
 // Actor drives a single agent session using spawn-per-task execution.
@@ -119,6 +120,7 @@ type Actor struct {
 	// pendingFileTool. Populated in capturePiToolStart and consumed in
 	// capturePiToolEnd.
 	pendingFileToolStarts sync.Map
+	touchedFiles          sync.Map
 	localServerDetections sync.Map
 
 	runPiControl func(ctx context.Context, command pi.ControlCommand, onEvent func(pi.ControlEvent)) (pi.ControlResult, error)
@@ -904,6 +906,19 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		subagentsPrompt = agents.BuildPrompt(definitions)
 	}
 
+	subagentAuthToken := ""
+	if a.opts.SubagentAuthSecret != "" {
+		token, err := sockapi.NewSubagentAuthToken(a.opts.SubagentAuthSecret, sockapi.SubagentAuthClaims{
+			ParentSessionID: a.opts.SessionID,
+			Operation:       "*",
+			ExpiresAt:       time.Now().Add(24 * time.Hour).Unix(),
+		})
+		if err != nil {
+			return fmt.Errorf("create subagent auth token: %w", err)
+		}
+		subagentAuthToken = token
+	}
+
 	opts := pi.Options{
 		BinaryPath:         binaryPath,
 		CWD:                a.opts.CWD,
@@ -924,6 +939,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		WarmClaudeSDK:      a.opts.WarmClaudeSDK,
 		PlanCapability:     tc.PlanCapability,
 		DaemonSocketPath:   a.opts.DaemonSocketPath,
+		SubagentAuthToken:  subagentAuthToken,
 		ParentSessionID:    a.opts.SessionID,
 		AgentDir:           a.opts.AgentDir,
 		SubagentsPrompt:    subagentsPrompt,
@@ -1143,6 +1159,9 @@ func (a *Actor) capturePiToolEnd(channelID string) func(pi.ToolExecutionEnd) {
 		if a.opts.RecordTouchedFile != nil {
 			a.opts.RecordTouchedFile(channelID, a.opts.CWD, path)
 		}
+		if resolved, err := daemonfs.ResolveExistingPathFromCWD(path, a.opts.CWD); err == nil {
+			a.touchedFiles.Store(resolved, struct{}{})
+		}
 		if toolName == "read" {
 			return
 		}
@@ -1261,13 +1280,13 @@ func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {
 		return
 	}
 	exec.OnPIDStart = func(pid int) {
-		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		path := filepath.Join(a.pidDir, pidFilenameForTask(taskID))
 		if err := pidfile.Write(path, pid); err != nil {
 			slog.Warn("write pid file failed", "taskId", taskID, "path", path, "err", err)
 		}
 	}
 	exec.OnPIDExit = func(pid int) {
-		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		path := filepath.Join(a.pidDir, pidFilenameForTask(taskID))
 		pidfile.Remove(path)
 	}
 }
@@ -1277,13 +1296,13 @@ func (a *Actor) attachPiWorkerPIDCallbacks(worker *pi.Worker, taskID string) {
 		return
 	}
 	worker.OnPIDStart = func(pid int) {
-		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		path := filepath.Join(a.pidDir, pidFilenameForTask(taskID))
 		if err := pidfile.Write(path, pid); err != nil {
 			slog.Warn("write pid file failed", "taskId", taskID, "path", path, "err", err)
 		}
 	}
 	worker.OnPIDExit = func(pid int) {
-		path := filepath.Join(a.pidDir, fmt.Sprintf("%s.pid", taskID))
+		path := filepath.Join(a.pidDir, pidFilenameForTask(taskID))
 		pidfile.Remove(path)
 	}
 }
@@ -1840,26 +1859,20 @@ func (a *Actor) maybeUploadImages(taskCtx context.Context, raw json.RawMessage, 
 		toolUseID := block.ID
 		slog.Info("image read detected, uploading", "filePath", filePath, "toolUseId", toolUseID)
 
-		// Resolve relative paths against actor CWD.
-		absPath := filePath
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(a.opts.CWD, absPath)
+		touched := a.touchedFileSet()
+		candidate, err := imageUploadFromReadPath(filePath, a.opts.CWD, touched)
+		if err != nil {
+			slog.Warn("image upload: path rejected", "path", filePath, "err", err)
+			continue
 		}
 
 		go func(ctx context.Context) {
 			if err := ctx.Err(); err != nil {
 				return
 			}
-			data, err := os.ReadFile(absPath)
+			imageURL, err := a.opts.Uploader.Upload(ctx, candidate.Filename, candidate.Data)
 			if err != nil {
-				slog.Warn("image upload: read file failed", "path", absPath, "err", err)
-				return
-			}
-
-			filename := filepath.Base(absPath)
-			imageURL, err := a.opts.Uploader.Upload(ctx, filename, data)
-			if err != nil {
-				slog.Warn("image upload: upload failed", "path", absPath, "err", err)
+				slog.Warn("image upload: upload failed", "path", candidate.Path, "err", err)
 				return
 			}
 
@@ -1880,10 +1893,22 @@ func (a *Actor) maybeUploadImages(taskCtx context.Context, raw json.RawMessage, 
 			if err := a.opts.Relay.Send(sendCtx, imgFrame); err != nil {
 				slog.Warn("image upload: send image_url event failed", "err", err)
 			} else {
-				slog.Info("image uploaded", "path", absPath, "url", imageURL, "toolUseId", toolUseID)
+				slog.Info("image uploaded", "path", candidate.Path, "url", imageURL, "toolUseId", toolUseID)
 			}
 		}(taskCtx)
 	}
+}
+
+func (a *Actor) touchedFileSet() map[string]struct{} {
+	out := make(map[string]struct{})
+	a.touchedFiles.Range(func(key, value any) bool {
+		path, ok := key.(string)
+		if ok && path != "" {
+			out[path] = struct{}{}
+		}
+		return true
+	})
+	return out
 }
 
 func (a *Actor) handleDenyResponse(ctx context.Context, tc *taskContext) error {

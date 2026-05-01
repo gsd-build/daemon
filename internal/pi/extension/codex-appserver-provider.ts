@@ -41,8 +41,10 @@ type NativeToolCall = {
 
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const REQUEST_TIMEOUT_MS = 90_000;
-const CODEX_SANDBOX = "danger-full-access";
-const CODEX_APPROVAL_POLICY = "never";
+const DEFAULT_CODEX_SANDBOX = "workspace-write";
+const DEFAULT_CODEX_APPROVAL_POLICY = "on-request";
+const FULL_ACCESS_GRANT_ENV = "GSD_CODEX_FULL_ACCESS_GRANT";
+const FULL_ACCESS_GRANT_VALUE = "allow-danger-full-access";
 
 export const codexModelDefinitions = [
   {
@@ -243,6 +245,19 @@ function fileChangeDiffText(item: Record<string, unknown>) {
 
 function statusIsError(status: string) {
   return status === "failed" || status === "declined";
+}
+
+function codexThreadPolicy() {
+  if (process.env[FULL_ACCESS_GRANT_ENV] === FULL_ACCESS_GRANT_VALUE) {
+    return {
+      sandbox: "danger-full-access",
+      approvalPolicy: "never",
+    };
+  }
+  return {
+    sandbox: DEFAULT_CODEX_SANDBOX,
+    approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY,
+  };
 }
 
 function pushNativeTool(run: ActiveRun, nativeTool: NativeToolCall) {
@@ -755,10 +770,11 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
           capabilities: { experimentalApi: true },
         });
         codexNotify("initialized");
+        const policy = codexThreadPolicy();
         const result = await codexRequest("thread/start", {
           cwd: process.cwd(),
-          sandbox: CODEX_SANDBOX,
-          approvalPolicy: CODEX_APPROVAL_POLICY,
+          sandbox: policy.sandbox,
+          approvalPolicy: policy.approvalPolicy,
           model: model.id,
           dynamicTools: codexDynamicToolsFromContext(context),
           ephemeral: true,

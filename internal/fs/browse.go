@@ -48,7 +48,7 @@ func BrowseDir(path, scopeRoot string) ([]protocol.BrowseEntry, error) {
 
 // BrowseDirPageAt lists one bounded page of entries in the given absolute path.
 func BrowseDirPageAt(path, scopeRoot string, opts BrowseDirOptions) (BrowseDirPage, error) {
-	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
+	resolvedRoot, err := resolveScopeRoot(scopeRoot, false)
 	if err != nil {
 		return BrowseDirPage{}, err
 	}

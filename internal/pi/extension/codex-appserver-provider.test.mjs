@@ -371,13 +371,80 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(summary.initializes, 1);
     assert.equal(summary.threadStarts, 1);
     assert.equal(summary.turnStarts, 2);
-    assert.equal(summary.threadStartsDetails[0]?.sandbox, "danger-full-access");
-    assert.equal(summary.threadStartsDetails[0]?.approvalPolicy, "never");
+    assert.equal(summary.threadStartsDetails[0]?.sandbox, "workspace-write");
+    assert.equal(summary.threadStartsDetails[0]?.approvalPolicy, "on-request");
     assert.deepEqual(summary.threadIds, ["thread_fake_warm"]);
   } finally {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
     if (previousStats === undefined) delete process.env.FAKE_CODEX_STATS_FILE;
     else process.env.FAKE_CODEX_STATS_FILE = previousStats;
+  }
+});
+
+test("codex appserver full access requires explicit local grant", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "fake-codex-appserver-grant-"));
+  const statsFile = path.join(dir, "stats.ndjson");
+  const codexBin = path.join(dir, "codex");
+  await writeFile(statsFile, "");
+  await writeFile(codexBin, `#!/usr/bin/env node
+const { appendFileSync } = await import("node:fs");
+const { createInterface } = await import("node:readline");
+const statsFile = process.env.FAKE_CODEX_STATS_FILE;
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "initialized") return;
+  if (message.method === "thread/start") {
+    appendFileSync(statsFile, JSON.stringify({
+      sandbox: message.params.sandbox,
+      approvalPolicy: message.params.approvalPolicy,
+    }) + "\\n");
+    send({ id: message.id, result: { thread: { id: "thread_grant" } } });
+    return;
+  }
+  if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn_1" } } });
+    send({ method: "turn/completed", params: { turn: { id: "turn_1", status: "completed" } } });
+    setTimeout(() => process.exit(0), 20);
+  }
+});
+`);
+  await chmod(codexBin, 0o700);
+
+  const previousPath = process.env.PATH;
+  const previousStats = process.env.FAKE_CODEX_STATS_FILE;
+  const previousGrant = process.env.GSD_CODEX_FULL_ACCESS_GRANT;
+  process.env.PATH = `${dir}${path.delimiter}${previousPath ?? ""}`;
+  process.env.FAKE_CODEX_STATS_FILE = statsFile;
+  process.env.GSD_CODEX_FULL_ACCESS_GRANT = "allow-danger-full-access";
+  try {
+    let provider;
+    registerCodexAppServerProvider({
+      registerProvider(name, definition) {
+        if (name === "codex-appserver") provider = definition;
+      },
+    });
+
+    const model = { id: "gpt-5.5", api: "openai-responses", provider: "codex-appserver" };
+    await collectStream(provider.streamSimple(model, {
+      messages: [{ role: "user", content: [{ type: "text", text: "first" }] }],
+      tools: [],
+    }));
+
+    const records = (await readFile(statsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(records[0]?.sandbox, "danger-full-access");
+    assert.equal(records[0]?.approvalPolicy, "never");
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousStats === undefined) delete process.env.FAKE_CODEX_STATS_FILE;
+    else process.env.FAKE_CODEX_STATS_FILE = previousStats;
+    if (previousGrant === undefined) delete process.env.GSD_CODEX_FULL_ACCESS_GRANT;
+    else process.env.GSD_CODEX_FULL_ACCESS_GRANT = previousGrant;
   }
 });

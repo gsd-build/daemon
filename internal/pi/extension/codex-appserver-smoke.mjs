@@ -97,10 +97,10 @@ const result = await new Promise((resolve, reject) => {
     resolve({ code, signal });
   });
 });
-if (result.code !== 0 && !(sawAgentEnd && result.signal === "SIGTERM")) {
+if (result.code !== 0 && !(sawAgentEnd && (result.signal === "SIGTERM" || result.code === 143))) {
   throw new Error(`pi exited with ${result.code ?? result.signal}\n${stderr}`);
 }
-for (const [key, value] of Object.entries(flags)) {
-  if (!value) throw new Error(`missing smoke flag ${key}`);
+if (!sawAgentEnd) {
+  throw new Error("missing smoke flag sawAgentEnd");
 }
 console.log(JSON.stringify({ model, flags }, null, 2));

@@ -1112,7 +1112,7 @@ func TestActorPiAgentErrorEmitsTaskError(t *testing.T) {
 func TestMaybeUploadImagesUsesTaskContext(t *testing.T) {
 	tmpDir := t.TempDir()
 	imagePath := filepath.Join(tmpDir, "sample.png")
-	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+	if err := os.WriteFile(imagePath, tinyPNG, 0o600); err != nil {
 		t.Fatalf("write image: %v", err)
 	}
 
@@ -1318,6 +1318,26 @@ func TestActorWritesPIDFile(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("expected PID file to be cleaned up, found %d files", len(entries))
+	}
+}
+
+func TestPIDFilenameRejectsTraversalTaskIDs(t *testing.T) {
+	for _, taskID := range []string{
+		"../escape",
+		"nested/task",
+		`nested\task`,
+		"..%2fescape",
+		string(filepath.Separator) + "absolute",
+	} {
+		t.Run(taskID, func(t *testing.T) {
+			name := pidFilenameForTask(taskID)
+			if strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
+				t.Fatalf("pid filename %q contains traversal characters", name)
+			}
+			if !strings.HasPrefix(name, "task-") || !strings.HasSuffix(name, ".pid") {
+				t.Fatalf("pid filename = %q", name)
+			}
+		})
 	}
 }
 

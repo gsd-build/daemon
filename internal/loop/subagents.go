@@ -178,6 +178,16 @@ func (d *Daemon) ForwardSubagentEvent(_ *http.Request, req sockapi.ForwardSubage
 	return nil
 }
 
+func (d *Daemon) ParentSessionForSubagentChild(childSessionID string) (string, bool) {
+	d.subagentMu.Lock()
+	defer d.subagentMu.Unlock()
+	if d.subagentParentSessions == nil {
+		return "", false
+	}
+	parent, ok := d.subagentParentSessions[childSessionID]
+	return parent, ok
+}
+
 func (d *Daemon) sendSubagentStarted(ctx context.Context, runID string, parentSessionID string, parentToolCallID string, childSessionID string, projectID string, runIndex int, mode string, task string, agentName string, model string) error {
 	if d.manager == nil {
 		return nil

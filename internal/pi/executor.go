@@ -77,6 +77,7 @@ type Options struct {
 	WarmClaudeSDK      bool
 	PlanCapability     *protocol.PlanCapability
 	DaemonSocketPath   string
+	SubagentAuthToken  string
 	ParentSessionID    string
 	AgentDir           string
 	SubagentsPrompt    string
@@ -221,12 +222,14 @@ func cleanRuntimeValue(value string) string {
 }
 
 func processEnv(ctx context.Context, base []string, opts Options) []string {
+	provider := ProviderOrDefault(opts.Provider)
+	allowedBase := allowlistedBaseEnv(base, provider)
 	return subagentEnv(
 		warmClaudeSDKEnv(
 			planCapabilityEnv(
 				browserEnv(
 					agentToolsEnv(
-						providerEnv(ctx, base, ProviderOrDefault(opts.Provider)),
+						providerEnv(ctx, allowedBase, provider),
 						opts,
 					),
 					opts.BrowserGrantID,
@@ -241,15 +244,52 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 	)
 }
 
+func allowlistedBaseEnv(base []string, provider string) []string {
+	providerKey := providerCredentialKey(provider)
+	out := make([]string, 0, len(base))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
+		if isAllowedBaseEnvKey(key) || (providerKey != "" && key == providerKey) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func isAllowedBaseEnvKey(key string) bool {
+	switch key {
+	case "PATH", "HOME", "SHELL", "TERM", "LANG", "LANGUAGE":
+		return true
+	}
+	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "FAKE_PI_")
+}
+
+func providerCredentialKey(provider string) string {
+	switch ProviderOrDefault(provider) {
+	case "openrouter", "zai", "kimi-coding":
+		return openRouterAPIKeyEnv
+	case "claude-cli":
+		return "ANTHROPIC_API_KEY"
+	default:
+		return ""
+	}
+}
+
 // ProcessEnv returns the daemon Pi environment shared by RPC and TUI launchers.
 func ProcessEnv(ctx context.Context, base []string, opts Options) []string {
 	return processEnv(ctx, base, opts)
 }
 
 func subagentEnv(base []string, opts Options) []string {
-	out := make([]string, 0, len(base)+3)
+	out := make([]string, 0, len(base)+4)
 	for _, entry := range base {
 		if opts.DaemonSocketPath != "" && strings.HasPrefix(entry, "GSD_DAEMON_SOCKET=") {
+			continue
+		}
+		if opts.SubagentAuthToken != "" && strings.HasPrefix(entry, "GSD_SUBAGENT_AUTH_TOKEN=") {
 			continue
 		}
 		if opts.ParentSessionID != "" && strings.HasPrefix(entry, "GSD_PARENT_SESSION_ID=") {
@@ -262,6 +302,9 @@ func subagentEnv(base []string, opts Options) []string {
 	}
 	if opts.DaemonSocketPath != "" {
 		out = append(out, "GSD_DAEMON_SOCKET="+opts.DaemonSocketPath)
+	}
+	if opts.SubagentAuthToken != "" {
+		out = append(out, "GSD_SUBAGENT_AUTH_TOKEN="+opts.SubagentAuthToken)
 	}
 	if opts.ParentSessionID != "" {
 		out = append(out, "GSD_PARENT_SESSION_ID="+opts.ParentSessionID)
@@ -547,12 +590,19 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 }
 
 func providerEnv(ctx context.Context, base []string, provider string) []string {
-	if envHasKey(base, openRouterAPIKeyEnv) {
+	key := providerCredentialKey(provider)
+	if key == "" {
 		return base
 	}
-	if value := strings.TrimSpace(lookupServiceManagerEnv(ctx, openRouterAPIKeyEnv)); value != "" {
+	if envHasKey(base, key) {
+		return base
+	}
+	if key != openRouterAPIKeyEnv {
+		return base
+	}
+	if value := strings.TrimSpace(lookupServiceManagerEnv(ctx, key)); value != "" {
 		env := make([]string, 0, len(base)+1)
-		prefix := openRouterAPIKeyEnv + "="
+		prefix := key + "="
 		for _, entry := range base {
 			if strings.HasPrefix(entry, prefix) {
 				continue
