@@ -11,6 +11,7 @@ import {
   codexNativeToolStartFromItem,
   codexOutputForModel,
   codexPromptTextFromContext,
+  codexUsageFromTokenUsage,
   registerCodexAppServerProvider,
 } from "./codex-appserver-provider.ts";
 
@@ -56,6 +57,39 @@ test("codexOutputForModel stamps provider and empty usage", () => {
   assert.equal(output.usage.output, 0);
   assert.equal(output.usage.cacheRead, 0);
   assert.equal(output.usage.cacheWrite, 0);
+});
+
+test("codexUsageFromTokenUsage preserves cache accounting fields", () => {
+  assert.deepEqual(codexUsageFromTokenUsage({
+    total: {
+      inputTokens: 100,
+      outputTokens: 12,
+      cacheReadInputTokens: 30,
+      cacheCreationInputTokens: 70,
+      totalTokens: 212,
+    },
+  }), {
+    input: 100,
+    output: 12,
+    cacheRead: 30,
+    cacheWrite: 70,
+    totalTokens: 212,
+  });
+});
+
+test("codexUsageFromTokenUsage accepts alternate provider field names", () => {
+  assert.deepEqual(codexUsageFromTokenUsage({
+    input_tokens: 10,
+    output_tokens: 2,
+    cachedInputTokens: 4,
+    cache_creation_input_tokens: 8,
+  }), {
+    input: 10,
+    output: 2,
+    cacheRead: 4,
+    cacheWrite: 8,
+    totalTokens: 24,
+  });
 });
 
 test("codexPromptTextFromContext renders the active Pi conversation history", () => {
@@ -473,8 +507,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.method === "turn/start") {
     process.stderr.write("selected model produced no events\\n");
     send({ id: message.id, result: { turn: { id: "turn_empty" } } });
-    send({ method: "turn/completed", params: { turn: { id: "turn_empty", status: "completed" } } });
-    setTimeout(() => process.exit(0), 20);
+    setTimeout(() => {
+      send({ method: "turn/completed", params: { turn: { id: "turn_empty", status: "completed" } } });
+    }, 20);
+    setTimeout(() => process.exit(0), 60);
   }
 });
 `);
