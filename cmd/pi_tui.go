@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -50,9 +49,10 @@ var piTUIFlags struct {
 }
 
 var piTUICmd = &cobra.Command{
-	Use:   "pi-tui [initial message...]",
-	Short: "Start Pi TUI with the daemon extension",
-	Long:  "Start Pi TUI with the daemon extension, provider registry, model set, session path, and task-scoped tool environment.",
+	Use:          "pi-tui [initial message...]",
+	Short:        "Start Pi TUI with the daemon extension",
+	Long:         "Start Pi TUI with the daemon extension, provider registry, model set, session path, and task-scoped tool environment.",
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPiTUI(cmd.Context(), args)
 	},
@@ -92,6 +92,9 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 	extensionPath, err := resolvePiTUIExtensionPath(piTUIFlags.extensionPath)
 	if err != nil {
 		return err
+	}
+	if !piTUIFlags.printCommand {
+		fmt.Fprintln(os.Stderr, "Preparing Pi extension...")
 	}
 	if err := update.EnsureExtensionHealthy(filepath.Dir(extensionPath)); err != nil {
 		return fmt.Errorf("prepare pi extension: %w", err)
@@ -190,15 +193,13 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 		return nil
 	}
 
-	piCmd := exec.CommandContext(ctx, piOpts.BinaryPath, args...)
+	fmt.Fprintln(os.Stderr, "Starting Pi TUI...")
+	piCmd := exec.Command(piOpts.BinaryPath, args...)
 	piCmd.Dir = cwd
 	piCmd.Env = pi.ProcessEnv(ctx, os.Environ(), piOpts)
 	piCmd.Stdin = os.Stdin
 	piCmd.Stdout = os.Stdout
 	piCmd.Stderr = os.Stderr
-	if runtime.GOOS != "windows" {
-		piCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
 	if err := piCmd.Start(); err != nil {
 		return fmt.Errorf("start pi tui: %w", err)
 	}
@@ -208,8 +209,13 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 	case err := <-waitCh:
 		return err
 	case <-ctx.Done():
-		terminatePiTUIProcess(piCmd)
-		return <-waitCh
+		select {
+		case <-waitCh:
+		case <-time.After(2 * time.Second):
+			_ = piCmd.Process.Kill()
+			<-waitCh
+		}
+		return nil
 	}
 }
 
@@ -408,23 +414,6 @@ func startPiTUIAgentTools(ctx context.Context, scope agentterminal.TaskScope) (a
 		controlServer.StopTask(scope.TaskID)
 	}
 	return control, stop, nil
-}
-
-func terminatePiTUIProcess(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	if runtime.GOOS != "windows" {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		go func(pid int) {
-			timer := time.NewTimer(2 * time.Second)
-			defer timer.Stop()
-			<-timer.C
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}(cmd.Process.Pid)
-		return
-	}
-	_ = cmd.Process.Kill()
 }
 
 func shellJoin(args []string) string {
