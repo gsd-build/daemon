@@ -207,6 +207,9 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 	go func() { waitCh <- piCmd.Wait() }()
 	select {
 	case err := <-waitCh:
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	case <-ctx.Done():
 		if piCmd.Process != nil {
