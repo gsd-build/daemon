@@ -481,7 +481,7 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 	risk := classifyBrowserTool(msg.Method, msg.ParamsJSON)
 	if msg.Method == "vault_save" {
 		m.mu.Unlock()
-		_ = m.sender.Send(ctx, &protocol.BrowserToolResult{
+		if err := m.sender.Send(ctx, &protocol.BrowserToolResult{
 			Type:      protocol.MsgTypeBrowserToolResult,
 			BrowserID: msg.BrowserID,
 			GrantID:   msg.GrantID,
@@ -489,15 +489,20 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 			ToolUseID: msg.ToolUseID,
 			OK:        false,
 			Error:     "agent-initiated vault_save is not allowed",
-		})
+		}); err != nil {
+			return fmt.Errorf("send browser vault_save rejection: %w", err)
+		}
 		return fmt.Errorf("agent-initiated vault_save is not allowed")
 	}
 	if browserRiskRequiresApproval(risk) {
+		previousOwner := state.owner
+		previousVersion := state.controlVersion
 		state.owner = OwnerApproval
 		state.controlVersion++
+		nextVersion := state.controlVersion
 		m.mu.Unlock()
 		requestID := fmt.Sprintf("browser_sensitive_%d", time.Now().UnixNano())
-		_ = m.sender.Send(ctx, &protocol.BrowserSensitiveActionRequest{
+		if err := m.sender.Send(ctx, &protocol.BrowserSensitiveActionRequest{
 			Type:      protocol.MsgTypeBrowserSensitiveActionRequest,
 			BrowserID: msg.BrowserID,
 			RequestID: requestID,
@@ -508,7 +513,17 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 			Category:  string(risk),
 			Summary:   browserApprovalSummary(msg.Method, risk),
 			ExpiresAt: time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano),
-		})
+		}); err != nil {
+			m.mu.Lock()
+			if current := m.byID[msg.BrowserID]; current == state &&
+				current.owner == OwnerApproval &&
+				current.controlVersion == nextVersion {
+				current.owner = previousOwner
+				current.controlVersion = previousVersion
+			}
+			m.mu.Unlock()
+			return fmt.Errorf("send browser sensitive action request: %w", err)
+		}
 		return fmt.Errorf("browser action requires approval: %s", risk)
 	}
 	m.mu.Unlock()

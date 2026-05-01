@@ -40,7 +40,7 @@ func classifyBrowserBatch(params json.RawMessage) BrowserRisk {
 		Steps []map[string]json.RawMessage `json:"steps"`
 	}
 	if err := json.Unmarshal(params, &payload); err != nil {
-		return BrowserRiskInspection
+		return BrowserRiskExternalEffect
 	}
 	risk := BrowserRiskInspection
 	for _, step := range payload.Steps {
@@ -48,10 +48,10 @@ func classifyBrowserBatch(params json.RawMessage) BrowserRisk {
 		if method == "" {
 			method = stringValue(step["action"])
 		}
-		if method == "" {
-			continue
+		nested := BrowserRiskExternalEffect
+		if method != "" {
+			nested = classifyBrowserTool(method, stepPayload(step))
 		}
-		nested := classifyBrowserTool(method, stepPayload(step))
 		if riskRank(nested) > riskRank(risk) {
 			risk = nested
 		}

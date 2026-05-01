@@ -283,10 +283,52 @@ func TestManagerBlocksSensitiveToolUntilApproval(t *testing.T) {
 	}
 }
 
+func TestManagerRollsBackApprovalOwnerWhenRequestSendFails(t *testing.T) {
+	service := &fakeService{}
+	m := NewManager(ManagerOptions{Service: service, Sender: &recordingSender{}, FrameInterval: time.Hour})
+	openBrowserForTest(t, m, "browser_1")
+	m.sender = failingSender{}
+
+	err := m.Tool(context.Background(), &protocol.BrowserToolCall{
+		Type:      protocol.MsgTypeBrowserToolCall,
+		BrowserID: "browser_1",
+		GrantID:   "grant_1",
+		TaskID:    "task_1",
+		ToolUseID: "tool_1",
+		Method:    "vault_login",
+	})
+
+	if err == nil {
+		t.Fatal("expected send failure")
+	}
+	m.mu.Lock()
+	owner := m.byID["browser_1"].owner
+	version := m.byID["browser_1"].controlVersion
+	m.mu.Unlock()
+	if owner != OwnerAgent {
+		t.Fatalf("owner = %s, want %s", owner, OwnerAgent)
+	}
+	if version != 0 {
+		t.Fatalf("controlVersion = %d, want 0", version)
+	}
+}
+
 func TestClassifyBrowserBatchUsesHighestRiskNestedMethod(t *testing.T) {
 	category := classifyBrowserTool("batch", json.RawMessage(`{"steps":[{"action":"mock_route"}]}`))
 	if category != BrowserRiskNetworkMutation {
 		t.Fatalf("category = %s, want %s", category, BrowserRiskNetworkMutation)
+	}
+}
+
+func TestClassifyBrowserBatchFailsClosed(t *testing.T) {
+	for _, params := range []json.RawMessage{
+		json.RawMessage(`not-json`),
+		json.RawMessage(`{"steps":[{}]}`),
+	} {
+		category := classifyBrowserTool("batch", params)
+		if category != BrowserRiskExternalEffect {
+			t.Fatalf("category = %s, want %s for %s", category, BrowserRiskExternalEffect, params)
+		}
 	}
 }
 
