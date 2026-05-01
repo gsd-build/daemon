@@ -209,9 +209,14 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 	case err := <-waitCh:
 		return err
 	case <-ctx.Done():
+		if piCmd.Process != nil {
+			_ = piCmd.Process.Signal(syscall.SIGTERM)
+		}
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
 		select {
 		case <-waitCh:
-		case <-time.After(2 * time.Second):
+		case <-timer.C:
 			_ = piCmd.Process.Kill()
 			<-waitCh
 		}
