@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -59,32 +60,39 @@ func piExitError(code int, stderr string) error {
 
 // Options configures a pi process.
 type Options struct {
-	BinaryPath         string // pi binary; defaults to "pi"
-	CWD                string
-	Model              string // forwarded as --model
-	ResumeSession      string // forwarded as --session <path>; empty = --no-session
-	TaskID             string
-	SessionID          string
-	ChannelID          string
-	Prompt             string
-	CustomInstructions string
-	ExtensionPath      string // forwarded as -e <path>
-	Provider           string // forwarded as --provider <name>
-	SkillPaths         []string
-	DisableSkills      bool
-	BrowserGrantID     string
-	BrowserID          string
-	BrowserSessionID   string
-	WarmClaudeSDK      bool
-	PlanCapability     *protocol.PlanCapability
-	DaemonSocketPath   string
-	SubagentAuthToken  string
-	ParentSessionID    string
-	AgentDir           string
-	SubagentsPrompt    string
-	AgentToolsSocket   string
-	AgentToolsToken    string
-	ToolProfile        string
+	BinaryPath                 string // pi binary; defaults to "pi"
+	CWD                        string
+	Model                      string // forwarded as --model
+	ResumeSession              string // forwarded as --session <path>; empty = --no-session
+	TaskID                     string
+	SessionID                  string
+	ChannelID                  string
+	Prompt                     string
+	CustomInstructions         string
+	ExtensionPath              string // forwarded as -e <path>
+	Provider                   string // forwarded as --provider <name>
+	SkillPaths                 []string
+	DisableSkills              bool
+	BrowserGrantID             string
+	BrowserID                  string
+	BrowserSessionID           string
+	BrowserProjectID           string
+	BrowserMachineID           string
+	BrowserGrantExpiresAt      string
+	BrowserRPCSocket           string
+	BrowserRuntimeErrorCode    string
+	BrowserRuntimeErrorMessage string
+	BrowserRuntimeVersion      string
+	WarmClaudeSDK              bool
+	PlanCapability             *protocol.PlanCapability
+	DaemonSocketPath           string
+	SubagentAuthToken          string
+	ParentSessionID            string
+	AgentDir                   string
+	SubagentsPrompt            string
+	AgentToolsSocket           string
+	AgentToolsToken            string
+	ToolProfile                string
 }
 
 // ProviderOrDefault returns the Pi provider name to use for a task.
@@ -236,9 +244,7 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 						),
 						opts,
 					),
-					opts.BrowserGrantID,
-					opts.BrowserID,
-					opts.BrowserSessionID,
+					opts,
 				),
 				opts.PlanCapability,
 			),
@@ -729,20 +735,49 @@ func serviceManagerEnv(ctx context.Context, key string) string {
 	return ""
 }
 
-func browserEnv(base []string, grantID string, browserID string, sessionID string) []string {
-	env := make([]string, 0, len(base)+3)
+func browserEnv(base []string, opts Options) []string {
+	env := make([]string, 0, len(base)+10)
 	for _, entry := range base {
 		if strings.HasPrefix(entry, "GSD_BROWSER_") {
 			continue
 		}
+		if strings.HasPrefix(entry, "GSD_DAEMON_BROWSER_RPC_SOCKET=") {
+			continue
+		}
 		env = append(env, entry)
 	}
-	if grantID != "" && browserID != "" && sessionID != "" {
+	if opts.BrowserGrantID != "" && opts.BrowserSessionID != "" {
 		env = append(env,
-			"GSD_BROWSER_GRANT_ID="+grantID,
-			"GSD_BROWSER_ID="+browserID,
-			"GSD_BROWSER_SESSION_ID="+sessionID,
+			"GSD_BROWSER_GRANT_ID="+opts.BrowserGrantID,
+			"GSD_BROWSER_SESSION_ID="+opts.BrowserSessionID,
 		)
+	}
+	if opts.BrowserID != "" {
+		env = append(env, "GSD_BROWSER_ID="+opts.BrowserID)
+	}
+	if opts.BrowserProjectID != "" {
+		env = append(env, "GSD_PROJECT_ID="+opts.BrowserProjectID)
+	}
+	if opts.BrowserMachineID != "" {
+		env = append(env, "GSD_MACHINE_ID="+opts.BrowserMachineID)
+	}
+	if opts.BrowserGrantExpiresAt != "" {
+		env = append(env, "GSD_BROWSER_GRANT_EXPIRES_AT="+opts.BrowserGrantExpiresAt)
+	}
+	if opts.BrowserRPCSocket != "" {
+		env = append(env, "GSD_DAEMON_BROWSER_RPC_SOCKET="+opts.BrowserRPCSocket)
+	}
+	if opts.BrowserRuntimeErrorCode != "" {
+		env = append(env, "GSD_BROWSER_RUNTIME_ERROR_CODE="+opts.BrowserRuntimeErrorCode)
+	}
+	if opts.BrowserRuntimeErrorMessage != "" {
+		env = append(env, "GSD_BROWSER_RUNTIME_ERROR_MESSAGE="+opts.BrowserRuntimeErrorMessage)
+	}
+	if opts.BrowserRuntimeVersion != "" {
+		env = append(env, "GSD_BROWSER_RUNTIME_VERSION="+opts.BrowserRuntimeVersion)
+	}
+	if opts.ExtensionPath != "" {
+		env = append(env, "GSD_BROWSER_SKILL_DIR="+filepath.Join(filepath.Dir(opts.ExtensionPath), "gsd-browser-skill"))
 	}
 	return env
 }

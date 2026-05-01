@@ -60,6 +60,9 @@ type Options struct {
 	Uploader           ImageUploader // nil = image upload disabled
 	BrowserGrantID     string
 	BrowserID          string
+	BrowserGrant       *protocol.BrowserGrantContext
+	BrowserRuntime     BrowserRuntimeSnapshot
+	BrowserRPCSocket   string
 	RecordTouchedFile  func(channelID string, cwd string, path string)
 	OnTaskIdle         func()
 	ProjectID          string
@@ -160,6 +163,9 @@ type taskContext struct {
 	DisableSkills      bool
 	BrowserGrantID     string
 	BrowserID          string
+	BrowserGrant       *protocol.BrowserGrantContext
+	BrowserRuntime     BrowserRuntimeSnapshot
+	BrowserRPCSocket   string
 	PlanCapability     *protocol.PlanCapability
 	PlanRuntime        *planRuntimeReporter
 }
@@ -350,6 +356,23 @@ func (a *Actor) SetBrowserContext(grantID string, browserID string) {
 	defer a.taskMu.Unlock()
 	a.opts.BrowserGrantID = grantID
 	a.opts.BrowserID = browserID
+}
+
+type BrowserRuntimeSnapshot struct {
+	ErrorCode    string
+	ErrorMessage string
+	Version      string
+}
+
+func (a *Actor) SetBrowserGrant(grant *protocol.BrowserGrantContext, runtime BrowserRuntimeSnapshot, rpcSocket string) {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	a.opts.BrowserGrant = grant
+	a.opts.BrowserRuntime = runtime
+	a.opts.BrowserRPCSocket = rpcSocket
+	if grant != nil {
+		a.opts.BrowserGrantID = grant.GrantID
+	}
 }
 
 // SendTask queues a task for execution. Non-blocking if the channel has capacity.
@@ -643,6 +666,9 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		DisableSkills:      task.DisableSkills,
 		BrowserGrantID:     a.opts.BrowserGrantID,
 		BrowserID:          a.opts.BrowserID,
+		BrowserGrant:       a.opts.BrowserGrant,
+		BrowserRuntime:     a.opts.BrowserRuntime,
+		BrowserRPCSocket:   a.opts.BrowserRPCSocket,
 		PlanCapability:     task.PlanCapability,
 	}
 	tc.PlanRuntime = newPlanRuntimeReporter(tc.TaskID, tc.PlanCapability)
@@ -928,30 +954,41 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	opts := pi.Options{
-		BinaryPath:         binaryPath,
-		CWD:                a.opts.CWD,
-		Model:              model,
-		ResumeSession:      sessionFile,
-		TaskID:             tc.TaskID,
-		SessionID:          a.opts.SessionID,
-		ChannelID:          tc.ChannelID,
-		Prompt:             prompt,
-		CustomInstructions: tc.CustomInstructions,
-		ExtensionPath:      a.opts.PiExtensionPath,
-		Provider:           provider,
-		SkillPaths:         skillPaths,
-		DisableSkills:      tc.DisableSkills,
-		BrowserGrantID:     tc.BrowserGrantID,
-		BrowserID:          tc.BrowserID,
-		BrowserSessionID:   a.opts.SessionID,
-		WarmClaudeSDK:      a.opts.WarmClaudeSDK,
-		PlanCapability:     tc.PlanCapability,
-		DaemonSocketPath:   a.opts.DaemonSocketPath,
-		SubagentAuthToken:  subagentAuthToken,
-		ParentSessionID:    a.opts.SessionID,
-		AgentDir:           a.opts.AgentDir,
-		SubagentsPrompt:    subagentsPrompt,
-		ToolProfile:        inferToolProfile(prompt),
+		BinaryPath:                 binaryPath,
+		CWD:                        a.opts.CWD,
+		Model:                      model,
+		ResumeSession:              sessionFile,
+		TaskID:                     tc.TaskID,
+		SessionID:                  a.opts.SessionID,
+		ChannelID:                  tc.ChannelID,
+		Prompt:                     prompt,
+		CustomInstructions:         tc.CustomInstructions,
+		ExtensionPath:              a.opts.PiExtensionPath,
+		Provider:                   provider,
+		SkillPaths:                 skillPaths,
+		DisableSkills:              tc.DisableSkills,
+		BrowserGrantID:             tc.BrowserGrantID,
+		BrowserID:                  tc.BrowserID,
+		BrowserSessionID:           a.opts.SessionID,
+		BrowserRPCSocket:           tc.BrowserRPCSocket,
+		BrowserRuntimeErrorCode:    tc.BrowserRuntime.ErrorCode,
+		BrowserRuntimeErrorMessage: tc.BrowserRuntime.ErrorMessage,
+		BrowserRuntimeVersion:      tc.BrowserRuntime.Version,
+		WarmClaudeSDK:              a.opts.WarmClaudeSDK,
+		PlanCapability:             tc.PlanCapability,
+		DaemonSocketPath:           a.opts.DaemonSocketPath,
+		SubagentAuthToken:          subagentAuthToken,
+		ParentSessionID:            a.opts.SessionID,
+		AgentDir:                   a.opts.AgentDir,
+		SubagentsPrompt:            subagentsPrompt,
+		ToolProfile:                inferToolProfile(prompt),
+	}
+	if tc.BrowserGrant != nil {
+		opts.BrowserGrantID = tc.BrowserGrant.GrantID
+		opts.BrowserSessionID = tc.BrowserGrant.SessionID
+		opts.BrowserProjectID = tc.BrowserGrant.ProjectID
+		opts.BrowserMachineID = tc.BrowserGrant.MachineID
+		opts.BrowserGrantExpiresAt = tc.BrowserGrant.ExpiresAt
 	}
 	if a.opts.AgentTools != nil {
 		control, err := a.opts.AgentTools.StartTask(taskCtx, agentterminal.TaskScope{

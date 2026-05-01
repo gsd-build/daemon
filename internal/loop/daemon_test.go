@@ -512,6 +512,45 @@ func TestHandleTaskUsesSessionScopedBrowserGrant(t *testing.T) {
 	}
 }
 
+func TestBrowserRPCEnsuresSessionAndRunsTool(t *testing.T) {
+	browserManager := browser.NewManager(browser.ManagerOptions{
+		Service:       loopBrowserService{},
+		Sender:        &loopBrowserSender{},
+		FrameInterval: time.Hour,
+	})
+	d := &Daemon{browserManager: browserManager}
+
+	resp := d.handleBrowserRPC(context.Background(), browserRPCRequest{
+		JSONRPC: "2.0",
+		Method:  "browser_tool",
+		Params: browser.ToolRPCRequest{
+			GrantID:   "grant_rpc",
+			SessionID: "sess-rpc",
+			TaskID:    "task-rpc",
+			ChannelID: "ch-rpc",
+			ProjectID: "project-rpc",
+			MachineID: "machine-rpc",
+			ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+			ToolUseID: "tool-rpc",
+			Method:    "snapshot",
+		},
+	})
+	if resp.Error != nil {
+		t.Fatalf("rpc error = %+v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok || result["ok"] != true {
+		t.Fatalf("rpc result = %#v", resp.Result)
+	}
+	grant, ok := browserManager.GrantForTask("task-rpc")
+	if !ok {
+		t.Fatal("expected lazy browser grant")
+	}
+	if grant.BrowserID != "grant_rpc" || grant.ChannelID != "ch-rpc" {
+		t.Fatalf("grant = %+v", grant)
+	}
+}
+
 func TestDaemonHandlesPreviewOpen(t *testing.T) {
 	daemon, relayClient := newTestDaemonWithPreview(t)
 	err := daemon.handleMessage(&protocol.Envelope{

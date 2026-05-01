@@ -26,6 +26,16 @@ type OpenRequest struct {
 	ExpiresAt  string
 }
 
+type EnsureRequest struct {
+	GrantID   string
+	SessionID string
+	ProjectID string
+	TaskID    string
+	ChannelID string
+	MachineID string
+	ExpiresAt string
+}
+
 type OpenResult struct {
 	BrowserID string
 	URL       string
@@ -67,4 +77,18 @@ type ToolResult struct {
 	OK         bool
 	ResultJSON json.RawMessage
 	Error      string
+	ErrorCode  string
+}
+
+type ToolRPCRequest struct {
+	GrantID   string          `json:"grantId"`
+	SessionID string          `json:"sessionId"`
+	ProjectID string          `json:"projectId"`
+	TaskID    string          `json:"taskId"`
+	ChannelID string          `json:"channelId"`
+	MachineID string          `json:"machineId"`
+	ExpiresAt string          `json:"expiresAt"`
+	ToolUseID string          `json:"toolUseId"`
+	Method    string          `json:"method"`
+	Params    json.RawMessage `json:"params"`
 }
