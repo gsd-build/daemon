@@ -563,6 +563,10 @@ function streamClaudeSdk(
 
     const sdkAbort = new AbortController();
     options?.signal?.addEventListener("abort", () => sdkAbort.abort(), { once: true });
+    let sdkStderrTail = "";
+    const rememberSdkStderr = (chunk: unknown) => {
+      sdkStderrTail = `${sdkStderrTail}${String(chunk)}`.slice(-4_000);
+    };
 
     const browserGrant = browserGrantFromEnv();
     const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
@@ -577,7 +581,7 @@ function streamClaudeSdk(
     const allowedTools = sdkTools.map((t: any) => `${MCP_PREFIX}${(t as any).name}`);
 
     stream.push({ type: "start", partial: output });
-    const handlers = createClaudeSdkRunHandlers(stream, output, model, options);
+    const handlers = createClaudeSdkRunHandlers(stream, output, model, options, () => sdkStderrTail);
 
     try {
       const sdkOptions: SdkOptions = {
@@ -589,7 +593,7 @@ function streamClaudeSdk(
         mcpServers: { "pi-tools": piMcp },
         abortController: sdkAbort,
         permissionMode: "bypassPermissions",
-        stderr: () => {},
+        stderr: rememberSdkStderr,
       };
       if (context.systemPrompt) {
         sdkOptions.systemPrompt = context.systemPrompt;
@@ -615,16 +619,69 @@ function streamClaudeSdk(
   return stream;
 }
 
-function createClaudeSdkRunHandlers(
+function assistantMessageHasPayload(message: AssistantMessage) {
+  return message.content.some((block: any) => {
+    if (block?.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    if (block?.type === "toolCall") return typeof block.name === "string" && block.name.length > 0;
+    return Boolean(block);
+  });
+}
+
+export function createClaudeSdkRunHandlers(
   stream: AssistantMessageEventStream,
   output: AssistantMessage,
   model: Model<any>,
   options?: SimpleStreamOptions,
+  diagnostics?: () => string,
 ) {
   let activeTextIndex: number | null = null;
   let activeToolCall: ActiveToolCall | null = null;
   let streamEndedForToolUse = false;
   let streamClosed = false;
+  const sdkMessageTypes = new Map<string, number>();
+  let sdkResultSummary = "";
+
+  const diagnosticDetails = () => {
+    const lines: string[] = [];
+    const messageTypes = Array.from(sdkMessageTypes.entries())
+      .map(([type, count]) => `${type}:${count}`)
+      .join(", ");
+    if (messageTypes) lines.push(`Claude SDK messages: ${messageTypes}`);
+    if (sdkResultSummary) lines.push(`Claude SDK result: ${sdkResultSummary}`);
+    const extra = diagnostics?.().trim();
+    if (extra) lines.push(`Claude SDK stderr:\n${extra}`);
+    return lines.join("\n\n");
+  };
+
+  const rememberSdkMessage = (msg: SDKMessage) => {
+    const type = (msg as any)?.type ?? "unknown";
+    sdkMessageTypes.set(type, (sdkMessageTypes.get(type) ?? 0) + 1);
+    if (type !== "result") return;
+
+    const result = msg as any;
+    const parts = [
+      `subtype=${String(result.subtype ?? "unknown")}`,
+      `is_error=${String(Boolean(result.is_error))}`,
+      `stop_reason=${String(result.stop_reason ?? "unknown")}`,
+      `num_turns=${String(result.num_turns ?? "unknown")}`,
+    ];
+    if (typeof result.result === "string" && result.result.trim().length > 0) {
+      parts.push(`result=${result.result.trim().slice(0, 1_000)}`);
+    }
+    if (Array.isArray(result.errors) && result.errors.length > 0) {
+      parts.push(`errors=${result.errors.map((err: unknown) => String(err)).join(" | ").slice(0, 1_000)}`);
+    }
+    sdkResultSummary = parts.join(", ");
+  };
+
+  const appendFinalResultText = (text: string) => {
+    if (assistantMessageHasPayload(output)) return;
+    const contentIndex = output.content.length;
+    output.content.push({ type: "text", text });
+    stream.push({ type: "text_start", contentIndex, partial: output });
+    stream.push({ type: "text_delta", contentIndex, delta: text, partial: output });
+    stream.push({ type: "text_end", contentIndex, content: text, partial: output });
+  };
 
   const closeStreamForToolUse = () => {
     if (streamClosed) return;
@@ -634,8 +691,16 @@ function createClaudeSdkRunHandlers(
   };
 
   const handleMessage = (msg: SDKMessage) => {
+    rememberSdkMessage(msg);
     applyUsageFromSdkMessage(output.usage, msg, (model as any).cost);
     if (streamEndedForToolUse) return;
+    if ((msg as any)?.type === "result") {
+      const resultText = (msg as any)?.result;
+      if (typeof resultText === "string" && resultText.trim().length > 0) {
+        appendFinalResultText(resultText);
+      }
+      return;
+    }
     if (msg.type !== "stream_event") return;
     const ev = (msg as any).event;
     if (ev?.type === "content_block_start") {
@@ -694,6 +759,16 @@ function createClaudeSdkRunHandlers(
       closeStreamForToolUse();
       return;
     }
+    if (!assistantMessageHasPayload(output)) {
+      output.stopReason = "error";
+      const details = diagnosticDetails();
+      output.errorMessage = details
+        ? `Claude SDK completed without assistant content.\n\n${details}`
+        : "Claude SDK completed without assistant content.";
+      stream.push({ type: "error", reason: "error", error: output });
+      stream.end();
+      return;
+    }
     output.stopReason = "stop";
     stream.push({ type: "done", reason: "stop", message: output });
     stream.end();
@@ -741,6 +816,10 @@ function streamWarmClaudeSdk(
   const piMcp = createSdkMcpServer({ name: "pi-tools", version: "0.0.1", tools: sdkTools });
   const sdkAbort = new AbortController();
   options?.signal?.addEventListener("abort", () => sdkAbort.abort(), { once: true });
+  let sdkStderrTail = "";
+  const rememberSdkStderr = (chunk: unknown) => {
+    sdkStderrTail = `${sdkStderrTail}${String(chunk)}`.slice(-4_000);
+  };
 
   const sdkOptions: SdkOptions = {
     includePartialMessages: true,
@@ -751,7 +830,7 @@ function streamWarmClaudeSdk(
     mcpServers: { "pi-tools": piMcp },
     abortController: sdkAbort,
     permissionMode: "bypassPermissions",
-    stderr: () => {},
+    stderr: rememberSdkStderr,
   };
   if (context.systemPrompt) sdkOptions.systemPrompt = context.systemPrompt;
 
@@ -764,7 +843,7 @@ function streamWarmClaudeSdk(
     warmClaudeWorker = new WarmClaudeSdkWorker(query, () => sdkOptions);
   }
 
-  const handlers = createClaudeSdkRunHandlers(stream, output, model, options);
+  const handlers = createClaudeSdkRunHandlers(stream, output, model, options, () => sdkStderrTail);
   const sdkSessionId = deriveClaudeSdkSessionId(undefined, process.cwd());
   const replayHistory = context.messages.length > 1 && !warmClaudeWorker.hasStarted();
   const messages = buildClaudePromptMessages(context.messages, sdkSessionId, replayHistory);

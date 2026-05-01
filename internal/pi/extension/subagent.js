@@ -13,7 +13,14 @@ const CLAUDE_CLI_MODELS = new Set([
   "claude-opus-4-6",
 ]);
 
-const CODEX_APPSERVER_MODELS = new Set(["gpt-5.5", "gpt-5.4"]);
+const CODEX_APPSERVER_MODELS = new Set([
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex",
+  "gpt-5.3-codex-spark",
+  "gpt-5.2",
+]);
 
 const ZAI_MODELS = new Set([
   "glm-5",

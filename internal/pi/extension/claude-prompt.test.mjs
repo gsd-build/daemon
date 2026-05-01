@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import {
   buildClaudePromptMessages,
+  createClaudeSdkRunHandlers,
   deriveClaudeSdkSessionId,
   externalPiToolAcknowledgement,
   finalizeActivePiToolCall,
@@ -137,4 +139,107 @@ test("externalPiToolAcknowledgement satisfies the SDK tool call without surfacin
 
   assert.equal(result.isError, false);
   assert.match(result.content[0].text, /daemon/);
+});
+
+test("Claude SDK handler surfaces empty completed turns as errors", async () => {
+  const stream = createAssistantMessageEventStream();
+  const output = {
+    role: "assistant",
+    content: [],
+    api: "anthropic-messages",
+    provider: "claude-cli",
+    model: "claude-sonnet-4-6",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 1,
+  };
+  const handlers = createClaudeSdkRunHandlers(
+    stream,
+    output,
+    { id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "claude-cli" },
+    undefined,
+    () => "sdk stderr line",
+  );
+
+  handlers.handleMessage({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    stop_reason: "end_turn",
+    num_turns: 1,
+    duration_ms: 1,
+    duration_api_ms: 1,
+    total_cost_usd: 0,
+    usage: {},
+    modelUsage: {},
+    permission_denials: [],
+    uuid: "uuid",
+    session_id: "session",
+  });
+  handlers.finish();
+  const events = [];
+  for await (const event of stream) events.push(event);
+
+  assert.equal(events.at(-1)?.type, "error");
+  assert.match(events.at(-1)?.error?.errorMessage, /completed without assistant content/);
+  assert.match(events.at(-1)?.error?.errorMessage, /Claude SDK messages:/);
+  assert.match(events.at(-1)?.error?.errorMessage, /sdk stderr line/);
+});
+
+test("Claude SDK handler uses final result text when partial stream events are absent", async () => {
+  const stream = createAssistantMessageEventStream();
+  const output = {
+    role: "assistant",
+    content: [],
+    api: "anthropic-messages",
+    provider: "claude-cli",
+    model: "claude-sonnet-4-6",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 1,
+  };
+  const handlers = createClaudeSdkRunHandlers(
+    stream,
+    output,
+    { id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "claude-cli" },
+  );
+
+  handlers.handleMessage({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "gsd claude result fallback",
+    stop_reason: "end_turn",
+    num_turns: 1,
+    duration_ms: 1,
+    duration_api_ms: 1,
+    total_cost_usd: 0,
+    usage: {},
+    modelUsage: {},
+    permission_denials: [],
+    uuid: "uuid",
+    session_id: "session",
+  });
+  handlers.finish();
+  const events = [];
+  for await (const event of stream) events.push(event);
+
+  assert.equal(events.at(-1)?.type, "done");
+  assert.equal(output.content[0]?.type, "text");
+  assert.equal(output.content[0]?.text, "gsd claude result fallback");
 });
