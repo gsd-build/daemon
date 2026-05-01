@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
-	github.com/gsd-build/protocol-go v0.32.0
+	github.com/gsd-build/protocol-go v0.33.0
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
