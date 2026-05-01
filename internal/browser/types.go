@@ -46,6 +46,23 @@ type Frame struct {
 	Title            string
 }
 
+type Refs struct {
+	Version    int
+	Refs       []Ref
+	CapturedAt string
+}
+
+type Ref struct {
+	Ref  string  `json:"ref"`
+	Key  string  `json:"key"`
+	Role string  `json:"role"`
+	Name string  `json:"name,omitempty"`
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
+	W    float64 `json:"w"`
+	H    float64 `json:"h"`
+}
+
 type ToolResult struct {
 	OK         bool
 	ResultJSON json.RawMessage

@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -12,8 +13,10 @@ import (
 )
 
 type fakeService struct {
-	mu    sync.Mutex
-	calls []string
+	mu        sync.Mutex
+	calls     []string
+	refs      []Ref
+	toolCalls int
 }
 
 func (f *fakeService) Open(ctx context.Context, req OpenRequest) (OpenResult, error) {
@@ -47,11 +50,49 @@ func (f *fakeService) Frame(ctx context.Context, browserID string) (Frame, error
 	}, nil
 }
 
+func (f *fakeService) Refs(ctx context.Context, browserID string) (Refs, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "refs:"+browserID)
+	return Refs{
+		Version:    1,
+		Refs:       append([]Ref(nil), f.refs...),
+		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
 func (f *fakeService) Tool(ctx context.Context, browserID string, method string, params []byte) (ToolResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "tool:"+method)
+	f.toolCalls++
 	return ToolResult{OK: true, ResultJSON: []byte(`{"ok":true}`)}, nil
+}
+
+func (r *recordingSender) hasType(messageType protocol.MessageType) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, msg := range r.msgs {
+		switch messageType {
+		case protocol.MsgTypeBrowserRefs:
+			if _, ok := msg.(*protocol.BrowserRefs); ok {
+				return true
+			}
+		case protocol.MsgTypeBrowserFrame:
+			if _, ok := msg.(*protocol.BrowserFrame); ok {
+				return true
+			}
+		case protocol.MsgTypeBrowserToolResult:
+			if _, ok := msg.(*protocol.BrowserToolResult); ok {
+				return true
+			}
+		case protocol.MsgTypeBrowserSensitiveActionRequest:
+			if _, ok := msg.(*protocol.BrowserSensitiveActionRequest); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (f *fakeService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
@@ -107,6 +148,187 @@ func TestBrowserUserInputParamsPreservesZeroRenderedOrigin(t *testing.T) {
 	}
 	if value, ok := params["renderedTop"]; !ok || value != float64(0) {
 		t.Fatalf("renderedTop = %#v, %v; want 0 and present", value, ok)
+	}
+}
+
+func TestBrowserUserInputToolRoutesSidebarCommands(t *testing.T) {
+	method, params, ok := browserUserInputTool(&protocol.BrowserUserInput{
+		Type: protocol.MsgTypeBrowserUserInput,
+		Kind: protocol.BrowserInputKindNavigate,
+		Text: "https://example.com",
+	})
+	if !ok {
+		t.Fatal("expected navigate input to route through browser tool")
+	}
+	if method != "navigate" {
+		t.Fatalf("method = %q, want navigate", method)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(params, &payload); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+	if payload["url"] != "https://example.com" {
+		t.Fatalf("url = %q", payload["url"])
+	}
+
+	method, params, ok = browserUserInputTool(&protocol.BrowserUserInput{
+		Type: protocol.MsgTypeBrowserUserInput,
+		Kind: protocol.BrowserInputKindRefAction,
+		Text: "@v1:button-primary",
+	})
+	if !ok {
+		t.Fatal("expected ref action input to route through browser tool")
+	}
+	if method != "click_ref" {
+		t.Fatalf("method = %q, want click_ref", method)
+	}
+	if err := json.Unmarshal(params, &payload); err != nil {
+		t.Fatalf("unmarshal ref params: %v", err)
+	}
+	if payload["ref"] != "@v1:button-primary" {
+		t.Fatalf("ref = %q", payload["ref"])
+	}
+}
+
+func openBrowserForTest(t *testing.T, m *Manager, browserID string) {
+	t.Helper()
+	if err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ProjectID: "project_1",
+		TaskID:    "task_1",
+		ChannelID: "channel_1",
+		MachineID: "machine_1",
+		Mode:      "clean",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("open browser: %v", err)
+	}
+	if browserID != "" {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if _, ok := m.byID[browserID]; !ok {
+			t.Fatalf("browser %s not opened", browserID)
+		}
+	}
+}
+
+func TestManagerForwardsBrowserRefs(t *testing.T) {
+	service := &fakeService{
+		refs: []Ref{{
+			Ref:  "@v1:e1",
+			Key:  "e1",
+			Role: "button",
+			Name: "Submit",
+			X:    10,
+			Y:    20,
+			W:    80,
+			H:    32,
+		}},
+	}
+	sender := &recordingSender{}
+	m := NewManager(ManagerOptions{
+		Service:       service,
+		Sender:        sender,
+		FrameInterval: time.Hour,
+	})
+
+	err := m.Open(context.Background(), &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: "req_1",
+		GrantID:   "grant_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("open browser: %v", err)
+	}
+
+	m.sendRefs(context.Background(), "browser_1")
+
+	if !sender.hasType(protocol.MsgTypeBrowserRefs) {
+		t.Fatalf("expected browserRefs message, got %#v", sender.snapshot())
+	}
+}
+
+func TestManagerBlocksSensitiveToolUntilApproval(t *testing.T) {
+	service := &fakeService{}
+	sender := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: service, Sender: sender, FrameInterval: time.Hour})
+	openBrowserForTest(t, m, "browser_1")
+
+	err := m.Tool(context.Background(), &protocol.BrowserToolCall{
+		Type:      protocol.MsgTypeBrowserToolCall,
+		BrowserID: "browser_1",
+		GrantID:   "grant_1",
+		TaskID:    "task_1",
+		ToolUseID: "tool_1",
+		Method:    "vault_login",
+	})
+
+	if err == nil {
+		t.Fatal("expected sensitive tool to wait for approval")
+	}
+	service.mu.Lock()
+	toolCalls := service.toolCalls
+	service.mu.Unlock()
+	if toolCalls != 0 {
+		t.Fatalf("sensitive tool executed before approval")
+	}
+	if !sender.hasType(protocol.MsgTypeBrowserSensitiveActionRequest) {
+		t.Fatalf("expected sensitive action request, got %#v", sender.snapshot())
+	}
+}
+
+func TestManagerRollsBackApprovalOwnerWhenRequestSendFails(t *testing.T) {
+	service := &fakeService{}
+	m := NewManager(ManagerOptions{Service: service, Sender: &recordingSender{}, FrameInterval: time.Hour})
+	openBrowserForTest(t, m, "browser_1")
+	m.sender = failingSender{}
+
+	err := m.Tool(context.Background(), &protocol.BrowserToolCall{
+		Type:      protocol.MsgTypeBrowserToolCall,
+		BrowserID: "browser_1",
+		GrantID:   "grant_1",
+		TaskID:    "task_1",
+		ToolUseID: "tool_1",
+		Method:    "vault_login",
+	})
+
+	if err == nil {
+		t.Fatal("expected send failure")
+	}
+	m.mu.Lock()
+	owner := m.byID["browser_1"].owner
+	version := m.byID["browser_1"].controlVersion
+	m.mu.Unlock()
+	if owner != OwnerAgent {
+		t.Fatalf("owner = %s, want %s", owner, OwnerAgent)
+	}
+	if version != 0 {
+		t.Fatalf("controlVersion = %d, want 0", version)
+	}
+}
+
+func TestClassifyBrowserBatchUsesHighestRiskNestedMethod(t *testing.T) {
+	category := classifyBrowserTool("batch", json.RawMessage(`{"steps":[{"action":"mock_route"}]}`))
+	if category != BrowserRiskNetworkMutation {
+		t.Fatalf("category = %s, want %s", category, BrowserRiskNetworkMutation)
+	}
+}
+
+func TestClassifyBrowserBatchFailsClosed(t *testing.T) {
+	for _, params := range []json.RawMessage{
+		json.RawMessage(`not-json`),
+		json.RawMessage(`{"steps":[{}]}`),
+	} {
+		category := classifyBrowserTool("batch", params)
+		if category != BrowserRiskExternalEffect {
+			t.Fatalf("category = %s, want %s for %s", category, BrowserRiskExternalEffect, params)
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ type Service interface {
 	Open(context.Context, OpenRequest) (OpenResult, error)
 	Close(context.Context, string) error
 	Frame(context.Context, string) (Frame, error)
+	Refs(context.Context, string) (Refs, error)
 	Tool(context.Context, string, string, []byte) (ToolResult, error)
 	UserInput(context.Context, string, *protocol.BrowserUserInput) error
 }
@@ -117,8 +118,57 @@ func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error
 	}, nil
 }
 
+func (s LocalService) Refs(ctx context.Context, browserID string) (Refs, error) {
+	var out struct {
+		Version      int    `json:"version"`
+		Refs         []Ref  `json:"refs"`
+		CapturedAtMs int64  `json:"capturedAtMs"`
+		CapturedAt   string `json:"capturedAt"`
+	}
+	if err := s.rpc(ctx, browserID, "cloud_refs", map[string]any{}, &out); err != nil {
+		return Refs{}, err
+	}
+	capturedAt := out.CapturedAt
+	if capturedAt == "" && out.CapturedAtMs != 0 {
+		capturedAt = time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano)
+	}
+	return Refs{Version: out.Version, Refs: out.Refs, CapturedAt: capturedAt}, nil
+}
+
 func (s LocalService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
+	if method, params, ok := browserUserInputTool(input); ok {
+		_, err := s.Tool(ctx, browserID, method, params)
+		return err
+	}
 	return s.rpc(ctx, browserID, "cloud_user_input", browserUserInputParams(input), nil)
+}
+
+func browserUserInputTool(input *protocol.BrowserUserInput) (string, []byte, bool) {
+	switch input.Kind {
+	case protocol.BrowserInputKindNavigate:
+		params, err := json.Marshal(map[string]any{"url": input.Text})
+		return "navigate", params, err == nil
+	case protocol.BrowserInputKindBack:
+		return "back", []byte(`{}`), true
+	case protocol.BrowserInputKindForward:
+		return "forward", []byte(`{}`), true
+	case protocol.BrowserInputKindReload:
+		return "reload", []byte(`{}`), true
+	case protocol.BrowserInputKindRefAction:
+		params, err := json.Marshal(map[string]any{"ref": input.Text})
+		return "click_ref", params, err == nil
+	case protocol.BrowserInputKindSetViewport:
+		params, err := json.Marshal(map[string]any{
+			"width":  input.ViewportWidth,
+			"height": input.ViewportHeight,
+		})
+		return "set_viewport", params, err == nil
+	case protocol.BrowserInputKindEmulateDevice:
+		params, err := json.Marshal(map[string]any{"device": input.Text})
+		return "emulate_device", params, err == nil
+	default:
+		return "", nil, false
+	}
 }
 
 func browserUserInputParams(input *protocol.BrowserUserInput) map[string]any {
