@@ -51,8 +51,8 @@ assert.throws(() => schemaToZod(schema).parse({ questions: [{ id: "", question: 
 assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(1), 1);
 assert.equal(schemaToZod({ enum: [1, "two", false, null] }).parse(false), false);
 assert.throws(() => schemaToZod({ enum: [1, "two", false, null] }).parse("1"), z.ZodError);
-assert.equal(schemaToZod({ const: "plan_commit" }).parse("plan_commit"), "plan_commit");
-assert.throws(() => schemaToZod({ const: "plan_commit" }).parse("plan_create"), z.ZodError);
+assert.equal(schemaToZod({ const: "plan_done" }).parse("plan_done"), "plan_done");
+assert.throws(() => schemaToZod({ const: "plan_done" }).parse("plan_next"), z.ZodError);
 assert.throws(() => schemaToZod({ type: "integer", minimum: 1, maximum: 900 }).parse(1800), z.ZodError);
 assert.throws(() => schemaToZod({ type: "string", format: "uuid" }).parse("main.py:23"), z.ZodError);
 
