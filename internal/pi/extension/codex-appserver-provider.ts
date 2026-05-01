@@ -126,6 +126,45 @@ function emptyUsage() {
   };
 }
 
+function numberField(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function firstNumberField(record: Record<string, unknown>, fields: string[]) {
+  for (const field of fields) {
+    const value = numberField(record[field]);
+    if (value > 0) return value;
+  }
+  return 0;
+}
+
+export function codexUsageFromTokenUsage(tokenUsage: unknown) {
+  if (!isRecord(tokenUsage)) return null;
+  const total = isRecord(tokenUsage.total) ? tokenUsage.total : tokenUsage;
+  const input = firstNumberField(total, ["inputTokens", "input_tokens", "input"]);
+  const output = firstNumberField(total, ["outputTokens", "output_tokens", "output"]);
+  const cacheRead = firstNumberField(total, [
+    "cacheReadInputTokens",
+    "cachedInputTokens",
+    "cache_read_input_tokens",
+    "cacheRead",
+  ]);
+  const cacheWrite = firstNumberField(total, [
+    "cacheCreationInputTokens",
+    "cacheWriteInputTokens",
+    "cache_creation_input_tokens",
+    "cacheWrite",
+  ]);
+  const reportedTotal = firstNumberField(total, ["totalTokens", "total_tokens", "total"]);
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens: reportedTotal || input + output + cacheRead + cacheWrite,
+  };
+}
+
 export function codexOutputForModel(model: Pick<Model<any>, "id" | "api">): AssistantMessage {
   return {
     role: "assistant",
@@ -786,11 +825,13 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
         surfaceNativeToolOutput(run, params.itemId, params.delta || params.output);
         break;
       case "thread/tokenUsage/updated": {
-        const total = params.tokenUsage?.total;
-        if (total) {
-          run.output.usage.input = total.inputTokens || 0;
-          run.output.usage.output = total.outputTokens || 0;
-          run.output.usage.totalTokens = total.totalTokens || 0;
+        const usage = codexUsageFromTokenUsage(params.tokenUsage);
+        if (usage) {
+          run.output.usage.input = usage.input;
+          run.output.usage.output = usage.output;
+          run.output.usage.cacheRead = usage.cacheRead;
+          run.output.usage.cacheWrite = usage.cacheWrite;
+          run.output.usage.totalTokens = usage.totalTokens;
         }
         break;
       }
