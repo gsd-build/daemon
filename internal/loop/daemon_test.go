@@ -942,6 +942,14 @@ func (loopBrowserService) Frame(ctx context.Context, browserID string) (browser.
 	}, nil
 }
 
+func (loopBrowserService) Refs(ctx context.Context, browserID string) (browser.Refs, error) {
+	return browser.Refs{
+		Version:    1,
+		Refs:       nil,
+		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
 func (loopBrowserService) Tool(ctx context.Context, browserID string, method string, params []byte) (browser.ToolResult, error) {
 	return browser.ToolResult{OK: true, ResultJSON: []byte(`{"ok":true}`)}, nil
 }

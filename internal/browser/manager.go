@@ -187,6 +187,7 @@ func (m *Manager) sendFrame(ctx context.Context, browserID string) {
 		DevicePixelRatio: frame.DevicePixelRatio,
 		CapturedAt:       frame.CapturedAt,
 	})
+	m.sendRefs(ctx, browserID)
 	m.mu.Lock()
 	if current := m.byID[browserID]; current == state && frame.Sequence > current.lastFrameSeq {
 		current.lastFrameSeq = frame.Sequence
@@ -203,6 +204,52 @@ func (m *Manager) sendFrame(ctx context.Context, browserID string) {
 			EndedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		})
 	}
+}
+
+func (m *Manager) sendRefs(ctx context.Context, browserID string) {
+	m.mu.Lock()
+	state, ok := m.byID[browserID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	req := state.openRequest
+	m.mu.Unlock()
+
+	refsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	refs, err := m.service.Refs(refsCtx, browserID)
+	if err != nil {
+		return
+	}
+
+	out := make([]protocol.BrowserRef, 0, len(refs.Refs))
+	for _, ref := range refs.Refs {
+		out = append(out, protocol.BrowserRef{
+			Ref:  ref.Ref,
+			Key:  ref.Key,
+			Role: ref.Role,
+			Name: ref.Name,
+			X:    ref.X,
+			Y:    ref.Y,
+			W:    ref.W,
+			H:    ref.H,
+		})
+	}
+
+	capturedAt := refs.CapturedAt
+	if capturedAt == "" {
+		capturedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	_ = m.sender.Send(ctx, &protocol.BrowserRefs{
+		Type:       protocol.MsgTypeBrowserRefs,
+		BrowserID:  browserID,
+		SessionID:  req.SessionID,
+		ChannelID:  req.ChannelID,
+		Version:    refs.Version,
+		Refs:       out,
+		CapturedAt: capturedAt,
+	})
 }
 
 func (m *Manager) GrantForTask(taskID string) (Grant, bool) {
@@ -430,6 +477,40 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 		m.mu.Unlock()
 		return fmt.Errorf("browser control belongs to %s", state.owner)
 	}
+	req := state.openRequest
+	risk := classifyBrowserTool(msg.Method, msg.ParamsJSON)
+	if msg.Method == "vault_save" {
+		m.mu.Unlock()
+		_ = m.sender.Send(ctx, &protocol.BrowserToolResult{
+			Type:      protocol.MsgTypeBrowserToolResult,
+			BrowserID: msg.BrowserID,
+			GrantID:   msg.GrantID,
+			TaskID:    msg.TaskID,
+			ToolUseID: msg.ToolUseID,
+			OK:        false,
+			Error:     "agent-initiated vault_save is not allowed",
+		})
+		return fmt.Errorf("agent-initiated vault_save is not allowed")
+	}
+	if browserRiskRequiresApproval(risk) {
+		state.owner = OwnerApproval
+		state.controlVersion++
+		m.mu.Unlock()
+		requestID := fmt.Sprintf("browser_sensitive_%d", time.Now().UnixNano())
+		_ = m.sender.Send(ctx, &protocol.BrowserSensitiveActionRequest{
+			Type:      protocol.MsgTypeBrowserSensitiveActionRequest,
+			BrowserID: msg.BrowserID,
+			RequestID: requestID,
+			SessionID: req.SessionID,
+			ChannelID: req.ChannelID,
+			TaskID:    msg.TaskID,
+			ToolUseID: msg.ToolUseID,
+			Category:  string(risk),
+			Summary:   browserApprovalSummary(msg.Method, risk),
+			ExpiresAt: time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano),
+		})
+		return fmt.Errorf("browser action requires approval: %s", risk)
+	}
 	m.mu.Unlock()
 	result, err := m.service.Tool(ctx, msg.BrowserID, msg.Method, msg.ParamsJSON)
 	if err != nil {
@@ -445,4 +526,8 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 		ResultJSON: result.ResultJSON,
 		Error:      result.Error,
 	})
+}
+
+func browserApprovalSummary(method string, risk BrowserRisk) string {
+	return fmt.Sprintf("Run browser method %s (%s)", method, risk)
 }

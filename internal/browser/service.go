@@ -18,6 +18,7 @@ type Service interface {
 	Open(context.Context, OpenRequest) (OpenResult, error)
 	Close(context.Context, string) error
 	Frame(context.Context, string) (Frame, error)
+	Refs(context.Context, string) (Refs, error)
 	Tool(context.Context, string, string, []byte) (ToolResult, error)
 	UserInput(context.Context, string, *protocol.BrowserUserInput) error
 }
@@ -115,6 +116,23 @@ func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error
 		URL:              out.URL,
 		Title:            out.Title,
 	}, nil
+}
+
+func (s LocalService) Refs(ctx context.Context, browserID string) (Refs, error) {
+	var out struct {
+		Version      int    `json:"version"`
+		Refs         []Ref  `json:"refs"`
+		CapturedAtMs int64  `json:"capturedAtMs"`
+		CapturedAt   string `json:"capturedAt"`
+	}
+	if err := s.rpc(ctx, browserID, "cloud_refs", map[string]any{}, &out); err != nil {
+		return Refs{}, err
+	}
+	capturedAt := out.CapturedAt
+	if capturedAt == "" && out.CapturedAtMs != 0 {
+		capturedAt = time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano)
+	}
+	return Refs{Version: out.Version, Refs: out.Refs, CapturedAt: capturedAt}, nil
 }
 
 func (s LocalService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
