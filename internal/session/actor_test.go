@@ -58,6 +58,15 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":[{"type"
 	return path
 }
 
+func TestInferToolProfileUsesMinimalForExactReplyPrompts(t *testing.T) {
+	if got := inferToolProfile("  Reply exactly: gsd codex eval"); got != "minimal" {
+		t.Fatalf("inferToolProfile exact reply = %q, want minimal", got)
+	}
+	if got := inferToolProfile("Reply with a summary of this repository"); got != "" {
+		t.Fatalf("inferToolProfile normal prompt = %q, want empty", got)
+	}
+}
+
 func writeWarmFakePi(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()

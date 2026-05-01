@@ -84,6 +84,7 @@ type Options struct {
 	SubagentsPrompt    string
 	AgentToolsSocket   string
 	AgentToolsToken    string
+	ToolProfile        string
 }
 
 // ProviderOrDefault returns the Pi provider name to use for a task.
@@ -230,7 +231,10 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 			planCapabilityEnv(
 				browserEnv(
 					agentToolsEnv(
-						providerEnv(ctx, allowedBase, provider),
+						toolProfileEnv(
+							providerEnv(ctx, allowedBase, provider),
+							opts.ToolProfile,
+						),
 						opts,
 					),
 					opts.BrowserGrantID,
@@ -243,6 +247,20 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 		),
 		opts,
 	)
+}
+
+func toolProfileEnv(base []string, profile string) []string {
+	env := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GSD_TOOL_PROFILE=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	if profile = strings.TrimSpace(profile); profile != "" {
+		env = append(env, "GSD_TOOL_PROFILE="+profile)
+	}
+	return env
 }
 
 func ensureUserIdentityEnv(env []string) []string {
@@ -450,8 +468,30 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"skillCount", len(e.opts.SkillPaths),
 		"promptLen", len(e.opts.Prompt),
 		"customInstructionsLen", len(strings.TrimSpace(e.opts.CustomInstructions)),
+		"subagentsPromptLen", len(strings.TrimSpace(e.opts.SubagentsPrompt)),
+		"runtimePromptLen", len(runtimeIdentityPrompt(e.opts, time.Now())),
+		"toolProfile", strings.TrimSpace(e.opts.ToolProfile),
+		"agentTools", e.opts.AgentToolsSocket != "",
+		"browserGrant", e.opts.BrowserGrantID != "",
 		"planCapability", e.opts.PlanCapability != nil,
 	)
+	logScaffoldDiagnostics("daemon", map[string]any{
+		"taskId":                  e.opts.TaskID,
+		"sessionId":               e.opts.SessionID,
+		"channelId":               e.opts.ChannelID,
+		"provider":                ProviderOrDefault(e.opts.Provider),
+		"model":                   e.opts.Model,
+		"promptChars":             len(e.opts.Prompt),
+		"customInstructionsChars": len(strings.TrimSpace(e.opts.CustomInstructions)),
+		"subagentsPromptChars":    len(strings.TrimSpace(e.opts.SubagentsPrompt)),
+		"runtimePromptChars":      len(runtimeIdentityPrompt(e.opts, time.Now())),
+		"skillCount":              len(e.opts.SkillPaths),
+		"disableSkills":           e.opts.DisableSkills,
+		"toolProfile":             strings.TrimSpace(e.opts.ToolProfile),
+		"agentTools":              e.opts.AgentToolsSocket != "",
+		"browserGrant":            e.opts.BrowserGrantID != "",
+		"planCapability":          e.opts.PlanCapability != nil,
+	})
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
 	cmd.Env = processEnv(ctx, os.Environ(), e.opts)
@@ -807,6 +847,10 @@ func streamPiEvents(
 		if peek.Type == "response" {
 			continue
 		}
+		if peek.Type == "scaffold_diagnostics" {
+			logScaffoldDiagnosticsRaw(raw)
+			continue
+		}
 		if !firstEventSeen {
 			firstEventSeen = true
 			if lifecycleHooks != nil && lifecycleHooks.FirstEventSeen != nil {
@@ -871,6 +915,31 @@ func streamPiEvents(
 		}
 	}
 	return scanner.Err()
+}
+
+func logScaffoldDiagnosticsRaw(raw json.RawMessage) {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		slog.Info("pi scaffold diagnostics", "source", "extension", "parseError", err.Error())
+		return
+	}
+	source, _ := payload["source"].(string)
+	if source == "" {
+		source = "extension"
+	}
+	logScaffoldDiagnostics(source, payload)
+}
+
+func logScaffoldDiagnostics(source string, payload map[string]any) {
+	attrs := make([]any, 0, 2+len(payload)*2)
+	attrs = append(attrs, "source", source)
+	for key, value := range payload {
+		if key == "source" || key == "type" {
+			continue
+		}
+		attrs = append(attrs, key, value)
+	}
+	slog.Info("pi scaffold diagnostics", attrs...)
 }
 
 func agentEndError(agentEndRaw json.RawMessage) error {

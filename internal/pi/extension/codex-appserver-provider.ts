@@ -12,6 +12,7 @@ import {
   type Tool as PiTool,
 } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { isMinimalToolProfile, toolProfile } from "./tool-policy.js";
 
 type RpcPending = {
   resolve: (value: any) => void;
@@ -187,6 +188,7 @@ function assistantMessageHasPayload(message: AssistantMessage) {
 }
 
 export function codexDynamicToolsFromContext(context: Pick<Context, "tools">) {
+  if (isMinimalToolProfile()) return [];
   const tools = (context.tools as PiTool[] | undefined) ?? [];
   return tools.map((tool: any) => ({
     namespace: "gsd",
@@ -196,6 +198,45 @@ export function codexDynamicToolsFromContext(context: Pick<Context, "tools">) {
     deferLoading: false,
     exposeToContext: true,
   }));
+}
+
+function jsonBytes(value: unknown) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? {}), "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+function emitCodexProviderContextDiagnostics(model: Model<any>, context: Context, promptText: string) {
+  const contextTools = (context.tools as PiTool[] | undefined) ?? [];
+  const dynamicTools = codexDynamicToolsFromContext(context);
+  process.stdout.write(JSON.stringify({
+    type: "scaffold_diagnostics",
+    source: "extension",
+    phase: "provider_context",
+    taskId: process.env.GSD_TASK_ID ?? null,
+    sessionId: process.env.GSD_SESSION_ID ?? null,
+    channelId: process.env.GSD_CHANNEL_ID ?? null,
+    provider: "codex-appserver",
+    model: model.id,
+    toolProfile: toolProfile(),
+    systemPromptChars: Buffer.byteLength(String((context as any).systemPrompt ?? ""), "utf8"),
+    deliveredSystemPromptChars: 0,
+    messageCount: ((context.messages as any[]) ?? []).length,
+    messageContentChars: Buffer.byteLength(JSON.stringify((context.messages as any[]) ?? []), "utf8"),
+    contextToolCount: contextTools.length,
+    contextToolSchemaBytes: contextTools.reduce(
+      (total, toolDef: any) => total + jsonBytes(toolDef?.parameters ?? toolDef?.input_schema ?? {}),
+      0,
+    ),
+    mergedToolCount: dynamicTools.length,
+    mergedToolSchemaBytes: dynamicTools.reduce(
+      (total, toolDef: any) => total + jsonBytes(toolDef?.inputSchema ?? {}),
+      0,
+    ),
+    promptTextChars: Buffer.byteLength(promptText, "utf8"),
+  }) + "\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -960,6 +1001,7 @@ export function registerCodexAppServerProvider(pi: ExtensionAPI) {
         const text = threadHasGsdReplay
           ? codexLatestUserTextFromContext(context)
           : codexPromptTextFromContext(context);
+        emitCodexProviderContextDiagnostics(model, context, text);
         return codexRequest("turn/start", {
           threadId,
           input: [{ type: "text", text }],

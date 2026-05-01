@@ -17,6 +17,15 @@ export function hasSubagentToolPolicy(env = process.env) {
   return Object.prototype.hasOwnProperty.call(env, "GSD_SUBAGENT_ALLOWED_TOOLS");
 }
 
+export function toolProfile(env = process.env) {
+  const value = String(env.GSD_TOOL_PROFILE ?? "").trim().toLowerCase();
+  return value || "full";
+}
+
+export function isMinimalToolProfile(env = process.env) {
+  return toolProfile(env) === "minimal";
+}
+
 export function categoryForToolName(name) {
   if (!name) return null;
   if (name === "gsd_browser") return "browser";
