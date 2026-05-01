@@ -21,15 +21,16 @@ type AgentToolController interface {
 
 // ManagerOptions configures a new Manager.
 type ManagerOptions struct {
-	PiBinaryPath     string
-	PiExtensionPath  string
-	Relay            RelaySender
-	Config           *config.Config
-	PIDDir           string        // directory for child PID files; empty disables
-	Uploader         ImageUploader // nil = image upload disabled
-	DaemonSocketPath string
-	AgentDir         string
-	AgentTools       AgentToolController
+	PiBinaryPath       string
+	PiExtensionPath    string
+	Relay              RelaySender
+	Config             *config.Config
+	PIDDir             string        // directory for child PID files; empty disables
+	Uploader           ImageUploader // nil = image upload disabled
+	DaemonSocketPath   string
+	SubagentAuthSecret string
+	AgentDir           string
+	AgentTools         AgentToolController
 }
 
 // Manager holds a pool of session actors, keyed by sessionID.
@@ -37,30 +38,32 @@ type Manager struct {
 	mu     sync.Mutex
 	actors map[string]*Actor
 
-	relay            RelaySender
-	piBinaryPath     string
-	piExtensionPath  string
-	cfg              *config.Config
-	pidDir           string
-	uploader         ImageUploader
-	daemonSocketPath string
-	agentDir         string
-	agentTools       AgentToolController
+	relay              RelaySender
+	piBinaryPath       string
+	piExtensionPath    string
+	cfg                *config.Config
+	pidDir             string
+	uploader           ImageUploader
+	daemonSocketPath   string
+	subagentAuthSecret string
+	agentDir           string
+	agentTools         AgentToolController
 }
 
 // NewManager constructs a Manager.
 func NewManager(opts ManagerOptions) *Manager {
 	return &Manager{
-		actors:           make(map[string]*Actor),
-		relay:            opts.Relay,
-		piBinaryPath:     opts.PiBinaryPath,
-		piExtensionPath:  opts.PiExtensionPath,
-		cfg:              opts.Config,
-		pidDir:           opts.PIDDir,
-		uploader:         opts.Uploader,
-		daemonSocketPath: opts.DaemonSocketPath,
-		agentDir:         opts.AgentDir,
-		agentTools:       opts.AgentTools,
+		actors:             make(map[string]*Actor),
+		relay:              opts.Relay,
+		piBinaryPath:       opts.PiBinaryPath,
+		piExtensionPath:    opts.PiExtensionPath,
+		cfg:                opts.Config,
+		pidDir:             opts.PIDDir,
+		uploader:           opts.Uploader,
+		daemonSocketPath:   opts.DaemonSocketPath,
+		subagentAuthSecret: opts.SubagentAuthSecret,
+		agentDir:           opts.AgentDir,
+		agentTools:         opts.AgentTools,
 	}
 }
 
@@ -156,6 +159,9 @@ func (m *Manager) Spawn(
 	}
 	if opts.DaemonSocketPath == "" {
 		opts.DaemonSocketPath = m.daemonSocketPath
+	}
+	if opts.SubagentAuthSecret == "" {
+		opts.SubagentAuthSecret = m.subagentAuthSecret
 	}
 	if opts.AgentDir == "" {
 		opts.AgentDir = m.agentDir

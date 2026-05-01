@@ -25,6 +25,7 @@ type WorkerKey struct {
 	PlanAPIBaseURL      string
 	PlanTokenHash       string
 	PlanExpiresAt       string
+	SubagentTokenHash   string
 	AgentToolsSocket    string
 	AgentToolsTokenHash string
 }
@@ -62,6 +63,9 @@ func NewWorkerKey(opts Options) WorkerKey {
 		key.PlanAPIBaseURL = opts.PlanCapability.APIBaseURL
 		key.PlanTokenHash = hashString(opts.PlanCapability.Token)
 		key.PlanExpiresAt = opts.PlanCapability.ExpiresAt
+	}
+	if opts.SubagentAuthToken != "" {
+		key.SubagentTokenHash = hashString(opts.SubagentAuthToken)
 	}
 	key.AgentToolsSocket = opts.AgentToolsSocket
 	if opts.AgentToolsToken != "" {

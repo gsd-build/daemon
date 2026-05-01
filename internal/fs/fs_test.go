@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -48,26 +49,15 @@ func TestBrowseDirRejectsPathOutsideScope(t *testing.T) {
 	}
 }
 
-func TestBrowseDirFiltersSensitiveEntriesFromHomeScope(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	_ = os.Mkdir(filepath.Join(home, ".ssh"), 0755)
-	_ = os.Mkdir(filepath.Join(home, "project"), 0755)
+func TestBrowseRejectsMissingScopeRoot(t *testing.T) {
+	root := t.TempDir()
 
-	entries, err := BrowseDir(home, "")
-	if err != nil {
-		t.Fatalf("browse: %v", err)
+	_, err := BrowseDir(root, "")
+	if err == nil {
+		t.Fatal("expected missing scope root error")
 	}
-
-	names := map[string]bool{}
-	for _, e := range entries {
-		names[e.Name] = true
-	}
-	if names[".ssh"] {
-		t.Fatal("expected sensitive .ssh directory to be filtered out")
-	}
-	if !names["project"] {
-		t.Fatal("expected non-sensitive project directory to remain visible")
+	if !strings.Contains(err.Error(), "scope root is required") {
+		t.Fatalf("error = %q, want missing scope root", err.Error())
 	}
 }
 
@@ -170,26 +160,19 @@ func TestReadFile(t *testing.T) {
 	}
 }
 
-func TestReadFileUsesHomeFallbackWithoutScopeRoot(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	path := filepath.Join(home, "project", "hello.txt")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("hello from home"), 0644); err != nil {
+func TestReadFileRejectsMissingScopeRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hello.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	content, truncated, err := ReadFile(path, "", 1024)
-	if err != nil {
-		t.Fatalf("ReadFile with empty scope root: %v", err)
+	_, _, err := ReadFile(path, "", 1024)
+	if err == nil {
+		t.Fatal("expected missing scope root error")
 	}
-	if truncated {
-		t.Fatal("expected untruncated file")
-	}
-	if content != "hello from home" {
-		t.Fatalf("content = %q", content)
+	if !strings.Contains(err.Error(), "scope root is required") {
+		t.Fatalf("error = %q, want missing scope root", err.Error())
 	}
 }
 

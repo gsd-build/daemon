@@ -244,14 +244,15 @@ func mustURLPort(t *testing.T, rawURL string) int {
 	return port
 }
 
-func TestScopeRootForChannelUsesHomeForMissingChannel(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
+func TestScopeRootForChannelRejectsMissingChannel(t *testing.T) {
 	d := &Daemon{}
 
-	if got := d.scopeRootForChannel("browser-channel"); got != home {
-		t.Fatalf("scopeRootForChannel missing channel = %q, want %q", got, home)
+	got, err := d.scopeRootForChannel("browser-channel")
+	if err == nil {
+		t.Fatalf("scopeRootForChannel missing channel = %q, want error", got)
+	}
+	if !strings.Contains(err.Error(), "missing channel root") {
+		t.Fatalf("error = %q, want missing channel root", err.Error())
 	}
 }
 
@@ -260,7 +261,11 @@ func TestScopeRootForChannelUsesStoredRoot(t *testing.T) {
 	d := &Daemon{}
 	d.channelRoots.Store("browser-channel", root)
 
-	if got := d.scopeRootForChannel("browser-channel"); got != root {
+	got, err := d.scopeRootForChannel("browser-channel")
+	if err != nil {
+		t.Fatalf("scopeRootForChannel: %v", err)
+	}
+	if got != root {
 		t.Fatalf("scopeRootForChannel stored channel = %q, want %q", got, root)
 	}
 }

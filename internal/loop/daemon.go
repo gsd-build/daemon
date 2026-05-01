@@ -4,6 +4,7 @@ package loop
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -73,6 +74,7 @@ type Daemon struct {
 	runCtxMu               sync.RWMutex
 	runCtx                 context.Context
 	sockPath               string
+	subagentAuthSecret     string
 	agentDir               string
 	subagentMu             sync.Mutex
 	subagentStreams        map[string]*pi.ChildTranslator
@@ -478,17 +480,22 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	}
 	sockPath := filepath.Join(homeDir, ".gsd-cloud", "daemon.sock")
 	agentDir := filepath.Join(homeDir, ".gsd-cloud", "agents")
+	subagentAuthSecret, err := generateSubagentAuthSecret()
+	if err != nil {
+		return nil, fmt.Errorf("generate subagent auth secret: %w", err)
+	}
 
 	manager := session.NewManager(session.ManagerOptions{
-		PiBinaryPath:     piBinaryPath,
-		PiExtensionPath:  piExtensionPath,
-		Relay:            client,
-		Config:           cfg,
-		PIDDir:           pidDir,
-		Uploader:         uploader,
-		DaemonSocketPath: sockPath,
-		AgentDir:         agentDir,
-		AgentTools:       agentControl,
+		PiBinaryPath:       piBinaryPath,
+		PiExtensionPath:    piExtensionPath,
+		Relay:              client,
+		Config:             cfg,
+		PIDDir:             pidDir,
+		Uploader:           uploader,
+		DaemonSocketPath:   sockPath,
+		SubagentAuthSecret: subagentAuthSecret,
+		AgentDir:           agentDir,
+		AgentTools:         agentControl,
 	})
 	previewRegistry := preview.NewRegistry()
 	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
@@ -514,6 +521,7 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		previewWS:              preview.NewWebSocketBridge(previewRegistry, client),
 		previewWork:            make(chan struct{}, preview.DefaultMaxActiveStreams),
 		sockPath:               sockPath,
+		subagentAuthSecret:     subagentAuthSecret,
 		agentDir:               agentDir,
 		subagentStreams:        make(map[string]*pi.ChildTranslator),
 		subagentSeq:            make(map[string]int64),
@@ -679,7 +687,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.checkAndRefreshToken()
 
 	// Start Unix socket status API.
-	sockSrv := sockapi.NewServer(d.sockPath, d)
+	sockSrv := sockapi.NewServer(d.sockPath, d, d.subagentAuthSecret)
 	go func() {
 		if err := sockSrv.ListenAndServe(ctx); err != nil {
 			slog.Warn("socket API failed", "error", err)
@@ -700,6 +708,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
 	return err
+}
+
+func generateSubagentAuthSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // getActiveTasks returns the list of currently executing task IDs.
@@ -1129,10 +1145,15 @@ func (d *Daemon) handleContextStatsRequest(msg *protocol.ContextStatsRequest) er
 }
 
 func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
-	page, err := fs.BrowseDirPageAt(msg.Path, d.scopeRootForChannel(msg.ChannelID), fs.BrowseDirOptions{
-		Limit:  msg.Limit,
-		Cursor: msg.Cursor,
-	})
+	scopeRoot, rootErr := d.scopeRootForChannel(msg.ChannelID)
+	page := fs.BrowseDirPage{}
+	err := rootErr
+	if err == nil {
+		page, err = fs.BrowseDirPageAt(msg.Path, scopeRoot, fs.BrowseDirOptions{
+			Limit:  msg.Limit,
+			Cursor: msg.Cursor,
+		})
+	}
 	result := &protocol.BrowseDirResult{
 		Type:       protocol.MsgTypeBrowseDirResult,
 		RequestID:  msg.RequestID,
@@ -1151,7 +1172,10 @@ func (d *Daemon) handleBrowse(msg *protocol.BrowseDir) error {
 }
 
 func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
-	err := fs.MkDir(msg.Path, d.scopeRootForChannel(msg.ChannelID))
+	scopeRoot, err := d.scopeRootForChannel(msg.ChannelID)
+	if err == nil {
+		err = fs.MkDir(msg.Path, scopeRoot)
+	}
 	result := &protocol.MkDirResult{
 		Type:      protocol.MsgTypeMkDirResult,
 		RequestID: msg.RequestID,
@@ -1167,12 +1191,17 @@ func (d *Daemon) handleMkDir(msg *protocol.MkDir) error {
 }
 
 func (d *Daemon) handleRead(msg *protocol.ReadFile) error {
-	content, truncated, err := fs.ReadFileWithAllowedPaths(
-		msg.Path,
-		d.scopeRootForChannel(msg.ChannelID),
-		msg.MaxBytes,
-		d.agentTouchedFiles.list(msg.ChannelID),
-	)
+	scopeRoot, err := d.scopeRootForChannel(msg.ChannelID)
+	content := ""
+	truncated := false
+	if err == nil {
+		content, truncated, err = fs.ReadFileWithAllowedPaths(
+			msg.Path,
+			scopeRoot,
+			msg.MaxBytes,
+			d.agentTouchedFiles.list(msg.ChannelID),
+		)
+	}
 	result := &protocol.ReadFileResult{
 		Type:      protocol.MsgTypeReadFileResult,
 		RequestID: msg.RequestID,
@@ -1201,7 +1230,20 @@ func (d *Daemon) recordAgentTouchedFile(channelID string, cwd string, path strin
 func (d *Daemon) handleListSkills(msg *protocol.ListSkills) error {
 	cwd := msg.CWD
 	if cwd == "" {
-		cwd = d.scopeRootForChannel(msg.ChannelID)
+		var err error
+		cwd, err = d.scopeRootForChannel(msg.ChannelID)
+		if err != nil {
+			result := &protocol.ListSkillsResult{
+				Type:      protocol.MsgTypeListSkillsResult,
+				RequestID: msg.RequestID,
+				ChannelID: msg.ChannelID,
+				OK:        false,
+				Error:     err.Error(),
+			}
+			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return d.client.Send(sendCtx, result)
+		}
 	}
 	discovered, err := skills.DiscoverClaudeSkills(cwd)
 	result := &protocol.ListSkillsResult{
@@ -1219,31 +1261,19 @@ func (d *Daemon) handleListSkills(msg *protocol.ListSkills) error {
 	return d.client.Send(sendCtx, result)
 }
 
-func (d *Daemon) scopeRootForChannel(channelID string) string {
+func (d *Daemon) scopeRootForChannel(channelID string) (string, error) {
 	if channelID == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		return home
+		return "", fmt.Errorf("missing channel root: channel id is required")
 	}
 	root, ok := d.channelRoots.Load(channelID)
 	if !ok {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		return home
+		return "", fmt.Errorf("missing channel root for channel %q", channelID)
 	}
 	rootStr, _ := root.(string)
 	if rootStr == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		return home
+		return "", fmt.Errorf("missing channel root for channel %q", channelID)
 	}
-	return rootStr
+	return rootStr, nil
 }
 
 func (d *Daemon) handlePermissionResponse(msg *protocol.PermissionResponse) error {

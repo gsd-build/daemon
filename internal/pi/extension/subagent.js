@@ -85,6 +85,38 @@ function buildAgentSystemPrompt(agent) {
   return `${agent.systemPrompt}\n\nConfigured tool scope: ${tools}.`;
 }
 
+function providerCredentialKey(provider) {
+  if (provider === "openrouter" || provider === "zai" || provider === "kimi-coding") {
+    return "OPENROUTER_API_KEY";
+  }
+  if (provider === "claude-cli") return "ANTHROPIC_API_KEY";
+  return "";
+}
+
+function allowlistedChildEnv(provider, childSessionId, agent) {
+  const env = {};
+  for (const key of ["PATH", "HOME", "SHELL", "TERM", "LANG", "LANGUAGE"]) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("LC_") && value) env[key] = value;
+  }
+  const credentialKey = providerCredentialKey(provider);
+  if (credentialKey && process.env[credentialKey]) {
+    env[credentialKey] = process.env[credentialKey];
+  }
+  env.GSD_PARENT_SESSION_ID = childSessionId;
+  env.GSD_AGENT_DIR = process.env.GSD_AGENT_DIR || "";
+  env.GSD_DAEMON_SOCKET = process.env.GSD_DAEMON_SOCKET || "";
+  if (process.env.GSD_SUBAGENT_AUTH_TOKEN) {
+    env.GSD_SUBAGENT_AUTH_TOKEN = process.env.GSD_SUBAGENT_AUTH_TOKEN;
+  }
+  env.GSD_SUBAGENT_ALLOWED_TOOLS = Array.isArray(agent.tools)
+    ? agent.tools.join(",")
+    : "";
+  return env;
+}
+
 function childPromptFrame(task) {
   return `${JSON.stringify({
     id: "subagent-task-prompt",
@@ -150,15 +182,7 @@ export async function runChildAgent({
   ];
   const child = spawn(binary, args, {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      GSD_PARENT_SESSION_ID: childSessionId,
-      GSD_AGENT_DIR: process.env.GSD_AGENT_DIR || "",
-      GSD_DAEMON_SOCKET: process.env.GSD_DAEMON_SOCKET || "",
-      GSD_SUBAGENT_ALLOWED_TOOLS: Array.isArray(agent.tools)
-        ? agent.tools.join(",")
-        : "",
-    },
+    env: allowlistedChildEnv(provider, childSessionId, agent),
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
@@ -470,7 +494,8 @@ export function registerSubagentTool(pi, env = process.env, deps = {}) {
   if (
     !env.GSD_DAEMON_SOCKET ||
     !env.GSD_PARENT_SESSION_ID ||
-    !env.GSD_AGENT_DIR
+    !env.GSD_AGENT_DIR ||
+    !env.GSD_SUBAGENT_AUTH_TOKEN
   ) {
     return false;
   }

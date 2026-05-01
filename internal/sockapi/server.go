@@ -12,16 +12,22 @@ import (
 
 // Server serves the status API over a Unix domain socket.
 type Server struct {
-	sockPath string
-	httpSrv  *http.Server
+	sockPath   string
+	authSecret string
+	httpSrv    *http.Server
 }
 
 // NewServer creates a Server that will listen on sockPath.
-func NewServer(sockPath string, provider StatusProvider) *Server {
+func NewServer(sockPath string, provider StatusProvider, authSecret ...string) *Server {
+	secret := ""
+	if len(authSecret) > 0 {
+		secret = authSecret[0]
+	}
 	return &Server{
-		sockPath: sockPath,
+		sockPath:   sockPath,
+		authSecret: secret,
 		httpSrv: &http.Server{
-			Handler: newHandler(provider),
+			Handler: newHandler(provider, secret),
 		},
 	}
 }

@@ -335,6 +335,64 @@ func TestExecutorPassesAgentToolsEnv(t *testing.T) {
 	}
 }
 
+func TestProcessEnvExcludesUnrelatedSecrets(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/lex",
+		"SHELL=/bin/zsh",
+		"TERM=xterm-256color",
+		"LANG=en_US.UTF-8",
+		"LC_ALL=en_US.UTF-8",
+		"OPENROUTER_API_KEY=sk-or-selected",
+		"OPENAI_API_KEY=sk-openai",
+		"ANTHROPIC_API_KEY=sk-anthropic",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"SECRET_TOKEN=arbitrary-secret",
+		"GSD_STALE_VALUE=stale",
+	}
+
+	env := processEnv(context.Background(), base, Options{
+		Provider:         "openrouter",
+		SessionID:        "sess-1",
+		ChannelID:        "chan-1",
+		TaskID:           "task-1",
+		DaemonSocketPath: "/tmp/daemon.sock",
+		ParentSessionID:  "sess-1",
+		AgentDir:         "/tmp/agents",
+	})
+	got := strings.Join(env, "\n")
+	for _, want := range []string{
+		"PATH=/usr/bin",
+		"HOME=/home/lex",
+		"SHELL=/bin/zsh",
+		"TERM=xterm-256color",
+		"LANG=en_US.UTF-8",
+		"LC_ALL=en_US.UTF-8",
+		"OPENROUTER_API_KEY=sk-or-selected",
+		"GSD_SESSION_ID=sess-1",
+		"GSD_CHANNEL_ID=chan-1",
+		"GSD_TASK_ID=task-1",
+		"GSD_DAEMON_SOCKET=/tmp/daemon.sock",
+		"GSD_PARENT_SESSION_ID=sess-1",
+		"GSD_AGENT_DIR=/tmp/agents",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("env missing %q: %s", want, got)
+		}
+	}
+	for _, denied := range []string{
+		"OPENAI_API_KEY=",
+		"ANTHROPIC_API_KEY=",
+		"AWS_SECRET_ACCESS_KEY=",
+		"SECRET_TOKEN=",
+		"GSD_STALE_VALUE=",
+	} {
+		if strings.Contains(got, denied) {
+			t.Fatalf("env leaked %q: %s", denied, got)
+		}
+	}
+}
+
 func TestExecutorControlsWarmClaudeSDKEnv(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin",
@@ -406,7 +464,7 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
-func TestExecutorMakesServiceManagerOpenRouterEnvAvailableToSubagents(t *testing.T) {
+func TestExecutorKeepsOpenRouterEnvForSelectedProvider(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "pi.env")
 	fakePi := writeFakePi(t, `
 {
@@ -435,7 +493,7 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 		BinaryPath:    fakePi,
 		CWD:           t.TempDir(),
 		ExtensionPath: extensionPath,
-		Provider:      "claude-cli",
+		Provider:      "openrouter",
 		Prompt:        "hello",
 	})
 
@@ -448,7 +506,7 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 		t.Fatalf("read env file: %v", err)
 	}
 	if got := string(data); !strings.Contains(got, "OPENROUTER_API_KEY=sk-or-service-manager\n") {
-		t.Fatalf("env missing service manager key for child subagents: %s", got)
+		t.Fatalf("env missing selected provider key: %s", got)
 	}
 }
 

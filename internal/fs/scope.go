@@ -1,16 +1,19 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
+var ErrMissingScopeRoot = errors.New("scope root is required")
+
 func resolveScopeRoot(scopeRoot string, allowHomeFallback bool) (string, error) {
 	if scopeRoot == "" {
 		if !allowHomeFallback {
-			return "", fmt.Errorf("project root is unavailable for this request")
+			return "", ErrMissingScopeRoot
 		}
 		home, err := os.UserHomeDir()
 		if err != nil {

@@ -15,7 +15,7 @@ func ReadFile(path, scopeRoot string, maxBytes int) (string, bool, error) {
 }
 
 func ReadFileWithAllowedPaths(path, scopeRoot string, maxBytes int, exactAllowedPaths []string) (string, bool, error) {
-	resolvedRoot, err := resolveScopeRoot(scopeRoot, true)
+	resolvedRoot, err := resolveScopeRoot(scopeRoot, false)
 	if err != nil {
 		return "", false, err
 	}

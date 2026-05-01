@@ -2,6 +2,7 @@ import http from "node:http";
 
 export function createDaemonRpc(socketPath = process.env.GSD_DAEMON_SOCKET) {
   if (!socketPath) return null;
+  const authToken = process.env.GSD_SUBAGENT_AUTH_TOKEN || "";
 
   async function call(path, body, signal) {
     const data = JSON.stringify(body ?? {});
@@ -24,6 +25,7 @@ export function createDaemonRpc(socketPath = process.env.GSD_DAEMON_SOCKET) {
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(data),
+          ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
         },
         signal,
       }, (res) => {
