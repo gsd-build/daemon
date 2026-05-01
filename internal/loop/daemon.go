@@ -804,12 +804,25 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.browserManager.Close(d.runtimeContext(), msg)
 	case *protocol.BrowserControlClaim:
 		return d.browserManager.Claim(d.runtimeContext(), msg)
+	case *protocol.BrowserControlClaimRequest:
+		return d.browserManager.Claim(d.runtimeContext(), &protocol.BrowserControlClaim{
+			Type:      protocol.MsgTypeBrowserControlClaim,
+			BrowserID: msg.BrowserID,
+			SessionID: msg.SessionID,
+			ChannelID: msg.ChannelID,
+			Owner:     msg.Owner,
+			Reason:    msg.ClaimID,
+		})
 	case *protocol.BrowserControlRelease:
 		return d.browserManager.Release(d.runtimeContext(), msg)
+	case *protocol.BrowserClaimAndInput:
+		return d.browserManager.ClaimAndInput(d.runtimeContext(), msg)
 	case *protocol.BrowserUserInput:
 		return d.browserManager.UserInput(d.runtimeContext(), msg)
 	case *protocol.BrowserToolCall:
 		return d.browserManager.Tool(d.runtimeContext(), msg)
+	case *protocol.BrowserSensitiveActionResponse:
+		return d.browserManager.SensitiveActionResponse(d.runtimeContext(), msg)
 	case *protocol.PreviewOpen:
 		return d.handlePreviewOpen(msg)
 	case *protocol.PreviewClose:

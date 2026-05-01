@@ -15,6 +15,7 @@ import (
 type fakeService struct {
 	mu        sync.Mutex
 	calls     []string
+	inputs    []protocol.BrowserUserInput
 	refs      []Ref
 	toolCalls int
 }
@@ -99,6 +100,7 @@ func (f *fakeService) UserInput(ctx context.Context, browserID string, input *pr
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "input:"+input.Kind)
+	f.inputs = append(f.inputs, *input)
 	return nil
 }
 
@@ -124,6 +126,30 @@ func (r *recordingSender) snapshot() []any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]any(nil), r.msgs...)
+}
+
+func (r *recordingSender) hasAcceptedInput(inputID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, msg := range r.msgs {
+		ack, ok := msg.(*protocol.BrowserUserInputAck)
+		if ok && ack.InputID == inputID && ack.Accepted {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *recordingSender) hasRejectedInput(inputID string, reasonCode string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, msg := range r.msgs {
+		ack, ok := msg.(*protocol.BrowserUserInputAck)
+		if ok && ack.InputID == inputID && !ack.Accepted && ack.ReasonCode == reasonCode {
+			return true
+		}
+	}
+	return false
 }
 
 type failingSender struct{}
@@ -457,6 +483,87 @@ func TestManagerPausesToolCallsWhileLexControlsBrowser(t *testing.T) {
 	}
 }
 
+func TestClaimAndInputAppliesFirstClickAfterAcceptedClaim(t *testing.T) {
+	service := &fakeService{}
+	sender := &recordingSender{}
+	manager := NewManager(ManagerOptions{Service: service, Sender: sender, FrameInterval: time.Hour})
+	openBrowserForTest(t, manager, "browser_1")
+	manager.setLastFrameForTest("browser_1", 1, time.Now())
+
+	err := manager.ClaimAndInput(context.Background(), &protocol.BrowserClaimAndInput{
+		Type:      protocol.MsgTypeBrowserClaimAndInput,
+		ClaimID:   "claim_1",
+		BrowserID: "browser_1",
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Input: protocol.BrowserUserInput{
+			InputID:         "input_1",
+			BrowserID:       "browser_1",
+			SessionID:       "session_1",
+			ChannelID:       "channel_1",
+			Owner:           protocol.BrowserOwnerLex,
+			Kind:            protocol.BrowserInputKindPointer,
+			Phase:           "click",
+			CoordinateSpace: protocol.BrowserInputCoordinateViewportCSS,
+			FrameSeq:        1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	inputs := len(service.inputs)
+	service.mu.Unlock()
+	if inputs != 1 {
+		t.Fatalf("inputs = %d, want 1", inputs)
+	}
+	if !sender.hasAcceptedInput("input_1") {
+		t.Fatalf("accepted input ack missing")
+	}
+}
+
+func TestUserInputRejectsStaleFrameByAge(t *testing.T) {
+	manager, sender := managerWithOpenBrowser(t)
+	manager.setLastFrameForTest("browser_1", 22, time.Now().Add(-time.Second))
+	err := manager.UserInput(context.Background(), &protocol.BrowserUserInput{
+		Type:            protocol.MsgTypeBrowserUserInput,
+		InputID:         "input_1",
+		BrowserID:       "browser_1",
+		SessionID:       "session_1",
+		ChannelID:       "channel_1",
+		Owner:           protocol.BrowserOwnerLex,
+		Kind:            protocol.BrowserInputKindPointer,
+		Phase:           "click",
+		FrameSeq:        22,
+		ControlVersion:  1,
+		CoordinateSpace: protocol.BrowserInputCoordinateViewportCSS,
+	})
+	if err == nil {
+		t.Fatal("expected stale frame rejection")
+	}
+	if !sender.hasRejectedInput("input_1", protocol.BrowserInputRejectStaleFrame) {
+		t.Fatalf("stale frame ack missing")
+	}
+}
+
+func TestModelVisibleCaptureBlockedWhileLexControlsBrowser(t *testing.T) {
+	manager, _ := managerWithOpenBrowser(t)
+	claimLexForTest(t, manager, "browser_1")
+	for _, method := range []string{"screenshot", "snapshot", "page_source", "dom_extract", "console_read", "network_read", "artifact_create"} {
+		_, err := manager.ToolResult(context.Background(), &protocol.BrowserToolCall{
+			Type:      protocol.MsgTypeBrowserToolCall,
+			BrowserID: "browser_1",
+			GrantID:   "grant_1",
+			TaskID:    "task_1",
+			ToolUseID: "tool_1_" + method,
+			Method:    method,
+		})
+		if err == nil || !strings.Contains(err.Error(), "model-visible capture blocked") {
+			t.Fatalf("method %s err = %v", method, err)
+		}
+	}
+}
+
 func TestManagerTearsDownExpiredSessionOnFrame(t *testing.T) {
 	svc := &fakeService{}
 	sent := &recordingSender{}
@@ -676,7 +783,7 @@ func TestUserInputRejectsStaleControlVersion(t *testing.T) {
 		ack, ok := msg.(*protocol.BrowserUserInputAck)
 		if ok && ack.InputID == "input-1" {
 			foundAck = true
-			if ack.Accepted || ack.Reason != protocol.BrowserInputRejectStaleFrame {
+			if ack.Accepted || ack.ReasonCode != protocol.BrowserInputRejectStaleControlVersion {
 				t.Fatalf("ack = %+v", ack)
 			}
 		}
@@ -693,4 +800,27 @@ func hasCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func managerWithOpenBrowser(t *testing.T) (*Manager, *recordingSender) {
+	t.Helper()
+	svc := &fakeService{}
+	sent := &recordingSender{}
+	manager := NewManager(ManagerOptions{Service: svc, Sender: sent, FrameInterval: time.Hour})
+	openBrowserForTest(t, manager, "browser_1")
+	claimLexForTest(t, manager, "browser_1")
+	return manager, sent
+}
+
+func claimLexForTest(t *testing.T, manager *Manager, browserID string) {
+	t.Helper()
+	if err := manager.Claim(context.Background(), &protocol.BrowserControlClaim{
+		Type:      protocol.MsgTypeBrowserControlClaim,
+		BrowserID: browserID,
+		SessionID: "session_1",
+		ChannelID: "channel_1",
+		Owner:     protocol.BrowserOwnerLex,
+	}); err != nil {
+		t.Fatalf("claim lex: %v", err)
+	}
 }

@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -21,23 +22,25 @@ type ManagerOptions struct {
 }
 
 type sessionState struct {
-	openRequest    OpenRequest
-	browserID      string
-	owner          ControlOwner
-	controlVersion int64
-	expiresAt      time.Time
-	frameCancel    context.CancelFunc
-	lastFrameSeq   int64
+	openRequest         OpenRequest
+	browserID           string
+	owner               ControlOwner
+	controlVersion      int64
+	expiresAt           time.Time
+	frameCancel         context.CancelFunc
+	lastFrameSeq        int64
+	lastFrameCapturedAt time.Time
 }
 
 type Manager struct {
-	service       Service
-	sender        Sender
-	frameInterval time.Duration
-	mu            sync.Mutex
-	byID          map[string]*sessionState
-	byTask        map[string]*sessionState
-	bySession     map[string]*sessionState
+	service          Service
+	sender           Sender
+	frameInterval    time.Duration
+	mu               sync.Mutex
+	byID             map[string]*sessionState
+	byTask           map[string]*sessionState
+	bySession        map[string]*sessionState
+	pendingApprovals map[string]*pendingApproval
 }
 
 func NewManager(opts ManagerOptions) *Manager {
@@ -46,13 +49,34 @@ func NewManager(opts ManagerOptions) *Manager {
 		frameInterval = 2 * time.Second
 	}
 	return &Manager{
-		service:       opts.Service,
-		sender:        opts.Sender,
-		frameInterval: frameInterval,
-		byID:          map[string]*sessionState{},
-		byTask:        map[string]*sessionState{},
-		bySession:     map[string]*sessionState{},
+		service:          opts.Service,
+		sender:           opts.Sender,
+		frameInterval:    frameInterval,
+		byID:             map[string]*sessionState{},
+		byTask:           map[string]*sessionState{},
+		bySession:        map[string]*sessionState{},
+		pendingApprovals: map[string]*pendingApproval{},
 	}
+}
+
+type pendingApproval struct {
+	ApprovalID             string
+	Nonce                  string
+	ExpiresAt              time.Time
+	ActorUserID            string
+	GrantID                string
+	BrowserID              string
+	ToolUseID              string
+	Method                 string
+	Category               string
+	Origin                 string
+	ParameterHash          string
+	ExpectedExternalEffect string
+	Sensitivity            string
+	Consumed               bool
+	PriorOwner             ControlOwner
+	Request                OpenRequest
+	ToolCall               protocol.BrowserToolCall
 }
 
 type Grant struct {
@@ -108,18 +132,22 @@ func (m *Manager) Open(ctx context.Context, msg *protocol.BrowserSessionOpen) er
 		return fmt.Errorf("invalid browser grant expiry")
 	}
 	req := OpenRequest{
-		GrantID:    msg.GrantID,
-		SessionID:  msg.SessionID,
-		ProjectID:  msg.ProjectID,
-		TaskID:     msg.TaskID,
-		ChannelID:  msg.ChannelID,
-		MachineID:  msg.MachineID,
-		IdentityID: msg.IdentityID,
-		Mode:       msg.Mode,
-		InitialURL: msg.InitialURL,
-		BridgeMode: msg.BridgeMode,
-		PreviewID:  msg.PreviewID,
-		ExpiresAt:  msg.ExpiresAt,
+		GrantID:           msg.GrantID,
+		SessionID:         msg.SessionID,
+		ProjectID:         msg.ProjectID,
+		TaskID:            msg.TaskID,
+		ChannelID:         msg.ChannelID,
+		MachineID:         msg.MachineID,
+		IdentityID:        msg.IdentityID,
+		IdentityScope:     msg.IdentityScope,
+		IdentityKey:       msg.IdentityKey,
+		IdentityProjectID: msg.IdentityProjectID,
+		IdentitySessionID: msg.IdentitySessionID,
+		Mode:              msg.Mode,
+		InitialURL:        msg.InitialURL,
+		BridgeMode:        msg.BridgeMode,
+		PreviewID:         msg.PreviewID,
+		ExpiresAt:         msg.ExpiresAt,
 	}
 	result, err := m.service.Open(ctx, req)
 	if err != nil {
@@ -214,24 +242,36 @@ func (m *Manager) sendFrame(ctx context.Context, browserID string) {
 		return
 	}
 	_ = m.sender.Send(ctx, &protocol.BrowserFrame{
-		Type:             protocol.MsgTypeBrowserFrame,
-		BrowserID:        browserID,
-		SessionID:        req.SessionID,
-		ChannelID:        req.ChannelID,
-		Seq:              frame.Sequence,
-		ContentType:      frame.ContentType,
-		DataBase64:       frame.DataBase64,
-		Width:            frame.Width,
-		Height:           frame.Height,
-		ViewportWidth:    frame.ViewportWidth,
-		ViewportHeight:   frame.ViewportHeight,
-		DevicePixelRatio: frame.DevicePixelRatio,
-		CapturedAt:       frame.CapturedAt,
+		Type:                   protocol.MsgTypeBrowserFrame,
+		BrowserID:              browserID,
+		SessionID:              req.SessionID,
+		ChannelID:              req.ChannelID,
+		Seq:                    frame.Sequence,
+		ContentType:            frame.ContentType,
+		DataBase64:             frame.DataBase64,
+		Width:                  frame.Width,
+		Height:                 frame.Height,
+		ViewportWidth:          frame.ViewportWidth,
+		ViewportHeight:         frame.ViewportHeight,
+		ViewportCSSWidth:       frame.ViewportCSSWidth,
+		ViewportCSSHeight:      frame.ViewportCSSHeight,
+		CapturePixelWidth:      frame.CapturePixelWidth,
+		CapturePixelHeight:     frame.CapturePixelHeight,
+		DevicePixelRatio:       frame.DevicePixelRatio,
+		CaptureScaleX:          frame.CaptureScaleX,
+		CaptureScaleY:          frame.CaptureScaleY,
+		EncodedBytes:           frame.EncodedBytes,
+		Quality:                frame.Quality,
+		CapturePixelRatio:      frame.CapturePixelRatio,
+		LatencyMS:              frame.LatencyMS,
+		LatestAcceptedFrameSeq: frame.LatestAcceptedFrameSeq,
+		CapturedAt:             frame.CapturedAt,
 	})
 	m.sendRefs(ctx, browserID)
 	m.mu.Lock()
 	if current := m.byID[browserID]; current == state && frame.Sequence > current.lastFrameSeq {
 		current.lastFrameSeq = frame.Sequence
+		current.lastFrameCapturedAt = time.Now()
 	}
 	m.mu.Unlock()
 	if frame.URL != "" {
@@ -341,17 +381,22 @@ func (m *Manager) Claim(ctx context.Context, msg *protocol.BrowserControlClaim) 
 	}
 	state.owner = owner
 	state.controlVersion++
+	req := state.openRequest
+	version := state.controlVersion
 	out := &protocol.BrowserControlClaim{
 		Type:           protocol.MsgTypeBrowserControlClaim,
 		BrowserID:      msg.BrowserID,
-		SessionID:      state.openRequest.SessionID,
-		ChannelID:      state.openRequest.ChannelID,
+		SessionID:      req.SessionID,
+		ChannelID:      req.ChannelID,
 		Owner:          string(owner),
 		Reason:         msg.Reason,
-		ControlVersion: state.controlVersion,
+		ControlVersion: version,
 	}
 	m.mu.Unlock()
-	return m.sender.Send(ctx, out)
+	if err := m.sender.Send(ctx, out); err != nil {
+		return err
+	}
+	return m.sendControlState(ctx, msg.BrowserID, req, owner, version, true, msg.Reason)
 }
 
 func (m *Manager) Release(ctx context.Context, msg *protocol.BrowserControlRelease) error {
@@ -373,17 +418,61 @@ func (m *Manager) Release(ctx context.Context, msg *protocol.BrowserControlRelea
 		state.owner = OwnerAgent
 		state.controlVersion++
 	}
+	req := state.openRequest
+	currentOwner := state.owner
+	version := state.controlVersion
 	out := &protocol.BrowserControlRelease{
 		Type:           protocol.MsgTypeBrowserControlRelease,
 		BrowserID:      msg.BrowserID,
-		SessionID:      state.openRequest.SessionID,
-		ChannelID:      state.openRequest.ChannelID,
-		Owner:          string(state.owner),
+		SessionID:      req.SessionID,
+		ChannelID:      req.ChannelID,
+		Owner:          string(currentOwner),
 		Reason:         msg.Reason,
-		ControlVersion: state.controlVersion,
+		ControlVersion: version,
 	}
 	m.mu.Unlock()
-	return m.sender.Send(ctx, out)
+	if err := m.sender.Send(ctx, out); err != nil {
+		return err
+	}
+	return m.sendControlState(ctx, msg.BrowserID, req, currentOwner, version, true, msg.Reason)
+}
+
+func (m *Manager) sendControlState(ctx context.Context, browserID string, req OpenRequest, owner ControlOwner, version int64, accepted bool, reason string) error {
+	return m.sender.Send(ctx, &protocol.BrowserControlState{
+		Type:           protocol.MsgTypeBrowserControlState,
+		BrowserID:      browserID,
+		SessionID:      req.SessionID,
+		ChannelID:      req.ChannelID,
+		Owner:          string(owner),
+		ControlVersion: version,
+		Accepted:       accepted,
+		Reason:         reason,
+		At:             time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (m *Manager) ClaimAndInput(ctx context.Context, msg *protocol.BrowserClaimAndInput) error {
+	if err := m.Claim(ctx, &protocol.BrowserControlClaim{
+		Type:      protocol.MsgTypeBrowserControlClaim,
+		BrowserID: msg.BrowserID,
+		SessionID: msg.SessionID,
+		ChannelID: msg.ChannelID,
+		Owner:     protocol.BrowserOwnerLex,
+		Reason:    msg.ClaimID,
+	}); err != nil {
+		return err
+	}
+	input := msg.Input
+	input.BrowserID = msg.BrowserID
+	input.SessionID = msg.SessionID
+	input.ChannelID = msg.ChannelID
+	input.Owner = protocol.BrowserOwnerLex
+	m.mu.Lock()
+	if state, ok := m.byID[msg.BrowserID]; ok {
+		input.ControlVersion = state.controlVersion
+	}
+	m.mu.Unlock()
+	return m.UserInput(ctx, &input)
 }
 
 func (m *Manager) UserInput(ctx context.Context, msg *protocol.BrowserUserInput) error {
@@ -412,10 +501,24 @@ func (m *Manager) UserInput(ctx context.Context, msg *protocol.BrowserUserInput)
 		req := state.openRequest
 		version := state.controlVersion
 		m.mu.Unlock()
-		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectStaleFrame, version)
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectStaleControlVersion, version)
 		return fmt.Errorf("stale browser control version")
 	}
+	if requiresViewportCSS(msg) && msg.CoordinateSpace != protocol.BrowserInputCoordinateViewportCSS {
+		req := state.openRequest
+		version := state.controlVersion
+		m.mu.Unlock()
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectInvalidPayload, version)
+		return fmt.Errorf("browser input requires viewport_css coordinate space")
+	}
 	if msg.FrameSeq != 0 && state.lastFrameSeq != 0 && msg.FrameSeq < state.lastFrameSeq-2 {
+		req := state.openRequest
+		version := state.controlVersion
+		m.mu.Unlock()
+		_ = m.sendInputAck(ctx, req, msg, false, protocol.BrowserInputRejectStaleFrame, version)
+		return fmt.Errorf("stale browser frame")
+	}
+	if staleByAge(state, msg) {
 		req := state.openRequest
 		version := state.controlVersion
 		m.mu.Unlock()
@@ -448,16 +551,72 @@ func parseControlOwner(owner string) (ControlOwner, bool) {
 
 func (m *Manager) sendInputAck(ctx context.Context, req OpenRequest, msg *protocol.BrowserUserInput, accepted bool, reason string, version int64) error {
 	return m.sender.Send(ctx, &protocol.BrowserUserInputAck{
-		Type:           protocol.MsgTypeBrowserUserInputAck,
-		BrowserID:      msg.BrowserID,
-		SessionID:      req.SessionID,
-		ChannelID:      req.ChannelID,
-		InputID:        msg.InputID,
-		Accepted:       accepted,
-		Reason:         reason,
-		ControlVersion: version,
-		AckedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+		Type:             protocol.MsgTypeBrowserUserInputAck,
+		BrowserID:        msg.BrowserID,
+		SessionID:        req.SessionID,
+		ChannelID:        req.ChannelID,
+		InputID:          msg.InputID,
+		Kind:             msg.Kind,
+		Phase:            msg.Phase,
+		Accepted:         accepted,
+		FrameSeq:         msg.FrameSeq,
+		AcceptedFrameSeq: msg.FrameSeq,
+		ReasonCode:       reason,
+		SafeRetry:        reason == protocol.BrowserInputRejectStaleFrame,
+		Message:          browserInputAckMessage(accepted, reason),
+		Reason:           reason,
+		ControlVersion:   version,
+		AckedAt:          time.Now().UTC().Format(time.RFC3339Nano),
 	})
+}
+
+func browserInputAckMessage(accepted bool, reason string) string {
+	if accepted {
+		return "input accepted"
+	}
+	switch reason {
+	case protocol.BrowserInputRejectStaleControlVersion:
+		return "Control version stale, refresh pending"
+	case protocol.BrowserInputRejectStaleFrame:
+		return "Frame stale, refresh pending"
+	case protocol.BrowserInputRejectOwnerMismatch:
+		return "Browser control owner mismatch"
+	case protocol.BrowserInputRejectInvalidPayload:
+		return "Invalid browser input payload"
+	case protocol.BrowserInputRejectExpiredGrant:
+		return "Browser grant expired"
+	default:
+		return "Browser input rejected"
+	}
+}
+
+func (m *Manager) setLastFrameForTest(browserID string, seq int64, capturedAt time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if state := m.byID[browserID]; state != nil {
+		state.lastFrameSeq = seq
+		state.lastFrameCapturedAt = capturedAt
+	}
+}
+
+func requiresViewportCSS(msg *protocol.BrowserUserInput) bool {
+	return msg.Kind == protocol.BrowserInputKindPointer || msg.Kind == protocol.BrowserInputKindWheel
+}
+
+func staleByAge(state *sessionState, msg *protocol.BrowserUserInput) bool {
+	if state.lastFrameCapturedAt.IsZero() {
+		return false
+	}
+	age := time.Since(state.lastFrameCapturedAt)
+	switch msg.Kind {
+	case protocol.BrowserInputKindPointer:
+		if msg.Phase == "click" || msg.Phase == "down" {
+			return age > 250*time.Millisecond
+		}
+	case protocol.BrowserInputKindWheel, protocol.BrowserInputKindKey:
+		return age > 500*time.Millisecond
+	}
+	return false
 }
 
 func (m *Manager) Close(ctx context.Context, msg *protocol.BrowserSessionClose) error {
@@ -521,12 +680,32 @@ func (m *Manager) ToolResult(ctx context.Context, msg *protocol.BrowserToolCall)
 		return ToolResult{}, fmt.Errorf("browser grant expired")
 	}
 	if state.owner != OwnerAgent {
+		req := state.openRequest
+		risk := classifyBrowserTool(msg.Method, msg.ParamsJSON)
+		if risk == BrowserRiskModelVisibleCapture {
+			result := ToolResult{
+				OK:        false,
+				Error:     "model-visible capture blocked while Lex controls browser",
+				ErrorCode: "model_visible_capture_blocked",
+			}
+			m.mu.Unlock()
+			_ = m.sendToolResult(ctx, msg, req, result)
+			return result, fmt.Errorf("model-visible capture blocked while %s controls browser", state.owner)
+		}
 		m.mu.Unlock()
 		return ToolResult{}, fmt.Errorf("browser control belongs to %s", state.owner)
 	}
 	req := state.openRequest
 	risk := classifyBrowserTool(msg.Method, msg.ParamsJSON)
 	summary := browserToolSummary(msg.Method, risk)
+	if err := validateBrowserToolPolicy(msg.Method, msg.ParamsJSON); err != nil {
+		m.mu.Unlock()
+		result := ToolResult{OK: false, Error: err.Error(), ErrorCode: "browser_policy_blocked"}
+		_ = m.sendToolStarted(ctx, msg, req, risk, summary)
+		_ = m.sendToolUpdated(ctx, msg, req, "blocked", summary, nil)
+		_ = m.sendToolResult(ctx, msg, req, result)
+		return result, err
+	}
 	if isCredentialBrowserTool(msg.Method, risk) {
 		m.mu.Unlock()
 		_ = m.sendToolStarted(ctx, msg, req, risk, summary)
@@ -547,23 +726,55 @@ func (m *Manager) ToolResult(ctx context.Context, msg *protocol.BrowserToolCall)
 		state.owner = OwnerApproval
 		state.controlVersion++
 		nextVersion := state.controlVersion
+		approvalID := fmt.Sprintf("approval_%d", time.Now().UnixNano())
+		nonce := fmt.Sprintf("nonce_%d", time.Now().UnixNano())
+		expiresAt := time.Now().Add(2 * time.Minute)
+		parameterHash := browserParameterHash(msg.ParamsJSON)
+		m.pendingApprovals[approvalID] = &pendingApproval{
+			ApprovalID:             approvalID,
+			Nonce:                  nonce,
+			ExpiresAt:              expiresAt,
+			ActorUserID:            "lex",
+			GrantID:                msg.GrantID,
+			BrowserID:              msg.BrowserID,
+			ToolUseID:              msg.ToolUseID,
+			Method:                 msg.Method,
+			Category:               string(risk),
+			Origin:                 browserOrigin(msg.ParamsJSON),
+			ParameterHash:          parameterHash,
+			ExpectedExternalEffect: browserApprovalSummary(msg.Method, risk),
+			Sensitivity:            string(risk),
+			PriorOwner:             previousOwner,
+			Request:                req,
+			ToolCall:               *msg,
+		}
 		m.mu.Unlock()
 		_ = m.sendToolStarted(ctx, msg, req, risk, summary)
 		_ = m.sendToolUpdated(ctx, msg, req, "approval_required", summary, nil)
 		requestID := fmt.Sprintf("browser_sensitive_%d", time.Now().UnixNano())
 		if err := m.sender.Send(ctx, &protocol.BrowserSensitiveActionRequest{
-			Type:      protocol.MsgTypeBrowserSensitiveActionRequest,
-			BrowserID: msg.BrowserID,
-			RequestID: requestID,
-			SessionID: req.SessionID,
-			ChannelID: req.ChannelID,
-			TaskID:    msg.TaskID,
-			ToolUseID: msg.ToolUseID,
-			Category:  string(risk),
-			Summary:   browserApprovalSummary(msg.Method, risk),
-			ExpiresAt: time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano),
+			Type:                   protocol.MsgTypeBrowserSensitiveActionRequest,
+			BrowserID:              msg.BrowserID,
+			RequestID:              requestID,
+			SessionID:              req.SessionID,
+			ChannelID:              req.ChannelID,
+			TaskID:                 msg.TaskID,
+			ApprovalID:             approvalID,
+			Nonce:                  nonce,
+			ActorUserID:            "lex",
+			GrantID:                msg.GrantID,
+			ToolUseID:              msg.ToolUseID,
+			Method:                 msg.Method,
+			Category:               string(risk),
+			Summary:                browserApprovalSummary(msg.Method, risk),
+			Origin:                 browserOrigin(msg.ParamsJSON),
+			ParameterHash:          parameterHash,
+			ExpectedExternalEffect: browserApprovalSummary(msg.Method, risk),
+			Sensitivity:            string(risk),
+			ExpiresAt:              expiresAt.UTC().Format(time.RFC3339Nano),
 		}); err != nil {
 			m.mu.Lock()
+			delete(m.pendingApprovals, approvalID)
 			if current := m.byID[msg.BrowserID]; current == state &&
 				current.owner == OwnerApproval &&
 				current.controlVersion == nextVersion {
@@ -594,6 +805,111 @@ func (m *Manager) ToolResult(ctx context.Context, msg *protocol.BrowserToolCall)
 		return result, err
 	}
 	return result, m.sendToolResult(ctx, msg, req, result)
+}
+
+func (m *Manager) SensitiveActionResponse(ctx context.Context, msg *protocol.BrowserSensitiveActionResponse) error {
+	m.mu.Lock()
+	pending := m.pendingApprovals[msg.ApprovalID]
+	if pending == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("browser approval not found")
+	}
+	if pending.Consumed {
+		m.mu.Unlock()
+		return fmt.Errorf("browser approval already consumed")
+	}
+	if time.Now().After(pending.ExpiresAt) {
+		pending.Consumed = true
+		m.restoreApprovalOwnerLocked(pending)
+		m.mu.Unlock()
+		return fmt.Errorf("browser approval expired")
+	}
+	if err := validateApprovalResponse(pending, msg); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	pending.Consumed = true
+	m.restoreApprovalOwnerLocked(pending)
+	toolCall := pending.ToolCall
+	req := pending.Request
+	m.mu.Unlock()
+
+	if !msg.Approved {
+		_ = m.sendBrowserEvidence(ctx, req, toolCall.BrowserID, "denied", "approval", msg.DeniedReason)
+		return fmt.Errorf("browser action denied")
+	}
+
+	result, err := m.service.Tool(ctx, toolCall.BrowserID, toolCall.Method, toolCall.ParamsJSON)
+	if err != nil {
+		result = ToolResult{OK: false, Error: err.Error(), ErrorCode: "browser_tool_failed"}
+		_ = m.sendToolUpdated(ctx, &toolCall, req, "error", browserToolSummary(toolCall.Method, BrowserRiskExternalEffect), nil)
+		_ = m.sendToolResult(ctx, &toolCall, req, result)
+		return err
+	}
+	_ = m.sendToolUpdated(ctx, &toolCall, req, "ok", browserToolSummary(toolCall.Method, classifyBrowserTool(toolCall.Method, toolCall.ParamsJSON)), result.ResultJSON)
+	return m.sendToolResult(ctx, &toolCall, req, result)
+}
+
+func (m *Manager) restoreApprovalOwnerLocked(pending *pendingApproval) {
+	if state := m.byID[pending.BrowserID]; state != nil && state.owner == OwnerApproval {
+		state.owner = pending.PriorOwner
+		state.controlVersion++
+	}
+}
+
+func validateApprovalResponse(pending *pendingApproval, msg *protocol.BrowserSensitiveActionResponse) error {
+	checks := map[string][2]string{
+		"nonce":                  {pending.Nonce, msg.Nonce},
+		"actorUserId":            {pending.ActorUserID, msg.ActorUserID},
+		"grantId":                {pending.GrantID, msg.GrantID},
+		"browserId":              {pending.BrowserID, msg.BrowserID},
+		"toolUseId":              {pending.ToolUseID, msg.ToolUseID},
+		"method":                 {pending.Method, msg.Method},
+		"category":               {pending.Category, msg.Category},
+		"origin":                 {pending.Origin, msg.Origin},
+		"parameterHash":          {pending.ParameterHash, msg.ParameterHash},
+		"expectedExternalEffect": {pending.ExpectedExternalEffect, msg.ExpectedExternalEffect},
+		"sensitivity":            {pending.Sensitivity, msg.Sensitivity},
+	}
+	for field, pair := range checks {
+		if pair[0] != pair[1] {
+			return fmt.Errorf("browser approval %s mismatch", field)
+		}
+	}
+	return nil
+}
+
+func browserParameterHash(params json.RawMessage) string {
+	sum := sha256.Sum256(params)
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func browserOrigin(params json.RawMessage) string {
+	var payload struct {
+		Origin string `json:"origin"`
+		URL    string `json:"url"`
+	}
+	_ = json.Unmarshal(params, &payload)
+	if payload.Origin != "" {
+		return payload.Origin
+	}
+	return payload.URL
+}
+
+func (m *Manager) sendBrowserEvidence(ctx context.Context, req OpenRequest, browserID string, status string, eventType string, summary string) error {
+	return m.sender.Send(ctx, &protocol.BrowserEvidenceCreated{
+		Type:            protocol.MsgTypeBrowserEvidenceCreated,
+		EvidenceID:      fmt.Sprintf("evidence_%d", time.Now().UnixNano()),
+		BrowserID:       browserID,
+		SessionID:       req.SessionID,
+		ChannelID:       req.ChannelID,
+		Actor:           "daemon",
+		Status:          status,
+		EventType:       eventType,
+		Summary:         summary,
+		RedactionStatus: "safe",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }
 
 func (m *Manager) sendToolStarted(ctx context.Context, msg *protocol.BrowserToolCall, req OpenRequest, risk BrowserRisk, summary string) error {

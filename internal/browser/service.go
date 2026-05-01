@@ -41,12 +41,11 @@ func (s LocalService) binaryPath() string {
 
 func (s LocalService) Start(ctx context.Context, req OpenRequest) error {
 	args := []string{"--session", req.GrantID}
-	if req.Mode == "identity" && req.IdentityID != "" {
-		args = append(args,
-			"--identity-scope", "project",
-			"--identity-key", req.IdentityID,
-			"--identity-project", req.ProjectID,
-		)
+	if req.Mode == "identity" && req.IdentityKey != "" {
+		args = append(args, "--identity-scope", req.IdentityScope, "--identity-key", req.IdentityKey)
+		if req.IdentityScope == "project" {
+			args = append(args, "--identity-project", req.IdentityProjectID)
+		}
 	}
 	args = append(args, "daemon", "start")
 	cmd := exec.CommandContext(ctx, s.binaryPath(), args...)
@@ -88,33 +87,51 @@ func (s LocalService) Tool(ctx context.Context, browserID string, method string,
 
 func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error) {
 	var out struct {
-		Sequence         int64   `json:"sequence"`
-		ContentType      string  `json:"contentType"`
-		DataBase64       string  `json:"dataBase64"`
-		Width            int     `json:"width"`
-		Height           int     `json:"height"`
-		ViewportWidth    int     `json:"viewportWidth"`
-		ViewportHeight   int     `json:"viewportHeight"`
-		DevicePixelRatio float64 `json:"devicePixelRatio"`
-		CapturedAtMs     int64   `json:"capturedAtMs"`
-		URL              string  `json:"url"`
-		Title            string  `json:"title"`
+		Sequence           int64   `json:"sequence"`
+		ContentType        string  `json:"contentType"`
+		DataBase64         string  `json:"dataBase64"`
+		Width              int     `json:"width"`
+		Height             int     `json:"height"`
+		ViewportWidth      int     `json:"viewportWidth"`
+		ViewportHeight     int     `json:"viewportHeight"`
+		ViewportCSSWidth   int     `json:"viewportCssWidth"`
+		ViewportCSSHeight  int     `json:"viewportCssHeight"`
+		CapturePixelWidth  int     `json:"capturePixelWidth"`
+		CapturePixelHeight int     `json:"capturePixelHeight"`
+		DevicePixelRatio   float64 `json:"devicePixelRatio"`
+		CaptureScaleX      float64 `json:"captureScaleX"`
+		CaptureScaleY      float64 `json:"captureScaleY"`
+		EncodedBytes       int     `json:"encodedBytes"`
+		Quality            int     `json:"quality"`
+		CapturePixelRatio  float64 `json:"capturePixelRatio"`
+		CapturedAtMs       int64   `json:"capturedAtMs"`
+		URL                string  `json:"url"`
+		Title              string  `json:"title"`
 	}
 	if err := s.rpc(ctx, browserID, "cloud_frame", map[string]any{"quality": 70}, &out); err != nil {
 		return Frame{}, err
 	}
 	return Frame{
-		Sequence:         out.Sequence,
-		ContentType:      out.ContentType,
-		DataBase64:       out.DataBase64,
-		Width:            out.Width,
-		Height:           out.Height,
-		ViewportWidth:    out.ViewportWidth,
-		ViewportHeight:   out.ViewportHeight,
-		DevicePixelRatio: out.DevicePixelRatio,
-		CapturedAt:       time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano),
-		URL:              out.URL,
-		Title:            out.Title,
+		Sequence:           out.Sequence,
+		ContentType:        out.ContentType,
+		DataBase64:         out.DataBase64,
+		Width:              out.Width,
+		Height:             out.Height,
+		ViewportWidth:      out.ViewportWidth,
+		ViewportHeight:     out.ViewportHeight,
+		ViewportCSSWidth:   out.ViewportCSSWidth,
+		ViewportCSSHeight:  out.ViewportCSSHeight,
+		CapturePixelWidth:  out.CapturePixelWidth,
+		CapturePixelHeight: out.CapturePixelHeight,
+		DevicePixelRatio:   out.DevicePixelRatio,
+		CaptureScaleX:      out.CaptureScaleX,
+		CaptureScaleY:      out.CaptureScaleY,
+		EncodedBytes:       out.EncodedBytes,
+		Quality:            out.Quality,
+		CapturePixelRatio:  out.CapturePixelRatio,
+		CapturedAt:         time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano),
+		URL:                out.URL,
+		Title:              out.Title,
 	}, nil
 }
 
@@ -146,7 +163,11 @@ func (s LocalService) UserInput(ctx context.Context, browserID string, input *pr
 func browserUserInputTool(input *protocol.BrowserUserInput) (string, []byte, bool) {
 	switch input.Kind {
 	case protocol.BrowserInputKindNavigate:
-		params, err := json.Marshal(map[string]any{"url": input.Text})
+		url := input.URL
+		if url == "" {
+			url = input.Text
+		}
+		params, err := json.Marshal(map[string]any{"url": url})
 		return "navigate", params, err == nil
 	case protocol.BrowserInputKindBack:
 		return "back", []byte(`{}`), true
@@ -190,11 +211,53 @@ func browserUserInputParams(input *protocol.BrowserUserInput) map[string]any {
 	if input.Key != "" {
 		params["key"] = input.Key
 	}
+	if input.Phase != "" {
+		params["phase"] = input.Phase
+	}
+	if input.Button != "" {
+		params["button"] = input.Button
+	}
+	if input.Buttons != 0 {
+		params["buttons"] = input.Buttons
+	}
+	if input.ClickCount != 0 {
+		params["clickCount"] = input.ClickCount
+	}
+	if input.PointerType != "" {
+		params["pointerType"] = input.PointerType
+	}
+	if len(input.Modifiers) > 0 {
+		params["modifiers"] = input.Modifiers
+	}
+	if input.Code != "" {
+		params["code"] = input.Code
+	}
+	if input.Location != 0 {
+		params["location"] = input.Location
+	}
+	if input.Repeat {
+		params["repeat"] = input.Repeat
+	}
+	if input.CommitMode != "" {
+		params["commitMode"] = input.CommitMode
+	}
+	if len(input.MimeTypes) > 0 {
+		params["mimeTypes"] = input.MimeTypes
+	}
 	if input.DeltaX != nil {
 		params["deltaX"] = *input.DeltaX
 	}
 	if input.DeltaY != nil {
 		params["deltaY"] = *input.DeltaY
+	}
+	if input.URL != "" {
+		params["url"] = input.URL
+	}
+	if input.Action != "" {
+		params["action"] = input.Action
+	}
+	if input.CapturedAt != "" {
+		params["capturedAt"] = input.CapturedAt
 	}
 	if input.FrameSeq != 0 {
 		params["frameSeq"] = input.FrameSeq
