@@ -9,8 +9,12 @@ import {
 
 const browserGrant = {
   grantId: "grant_1",
-  browserId: "browser_1",
   sessionId: "session_1",
+  taskId: "task_1",
+  channelId: "channel_1",
+  projectId: "project_1",
+  machineId: "machine_1",
+  expiresAt: "2026-05-01T12:00:00Z",
 };
 
 describe("browser tool registration", () => {
@@ -19,20 +23,21 @@ describe("browser tool registration", () => {
     assert.equal(tools.some((tool) => tool.name === "gsd_browser"), true);
   });
 
-  it("does not surface gsd_browser without a browser grant", () => {
+  it("surfaces gsd_browser even without a browser grant", () => {
     const tools = buildClaudeCliBrowserTools({});
-    assert.equal(tools.some((tool) => tool.name === "gsd_browser"), false);
+    assert.equal(tools.some((tool) => tool.name === "gsd_browser"), true);
   });
 
-  it("describes only supported bare browser methods", () => {
-    const [tool] = buildClaudeCliBrowserTools({ browserGrant });
+  it("describes the bundled skill routing behavior", () => {
+    const [tool] = buildClaudeCliBrowserTools({});
     assert.ok(tool);
     assert.deepEqual(tool.input_schema.properties.method.enum.includes("navigate"), true);
     assert.deepEqual(tool.input_schema.properties.method.enum.includes("visual_diff"), true);
-    assert.deepEqual(tool.input_schema.properties.method.enum.includes("vault_login"), true);
+    assert.deepEqual(tool.input_schema.properties.method.enum.includes("vault_login"), false);
     assert.deepEqual(tool.input_schema.properties.method.enum.includes("browser.navigate"), false);
     assert.deepEqual(tool.input_schema.properties.category.enum, BROWSER_TOOL_CATEGORIES);
-    assert.match(tool.description, /do not prefix/i);
+    assert.match(tool.description, /rendered UI/i);
+    assert.match(tool.promptSnippet, /Load the gsd-browser skill/i);
   });
 
   it("keeps browser method registry and categories explicit", () => {
@@ -93,11 +98,6 @@ describe("browser tool registration", () => {
       "mock_route",
       "block_urls",
       "clear_routes",
-      "save_state",
-      "restore_state",
-      "vault_save",
-      "vault_login",
-      "vault_list",
       "batch",
     ]);
     assert.equal(BROWSER_METHOD_CATEGORY.eval, "external_effect");
@@ -127,13 +127,13 @@ describe("browser tool registration", () => {
     assert.equal(tools.some((tool) => tool.name === "ask_human"), true);
   });
 
-  it("filters a pi-registered gsd_browser when no browser grant exists", () => {
+  it("adds the ambient gsd_browser when no browser grant exists", () => {
     const tools = mergeClaudeCliTools([
       { name: "gsd_browser", description: "Registered browser tool", parameters: {} },
       { name: "ask_human", description: "Ask", parameters: {} },
     ], undefined);
 
-    assert.equal(tools.some((tool) => tool.name === "gsd_browser"), false);
+    assert.equal(tools.some((tool) => tool.name === "gsd_browser"), true);
     assert.equal(tools.some((tool) => tool.name === "ask_human"), true);
   });
 });

@@ -70,6 +70,7 @@ type Daemon struct {
 	previewWS              *preview.WebSocketBridge
 	previewWork            chan struct{}
 	browserManager         *browser.Manager
+	browserRPCSocket       string
 	agentTouchedFiles      agentTouchedFileStore
 	runCtxMu               sync.RWMutex
 	runCtx                 context.Context
@@ -479,6 +480,7 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		}
 	}
 	sockPath := filepath.Join(homeDir, ".gsd-cloud", "daemon.sock")
+	browserRPCSocket := filepath.Join(homeDir, ".gsd-cloud", "browser-rpc.sock")
 	agentDir := filepath.Join(homeDir, ".gsd-cloud", "agents")
 	subagentAuthSecret, err := generateSubagentAuthSecret()
 	if err != nil {
@@ -502,6 +504,10 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	if absDir, err := filepath.Abs(browserStateDir); err == nil {
 		browserStateDir = absDir
 	}
+	browserPath := os.Getenv("GSD_BROWSER_PATH")
+	if browserPath == "" {
+		browserPath = "gsd-browser"
+	}
 
 	d := &Daemon{
 		cfg:                    cfg,
@@ -521,6 +527,7 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		previewWS:              preview.NewWebSocketBridge(previewRegistry, client),
 		previewWork:            make(chan struct{}, preview.DefaultMaxActiveStreams),
 		sockPath:               sockPath,
+		browserRPCSocket:       browserRPCSocket,
 		subagentAuthSecret:     subagentAuthSecret,
 		agentDir:               agentDir,
 		subagentStreams:        make(map[string]*pi.ChildTranslator),
@@ -529,7 +536,7 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		subagentRunIDs:         make(map[string]string),
 		subagentParentSessions: make(map[string]string),
 		browserManager: browser.NewManager(browser.ManagerOptions{
-			Service: browser.LocalService{BinaryPath: "gsd-browser", StateDir: browserStateDir},
+			Service: browser.LocalService{BinaryPath: browserPath, StateDir: browserStateDir},
 			Sender:  client,
 		}),
 	}
@@ -691,6 +698,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go func() {
 		if err := sockSrv.ListenAndServe(ctx); err != nil {
 			slog.Warn("socket API failed", "error", err)
+		}
+	}()
+	go func() {
+		if err := d.runBrowserRPC(ctx); err != nil {
+			slog.Warn("browser RPC socket failed", "error", err)
 		}
 	}()
 
@@ -955,6 +967,8 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 	}
 	browserGrantID := ""
 	browserID := ""
+	browserGrant := msg.BrowserGrant
+	runtime := browser.ProbeRuntime(ctx, os.Getenv("GSD_BROWSER_PATH"))
 	if d.browserManager != nil {
 		if browserGrant, ok := d.browserManager.GrantForTask(msg.TaskID); ok {
 			browserGrantID = browserGrant.GrantID
@@ -975,21 +989,28 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			authToken = d.cfg.AuthToken
 		}
 		actor, err = d.manager.Spawn(ctx, session.Options{
-			SessionID:         msg.SessionID,
-			CWD:               msg.CWD,
-			Model:             msg.Model,
-			Effort:            msg.Effort,
-			PermissionMode:    msg.PermissionMode,
-			ResumeSession:     msg.ClaudeSessionID,
-			PiBinaryPath:      d.piBinaryPath,
-			PiExtensionPath:   d.piExtensionPath,
-			ServerURL:         serverURL,
-			MachineID:         machineID,
-			AuthToken:         authToken,
-			DaemonSocketPath:  d.sockPath,
-			AgentDir:          d.agentDir,
-			BrowserGrantID:    browserGrantID,
-			BrowserID:         browserID,
+			SessionID:        msg.SessionID,
+			CWD:              msg.CWD,
+			Model:            msg.Model,
+			Effort:           msg.Effort,
+			PermissionMode:   msg.PermissionMode,
+			ResumeSession:    msg.ClaudeSessionID,
+			PiBinaryPath:     d.piBinaryPath,
+			PiExtensionPath:  d.piExtensionPath,
+			ServerURL:        serverURL,
+			MachineID:        machineID,
+			AuthToken:        authToken,
+			DaemonSocketPath: d.sockPath,
+			AgentDir:         d.agentDir,
+			BrowserGrantID:   browserGrantID,
+			BrowserID:        browserID,
+			BrowserGrant:     browserGrant,
+			BrowserRuntime: session.BrowserRuntimeSnapshot{
+				ErrorCode:    runtime.ErrorCode,
+				ErrorMessage: runtime.ErrorMessage,
+				Version:      runtime.Version,
+			},
+			BrowserRPCSocket:  d.browserRPCSocket,
 			RecordTouchedFile: d.recordAgentTouchedFile,
 		})
 		if err != nil {
@@ -1005,6 +1026,11 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		}
 	} else {
 		actor.SetBrowserContext(browserGrantID, browserID)
+		actor.SetBrowserGrant(browserGrant, session.BrowserRuntimeSnapshot{
+			ErrorCode:    runtime.ErrorCode,
+			ErrorMessage: runtime.ErrorMessage,
+			Version:      runtime.Version,
+		}, d.browserRPCSocket)
 	}
 
 	// Task execution errors (e.g. claude binary not found, executor not ready)

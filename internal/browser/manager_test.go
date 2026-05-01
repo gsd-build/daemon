@@ -266,7 +266,7 @@ func TestManagerBlocksSensitiveToolUntilApproval(t *testing.T) {
 		GrantID:   "grant_1",
 		TaskID:    "task_1",
 		ToolUseID: "tool_1",
-		Method:    "vault_login",
+		Method:    "fill_form",
 	})
 
 	if err == nil {
@@ -283,6 +283,86 @@ func TestManagerBlocksSensitiveToolUntilApproval(t *testing.T) {
 	}
 }
 
+func TestManagerSendsToolLifecycleEventsAndResultContext(t *testing.T) {
+	service := &fakeService{}
+	sender := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: service, Sender: sender, FrameInterval: time.Hour})
+	openBrowserForTest(t, m, "browser_1")
+
+	err := m.Tool(context.Background(), &protocol.BrowserToolCall{
+		Type:       protocol.MsgTypeBrowserToolCall,
+		BrowserID:  "browser_1",
+		GrantID:    "grant_1",
+		TaskID:     "task_1",
+		ToolUseID:  "tool_1",
+		Method:     "navigate",
+		ParamsJSON: json.RawMessage(`{"url":"https://example.com"}`),
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+
+	var started *protocol.BrowserToolCallStarted
+	var updated *protocol.BrowserToolCallUpdated
+	var result *protocol.BrowserToolResult
+	for _, msg := range sender.snapshot() {
+		switch typed := msg.(type) {
+		case *protocol.BrowserToolCallStarted:
+			started = typed
+		case *protocol.BrowserToolCallUpdated:
+			updated = typed
+		case *protocol.BrowserToolResult:
+			result = typed
+		}
+	}
+	if started == nil || started.SessionID != "session_1" || started.ChannelID != "channel_1" || started.Category != string(BrowserRiskInspection) {
+		t.Fatalf("started = %+v", started)
+	}
+	if updated == nil || updated.Status != "ok" || updated.SessionID != "session_1" || updated.ChannelID != "channel_1" {
+		t.Fatalf("updated = %+v", updated)
+	}
+	if result == nil || !result.OK || result.SessionID != "session_1" || result.ChannelID != "channel_1" || result.RedactionStatus != "not_needed" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestManagerRejectsCredentialMethodsWithoutApproval(t *testing.T) {
+	service := &fakeService{}
+	sender := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: service, Sender: sender, FrameInterval: time.Hour})
+	openBrowserForTest(t, m, "browser_1")
+
+	err := m.Tool(context.Background(), &protocol.BrowserToolCall{
+		Type:      protocol.MsgTypeBrowserToolCall,
+		BrowserID: "browser_1",
+		GrantID:   "grant_1",
+		TaskID:    "task_1",
+		ToolUseID: "tool_1",
+		Method:    "vault_login",
+	})
+	if err == nil {
+		t.Fatal("expected credential method rejection")
+	}
+	if sender.hasType(protocol.MsgTypeBrowserSensitiveActionRequest) {
+		t.Fatalf("credential method should not request approval")
+	}
+	var result *protocol.BrowserToolResult
+	for _, msg := range sender.snapshot() {
+		if typed, ok := msg.(*protocol.BrowserToolResult); ok {
+			result = typed
+		}
+	}
+	if result == nil || result.OK || result.ErrorCode != "feature_not_enabled" {
+		t.Fatalf("result = %+v", result)
+	}
+	service.mu.Lock()
+	toolCalls := service.toolCalls
+	service.mu.Unlock()
+	if toolCalls != 0 {
+		t.Fatalf("credential method reached service")
+	}
+}
+
 func TestManagerRollsBackApprovalOwnerWhenRequestSendFails(t *testing.T) {
 	service := &fakeService{}
 	m := NewManager(ManagerOptions{Service: service, Sender: &recordingSender{}, FrameInterval: time.Hour})
@@ -295,7 +375,7 @@ func TestManagerRollsBackApprovalOwnerWhenRequestSendFails(t *testing.T) {
 		GrantID:   "grant_1",
 		TaskID:    "task_1",
 		ToolUseID: "tool_1",
-		Method:    "vault_login",
+		Method:    "fill_form",
 	})
 
 	if err == nil {

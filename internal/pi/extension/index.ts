@@ -8,9 +8,6 @@
  */
 
 import crypto from "node:crypto";
-import net from "node:net";
-import os from "node:os";
-import path from "node:path";
 import {
   createSdkMcpServer,
   query,
@@ -45,11 +42,11 @@ import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
 import { registerSubagentTool } from "./subagent.js";
 import {
-  BROWSER_TOOL_CATEGORIES,
-  BROWSER_TOOL_METHODS,
-  BrowserToolCategorySchema,
-  BrowserToolMethodSchema,
-} from "./browser-methods.js";
+  browserGrantFromEnv,
+  browserToolDefinition,
+  registerBrowserExtension,
+  type BrowserGrant,
+} from "./browser-extension.js";
 import {
   filterToolsByPolicy,
   hasSubagentToolPolicy,
@@ -91,12 +88,6 @@ type ActiveToolCall = {
   jsonAcc: string;
 };
 
-type BrowserGrant = {
-  grantId: string;
-  browserId: string;
-  sessionId: string;
-};
-
 function isWriteEpipe(err: unknown) {
   return isRecord(err) && err.code === "EPIPE" && err.syscall === "write";
 }
@@ -113,44 +104,8 @@ function installClaudeSdkPipeGuard() {
 
 installClaudeSdkPipeGuard();
 
-const BrowserToolParams = Type.Object({
-  method: BrowserToolMethodSchema,
-  category: Type.Optional(BrowserToolCategorySchema),
-  params: Type.Optional(Type.Record(Type.String(), Type.Any())),
-});
-
-function browserToolDefinition() {
-  return {
-    name: "gsd_browser",
-    label: "GSD Browser",
-    description:
-      "Use the active task-scoped GSD shared browser session for page navigation, inspection, ref-based interaction, screenshots, network controls, auth state, traces, and artifacts. Prefer snapshot with refs before interacting. Pass bare method names such as navigate, snapshot, click_ref, visual_diff, or vault_login; do not prefix methods with browser.",
-    parameters: BrowserToolParams,
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        method: {
-          type: "string",
-          enum: BROWSER_TOOL_METHODS,
-          description:
-            "Bare browser operation name. Use navigate, not browser.navigate.",
-        },
-        category: {
-          type: "string",
-          enum: BROWSER_TOOL_CATEGORIES,
-          description:
-            "Optional method classification for UI and policy. The daemon executes method and params.",
-        },
-        params: { type: "object", additionalProperties: true },
-      },
-      required: ["method"],
-    },
-  };
-}
-
 export function buildClaudeCliBrowserTools(context: { browserGrant?: BrowserGrant }) {
-  return context.browserGrant ? [browserToolDefinition()] : [];
+  return [browserToolDefinition()];
 }
 
 function piToolName(toolDef: PiTool | ReturnType<typeof browserToolDefinition>) {
@@ -302,14 +257,6 @@ function registerVisibleTool(
   return registered;
 }
 
-function browserGrantFromEnv() {
-	const grantId = process.env.GSD_BROWSER_GRANT_ID;
-	const browserId = process.env.GSD_BROWSER_ID;
-	const sessionId = process.env.GSD_BROWSER_SESSION_ID;
-	if (!grantId || !browserId || !sessionId) return undefined;
-	return { grantId, browserId, sessionId };
-}
-
 function warmClaudeOptionsKey(model: Model<any>, context: Context) {
   const tools = ((context.tools as PiTool[] | undefined) ?? []).map((toolDef) => toolDef.name).sort();
   return JSON.stringify({
@@ -324,82 +271,6 @@ function resetWarmClaudeWorker() {
   void warmClaudeWorker?.stop();
   warmClaudeWorker = null;
   warmClaudeOptionsSignature = "";
-}
-
-async function browserRpc(browserId: string, method: string, params: unknown, signal?: AbortSignal) {
-  const socketPath = path.join(os.homedir(), ".gsd-browser", "sessions", browserId, "daemon.sock");
-  const payload = Buffer.from(JSON.stringify({
-    jsonrpc: "2.0",
-    id: Date.now(),
-    method: "cloud_tool",
-    params: { method, params: params ?? {} },
-  }));
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length, 0);
-
-  return await new Promise<unknown>((resolve, reject) => {
-    const socket = net.createConnection(socketPath);
-    const chunks: Buffer[] = [];
-    let expected = 0;
-    let settled = false;
-
-    const cleanup = () => {
-      signal?.removeEventListener("abort", onAbort);
-      socket.removeAllListeners("timeout");
-    };
-    const rejectOnce = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      socket.destroy();
-      reject(err);
-    };
-    const resolveOnce = (value: unknown) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      socket.end();
-      resolve(value);
-    };
-    const onAbort = () => rejectOnce(new Error("browser tool aborted"));
-
-    if (signal?.aborted) {
-      rejectOnce(new Error("browser tool aborted"));
-      return;
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    socket.setTimeout(30_000, () => rejectOnce(new Error("browser tool timed out")));
-    socket.on("connect", () => {
-      socket.write(Buffer.concat([header, payload]), (err) => {
-        if (err) rejectOnce(err);
-      });
-    });
-    socket.on("data", (chunk) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      const all = Buffer.concat(chunks);
-      if (expected === 0 && all.length >= 4) expected = all.readUInt32BE(0);
-      if (expected > 16 * 1024 * 1024) {
-        rejectOnce(new Error(`browser rpc frame too large: ${expected}`));
-        return;
-      }
-      if (expected > 0 && all.length >= expected + 4) {
-        try {
-          const response = JSON.parse(all.subarray(4, expected + 4).toString("utf8"));
-          if (response.error) rejectOnce(new Error(response.error.message ?? "browser tool failed"));
-          else resolveOnce(response.result ?? {});
-        } catch (err) {
-          rejectOnce(err instanceof Error ? err : new Error(String(err)));
-        }
-      }
-    });
-    socket.on("end", () => rejectOnce(new Error("browser rpc ended before response")));
-    socket.on("close", (hadError) => {
-      if (!settled) {
-        rejectOnce(new Error(hadError ? "browser rpc socket closed after error" : "browser rpc socket closed before response"));
-      }
-    });
-    socket.on("error", (err) => rejectOnce(err));
-  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1016,51 +887,15 @@ function registerAskHumanTool(pi: ExtensionAPI, registeredTools?: ToolRegistrati
   registeredTools?.push(describeRegisteredTool("human", definition));
 }
 
-function registerBrowserTool(pi: ExtensionAPI, registeredTools?: ToolRegistrationDiagnostic[]) {
-  const definition = browserToolDefinition();
-  const registeredDefinition = {
-    name: definition.name,
-    label: definition.label,
-    description: definition.description,
-    parameters: definition.parameters,
-    async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
-      const browserGrant = browserGrantFromEnv();
-      if (!browserGrant) {
-        return {
-          content: [{ type: "text", text: "No task-scoped browser grant is active." }],
-          isError: true,
-          details: {},
-        };
-      }
-      try {
-        const result = await browserRpc(browserGrant.browserId, params.method, params.params ?? {}, signal);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          isError: false,
-          details: { browserId: browserGrant.browserId, grantId: browserGrant.grantId },
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
-          isError: true,
-          details: { browserId: browserGrant.browserId, grantId: browserGrant.grantId },
-        };
-      }
-    },
-  };
-  pi.registerTool(registeredDefinition as any);
-  registeredTools?.push(describeRegisteredTool("browser", registeredDefinition));
-}
-
 export default function (pi: ExtensionAPI) {
   const subagentAllowedTools = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
-  const browserGrant = browserGrantFromEnv();
   const profile = toolProfile();
   const registeredTools: ToolRegistrationDiagnostic[] = [];
   if (!isMinimalToolProfile()) {
     registerAskHumanTool(pi, registeredTools);
-    if (browserGrant && (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy())) {
-      registerBrowserTool(pi, registeredTools);
+    if (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy()) {
+      registerBrowserExtension(pi);
+      registeredTools.push(describeRegisteredTool("browser", browserToolDefinition()));
     }
     registerTrackedTool(pi, registeredTools, "human", askUserQuestionsTool as any);
     for (const backgroundTool of backgroundTools) {

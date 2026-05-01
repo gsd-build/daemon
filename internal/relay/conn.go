@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/preview"
 	protocol "github.com/gsd-build/protocol-go"
 )
@@ -98,6 +100,9 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 	}
 	conn.SetReadLimit(1 << 20) // 1 MB
 
+	browserPath := os.Getenv("GSD_BROWSER_PATH")
+	runtime := browser.ProbeRuntime(ctx, browserPath)
+
 	// Send Hello
 	hello := protocol.Hello{
 		Type:          protocol.MsgTypeHello,
@@ -117,12 +122,21 @@ func (c *Client) Connect(ctx context.Context, activeTasks []string) (*protocol.W
 			PreviewWebSocketProtocols:      true,
 			LocalServerDetection:           true,
 			Skills:                         true,
-			BrowserSessions:                true,
-			BrowserFrameStream:             true,
-			BrowserUserControl:             true,
-			BrowserIdentities:              true,
-			BrowserSensitiveActionApproval: true,
+			BrowserSessions:                runtime.Ready,
+			BrowserFrameStream:             runtime.Ready,
+			BrowserUserControl:             runtime.Ready,
+			BrowserIdentities:              runtime.Ready,
+			BrowserSensitiveActionApproval: runtime.Ready,
 			BrowserMaxFrameBytes:           262144,
+			BrowserRuntimeInstalled:        runtime.Installed,
+			BrowserRuntimeVersion:          runtime.Version,
+			BrowserRuntimeMinVersion:       runtime.MinVersion,
+			BrowserRuntimeMinVersionOK:     runtime.MinVersionOK,
+			BrowserRuntimePath:             runtime.Path,
+			BrowserRuntimeErrorCode:        runtime.ErrorCode,
+			BrowserRuntimeErrorMessage:     runtime.ErrorMessage,
+			BrowserCloudMethodsVersion:     runtime.CloudMethodsVersion,
+			BrowserChromeAvailable:         runtime.ChromeAvailable,
 		},
 	}
 	buf, err := json.Marshal(hello)

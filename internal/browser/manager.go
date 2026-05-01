@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -58,7 +59,47 @@ type Grant struct {
 	GrantID   string
 	BrowserID string
 	SessionID string
+	ChannelID string
 	TaskID    string
+}
+
+func (m *Manager) Ensure(ctx context.Context, req EnsureRequest) (Grant, error) {
+	if grant, ok := m.GrantForTask(req.TaskID); ok {
+		return grant, nil
+	}
+	if grant, ok := m.GrantForSession(req.SessionID); ok {
+		return grant, nil
+	}
+	if req.GrantID == "" {
+		return Grant{}, fmt.Errorf("browser grant missing")
+	}
+	if req.SessionID == "" {
+		return Grant{}, fmt.Errorf("browser session missing")
+	}
+	if req.ExpiresAt == "" {
+		return Grant{}, fmt.Errorf("browser grant expiry missing")
+	}
+	if err := m.Open(ctx, &protocol.BrowserSessionOpen{
+		Type:      protocol.MsgTypeBrowserSessionOpen,
+		RequestID: fmt.Sprintf("browser_lazy_%d", time.Now().UnixNano()),
+		GrantID:   req.GrantID,
+		SessionID: req.SessionID,
+		ProjectID: req.ProjectID,
+		TaskID:    req.TaskID,
+		ChannelID: req.ChannelID,
+		MachineID: req.MachineID,
+		Mode:      "clean",
+		ExpiresAt: req.ExpiresAt,
+	}); err != nil {
+		return Grant{}, err
+	}
+	if grant, ok := m.GrantForTask(req.TaskID); ok {
+		return grant, nil
+	}
+	if grant, ok := m.GrantForSession(req.SessionID); ok {
+		return grant, nil
+	}
+	return Grant{}, fmt.Errorf("browser grant unavailable after open")
 }
 
 func (m *Manager) Open(ctx context.Context, msg *protocol.BrowserSessionOpen) error {
@@ -278,6 +319,7 @@ func (m *Manager) grantForStateLocked(state *sessionState) (Grant, bool) {
 		GrantID:   state.openRequest.GrantID,
 		BrowserID: state.browserID,
 		SessionID: state.openRequest.SessionID,
+		ChannelID: state.openRequest.ChannelID,
 		TaskID:    state.openRequest.TaskID,
 	}, true
 }
@@ -463,36 +505,41 @@ func (m *Manager) removeStateLocked(state *sessionState) {
 }
 
 func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error {
+	_, err := m.ToolResult(ctx, msg)
+	return err
+}
+
+func (m *Manager) ToolResult(ctx context.Context, msg *protocol.BrowserToolCall) (ToolResult, error) {
 	m.mu.Lock()
 	state, ok := m.byID[msg.BrowserID]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("browser session not found")
+		return ToolResult{}, fmt.Errorf("browser session not found")
 	}
 	if time.Now().After(state.expiresAt) {
 		m.mu.Unlock()
-		return fmt.Errorf("browser grant expired")
+		return ToolResult{}, fmt.Errorf("browser grant expired")
 	}
 	if state.owner != OwnerAgent {
 		m.mu.Unlock()
-		return fmt.Errorf("browser control belongs to %s", state.owner)
+		return ToolResult{}, fmt.Errorf("browser control belongs to %s", state.owner)
 	}
 	req := state.openRequest
 	risk := classifyBrowserTool(msg.Method, msg.ParamsJSON)
-	if msg.Method == "vault_save" {
+	summary := browserToolSummary(msg.Method, risk)
+	if isCredentialBrowserTool(msg.Method, risk) {
 		m.mu.Unlock()
-		if err := m.sender.Send(ctx, &protocol.BrowserToolResult{
-			Type:      protocol.MsgTypeBrowserToolResult,
-			BrowserID: msg.BrowserID,
-			GrantID:   msg.GrantID,
-			TaskID:    msg.TaskID,
-			ToolUseID: msg.ToolUseID,
+		_ = m.sendToolStarted(ctx, msg, req, risk, summary)
+		_ = m.sendToolUpdated(ctx, msg, req, "rejected", summary, nil)
+		result := ToolResult{
 			OK:        false,
-			Error:     "agent-initiated vault_save is not allowed",
-		}); err != nil {
-			return fmt.Errorf("send browser vault_save rejection: %w", err)
+			Error:     "browser credential methods are not available to agents",
+			ErrorCode: "feature_not_enabled",
 		}
-		return fmt.Errorf("agent-initiated vault_save is not allowed")
+		if err := m.sendToolResult(ctx, msg, req, result); err != nil {
+			return result, fmt.Errorf("send browser credential method rejection: %w", err)
+		}
+		return result, fmt.Errorf("browser credential methods are not available to agents")
 	}
 	if browserRiskRequiresApproval(risk) {
 		previousOwner := state.owner
@@ -501,6 +548,8 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 		state.controlVersion++
 		nextVersion := state.controlVersion
 		m.mu.Unlock()
+		_ = m.sendToolStarted(ctx, msg, req, risk, summary)
+		_ = m.sendToolUpdated(ctx, msg, req, "approval_required", summary, nil)
 		requestID := fmt.Sprintf("browser_sensitive_%d", time.Now().UnixNano())
 		if err := m.sender.Send(ctx, &protocol.BrowserSensitiveActionRequest{
 			Type:      protocol.MsgTypeBrowserSensitiveActionRequest,
@@ -522,27 +571,115 @@ func (m *Manager) Tool(ctx context.Context, msg *protocol.BrowserToolCall) error
 				current.controlVersion = previousVersion
 			}
 			m.mu.Unlock()
-			return fmt.Errorf("send browser sensitive action request: %w", err)
+			return ToolResult{}, fmt.Errorf("send browser sensitive action request: %w", err)
 		}
-		return fmt.Errorf("browser action requires approval: %s", risk)
+		return ToolResult{OK: false, Error: "browser action requires approval", ErrorCode: "approval_required"}, fmt.Errorf("browser action requires approval: %s", risk)
 	}
 	m.mu.Unlock()
+	if err := m.sendToolStarted(ctx, msg, req, risk, summary); err != nil {
+		return ToolResult{}, err
+	}
 	result, err := m.service.Tool(ctx, msg.BrowserID, msg.Method, msg.ParamsJSON)
 	if err != nil {
-		return err
+		result = ToolResult{OK: false, Error: err.Error(), ErrorCode: "browser_tool_failed"}
+		_ = m.sendToolUpdated(ctx, msg, req, "error", summary, nil)
+		_ = m.sendToolResult(ctx, msg, req, result)
+		return result, err
 	}
+	status := "ok"
+	if !result.OK {
+		status = "error"
+	}
+	if err := m.sendToolUpdated(ctx, msg, req, status, summary, result.ResultJSON); err != nil {
+		return result, err
+	}
+	return result, m.sendToolResult(ctx, msg, req, result)
+}
+
+func (m *Manager) sendToolStarted(ctx context.Context, msg *protocol.BrowserToolCall, req OpenRequest, risk BrowserRisk, summary string) error {
+	return m.sender.Send(ctx, &protocol.BrowserToolCallStarted{
+		Type:      protocol.MsgTypeBrowserToolCallStarted,
+		BrowserID: msg.BrowserID,
+		GrantID:   msg.GrantID,
+		SessionID: req.SessionID,
+		ChannelID: req.ChannelID,
+		TaskID:    msg.TaskID,
+		ToolUseID: msg.ToolUseID,
+		Method:    msg.Method,
+		Category:  string(risk),
+		Summary:   summary,
+		Metadata:  safeToolMetadata(msg.Method, msg.ParamsJSON),
+		At:        time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (m *Manager) sendToolUpdated(ctx context.Context, msg *protocol.BrowserToolCall, req OpenRequest, status string, summary string, metadata json.RawMessage) error {
+	return m.sender.Send(ctx, &protocol.BrowserToolCallUpdated{
+		Type:      protocol.MsgTypeBrowserToolCallUpdated,
+		BrowserID: msg.BrowserID,
+		GrantID:   msg.GrantID,
+		SessionID: req.SessionID,
+		ChannelID: req.ChannelID,
+		TaskID:    msg.TaskID,
+		ToolUseID: msg.ToolUseID,
+		Status:    status,
+		Summary:   summary,
+		Metadata:  metadata,
+		At:        time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (m *Manager) sendToolResult(ctx context.Context, msg *protocol.BrowserToolCall, req OpenRequest, result ToolResult) error {
 	return m.sender.Send(ctx, &protocol.BrowserToolResult{
-		Type:       protocol.MsgTypeBrowserToolResult,
-		BrowserID:  msg.BrowserID,
-		GrantID:    msg.GrantID,
-		TaskID:     msg.TaskID,
-		ToolUseID:  msg.ToolUseID,
-		OK:         result.OK,
-		ResultJSON: result.ResultJSON,
-		Error:      result.Error,
+		Type:            protocol.MsgTypeBrowserToolResult,
+		BrowserID:       msg.BrowserID,
+		GrantID:         msg.GrantID,
+		SessionID:       req.SessionID,
+		ChannelID:       req.ChannelID,
+		TaskID:          msg.TaskID,
+		ToolUseID:       msg.ToolUseID,
+		OK:              result.OK,
+		ResultJSON:      result.ResultJSON,
+		Error:           result.Error,
+		ErrorCode:       result.ErrorCode,
+		Sensitivity:     "public",
+		RedactionStatus: "not_needed",
 	})
 }
 
 func browserApprovalSummary(method string, risk BrowserRisk) string {
 	return fmt.Sprintf("Run browser method %s (%s)", method, risk)
+}
+
+func browserToolSummary(method string, risk BrowserRisk) string {
+	return fmt.Sprintf("Run browser method %s (%s)", method, risk)
+}
+
+func isCredentialBrowserTool(method string, risk BrowserRisk) bool {
+	if risk == BrowserRiskCredentialAuth {
+		return true
+	}
+	switch method {
+	case "save_state", "restore_state", "vault_save", "vault_login", "vault_list":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeToolMetadata(method string, params json.RawMessage) json.RawMessage {
+	if method != "navigate" || len(params) == 0 {
+		return nil
+	}
+	var payload struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(params, &payload); err != nil || payload.URL == "" {
+		return nil
+	}
+	data, err := json.Marshal(map[string]string{"url": payload.URL})
+	if err != nil {
+		return nil
+	}
+	return data
 }
