@@ -84,10 +84,6 @@ type Options struct {
 	BrowserRuntimeVersion      string
 	WarmClaudeSDK              bool
 	DaemonSocketPath           string
-	SubagentAuthToken          string
-	ParentSessionID            string
-	AgentDir                   string
-	SubagentsPrompt            string
 	AgentToolsSocket           string
 	AgentToolsToken            string
 	ToolProfile                string
@@ -178,9 +174,6 @@ func appendedSystemPrompt(opts Options) string {
 	if customInstructions := strings.TrimSpace(opts.CustomInstructions); customInstructions != "" {
 		sections = append(sections, customInstructions)
 	}
-	if subagentsPrompt := strings.TrimSpace(opts.SubagentsPrompt); subagentsPrompt != "" {
-		sections = append(sections, subagentsPrompt)
-	}
 	sections = append(sections, runtimeIdentityPrompt(opts, time.Now()))
 	return strings.Join(sections, "\n\n")
 }
@@ -231,7 +224,7 @@ func cleanRuntimeValue(value string) string {
 func processEnv(ctx context.Context, base []string, opts Options) []string {
 	provider := ProviderOrDefault(opts.Provider)
 	allowedBase := ensureUserIdentityEnv(allowlistedBaseEnv(base, provider))
-	return subagentEnv(
+	return daemonSocketEnv(
 		warmClaudeSDKEnv(
 			browserEnv(
 				agentToolsEnv(
@@ -245,7 +238,7 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 			),
 			opts.WarmClaudeSDK,
 		),
-		opts,
+		opts.DaemonSocketPath,
 	)
 }
 
@@ -341,34 +334,16 @@ func ProcessEnv(ctx context.Context, base []string, opts Options) []string {
 	return processEnv(ctx, base, opts)
 }
 
-func subagentEnv(base []string, opts Options) []string {
-	out := make([]string, 0, len(base)+4)
+func daemonSocketEnv(base []string, socketPath string) []string {
+	out := make([]string, 0, len(base)+1)
 	for _, entry := range base {
-		if opts.DaemonSocketPath != "" && strings.HasPrefix(entry, "GSD_DAEMON_SOCKET=") {
-			continue
-		}
-		if opts.SubagentAuthToken != "" && strings.HasPrefix(entry, "GSD_SUBAGENT_AUTH_TOKEN=") {
-			continue
-		}
-		if opts.ParentSessionID != "" && strings.HasPrefix(entry, "GSD_PARENT_SESSION_ID=") {
-			continue
-		}
-		if opts.AgentDir != "" && strings.HasPrefix(entry, "GSD_AGENT_DIR=") {
+		if socketPath != "" && strings.HasPrefix(entry, "GSD_DAEMON_SOCKET=") {
 			continue
 		}
 		out = append(out, entry)
 	}
-	if opts.DaemonSocketPath != "" {
-		out = append(out, "GSD_DAEMON_SOCKET="+opts.DaemonSocketPath)
-	}
-	if opts.SubagentAuthToken != "" {
-		out = append(out, "GSD_SUBAGENT_AUTH_TOKEN="+opts.SubagentAuthToken)
-	}
-	if opts.ParentSessionID != "" {
-		out = append(out, "GSD_PARENT_SESSION_ID="+opts.ParentSessionID)
-	}
-	if opts.AgentDir != "" {
-		out = append(out, "GSD_AGENT_DIR="+opts.AgentDir)
+	if socketPath != "" {
+		out = append(out, "GSD_DAEMON_SOCKET="+socketPath)
 	}
 	return out
 }
@@ -468,7 +443,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"skillCount", len(e.opts.SkillPaths),
 		"promptLen", len(e.opts.Prompt),
 		"customInstructionsLen", len(strings.TrimSpace(e.opts.CustomInstructions)),
-		"subagentsPromptLen", len(strings.TrimSpace(e.opts.SubagentsPrompt)),
 		"runtimePromptLen", len(runtimeIdentityPrompt(e.opts, time.Now())),
 		"toolProfile", strings.TrimSpace(e.opts.ToolProfile),
 		"agentTools", e.opts.AgentToolsSocket != "",
@@ -482,7 +456,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"model":                   e.opts.Model,
 		"promptChars":             len(e.opts.Prompt),
 		"customInstructionsChars": len(strings.TrimSpace(e.opts.CustomInstructions)),
-		"subagentsPromptChars":    len(strings.TrimSpace(e.opts.SubagentsPrompt)),
 		"runtimePromptChars":      len(runtimeIdentityPrompt(e.opts, time.Now())),
 		"skillCount":              len(e.opts.SkillPaths),
 		"disableSkills":           e.opts.DisableSkills,

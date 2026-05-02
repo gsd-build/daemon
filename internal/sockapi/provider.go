@@ -1,8 +1,6 @@
 package sockapi
 
 import (
-	"encoding/json"
-	"net/http"
 	"time"
 )
 
@@ -50,92 +48,10 @@ type HealthData struct {
 	Status string `json:"status"` // "ok" or "disconnected"
 }
 
-type SubagentSnapshot struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	SystemPrompt string   `json:"systemPrompt"`
-	Model        string   `json:"model"`
-	Tools        []string `json:"tools"`
-	VersionHash  string   `json:"versionHash"`
-}
-
-type CreateSubagentChildRequest struct {
-	ParentSessionID  string `json:"parentSessionId"`
-	ParentToolCallID string `json:"parentToolCallId"`
-	RunIndex         int    `json:"runIndex"`
-	Mode             string `json:"mode"`
-	AgentName        string `json:"agentName"`
-	Task             string `json:"task"`
-}
-
-type CreateSubagentChildResponse struct {
-	ChildSessionID   string           `json:"childSessionId"`
-	ParentSessionID  string           `json:"parentSessionId"`
-	ProjectID        string           `json:"projectId"`
-	RunID            string           `json:"runId"`
-	ParentToolCallID string           `json:"parentToolCallId"`
-	RunIndex         int              `json:"runIndex"`
-	Mode             string           `json:"mode"`
-	AgentName        string           `json:"agentName"`
-	Model            string           `json:"model"`
-	Agent            SubagentSnapshot `json:"agent"`
-}
-
-type ForwardSubagentEventRequest struct {
-	RunID          string          `json:"runId,omitempty"`
-	ChildSessionID string          `json:"childSessionId"`
-	Raw            json.RawMessage `json:"event"`
-}
-
-type RegisterSubagentProcessRequest struct {
-	RunID          string `json:"runId,omitempty"`
-	ChildSessionID string `json:"childSessionId"`
-	PID            int    `json:"pid"`
-}
-
-type HeartbeatSubagentChildRequest struct {
-	RunID          string `json:"runId"`
-	ChildSessionID string `json:"childSessionId,omitempty"`
-	PID            int    `json:"pid,omitempty"`
-	Status         string `json:"status,omitempty"`
-}
-
-type FinalizeSubagentChildRequest struct {
-	RunID             string `json:"runId,omitempty"`
-	ChildSessionID    string `json:"childSessionId"`
-	Status            string `json:"status"`
-	TotalInputTokens  int64  `json:"totalInputTokens"`
-	TotalOutputTokens int64  `json:"totalOutputTokens"`
-	TotalCostUSD      string `json:"totalCostUsd"`
-	TurnCount         int    `json:"turnCount"`
-	FinalText         string `json:"finalText,omitempty"`
-	ErrorMessage      string `json:"errorMessage,omitempty"`
-}
-
-type FinalizeSubagentChildResponse struct {
-	OK              bool   `json:"ok"`
-	Status          string `json:"status"`
-	RunID           string `json:"runId,omitempty"`
-	ChildSessionID  string `json:"childSessionId"`
-	ParentSessionID string `json:"parentSessionId"`
-	ProjectID       string `json:"projectId"`
-	FinalText       string `json:"finalText,omitempty"`
-	ErrorMessage    string `json:"errorMessage,omitempty"`
-}
-
 // StatusProvider is implemented by the daemon loop to expose live state.
 type StatusProvider interface {
 	Health() HealthData
 	Status() StatusData
 	Sessions() []SessionInfo
 	Workers() []WorkerInfo
-}
-
-type SubagentProvider interface {
-	CreateSubagentChild(r *http.Request, req CreateSubagentChildRequest) (CreateSubagentChildResponse, error)
-	RegisterSubagentProcess(r *http.Request, req RegisterSubagentProcessRequest) error
-	HeartbeatSubagentChild(r *http.Request, req HeartbeatSubagentChildRequest) error
-	ForwardSubagentEvent(r *http.Request, req ForwardSubagentEventRequest) error
-	FinalizeSubagentChild(r *http.Request, req FinalizeSubagentChildRequest) (FinalizeSubagentChildResponse, error)
 }

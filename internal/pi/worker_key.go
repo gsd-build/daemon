@@ -22,7 +22,6 @@ type WorkerKey struct {
 	BrowserGrantID      string
 	BrowserID           string
 	BrowserSessionID    string
-	SubagentTokenHash   string
 	AgentToolsSocket    string
 	AgentToolsTokenHash string
 }
@@ -55,9 +54,6 @@ func NewWorkerKey(opts Options) WorkerKey {
 		BrowserGrantID:     opts.BrowserGrantID,
 		BrowserID:          opts.BrowserID,
 		BrowserSessionID:   opts.BrowserSessionID,
-	}
-	if opts.SubagentAuthToken != "" {
-		key.SubagentTokenHash = hashString(opts.SubagentAuthToken)
 	}
 	key.AgentToolsSocket = opts.AgentToolsSocket
 	if opts.AgentToolsToken != "" {

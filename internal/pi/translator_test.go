@@ -178,44 +178,6 @@ func TestChildTranslatorStampsCloudChildSessionID(t *testing.T) {
 	}
 }
 
-func TestTranslatorKeepsSubagentToolResultDetails(t *testing.T) {
-	state := &translatorState{sessionID: "parent-session"}
-	events := translatePiEvent(json.RawMessage(`{
-		"type":"tool_execution_end",
-		"toolCallId":"toolu_subagent_1",
-		"toolName":"subagent",
-		"result":{
-			"content":[{"type":"text","text":"Mapped the flow."}],
-			"details":{
-				"childSessionId":"child-session",
-				"parentSessionId":"parent-session",
-				"projectId":"project-1",
-				"agentName":"explorer",
-				"status":"done"
-			}
-		},
-		"isError":false
-	}`), state)
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1", len(events))
-	}
-
-	var got struct {
-		Message struct {
-			Content []struct {
-				Content map[string]any `json:"content"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(events[0].Raw, &got); err != nil {
-		t.Fatalf("decode event: %v", err)
-	}
-	content := got.Message.Content[0].Content
-	if content["childSessionId"] != "child-session" || content["finalText"] != "Mapped the flow." {
-		t.Fatalf("subagent content = %+v", content)
-	}
-}
-
 // Spot-check the wire shape of a translated text_delta to make sure it matches
 // what the browser's reducer expects exactly: it dispatches on
 //
