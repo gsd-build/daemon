@@ -26,39 +26,6 @@ func TestNewWorkerKeyDefaultsProviderAndSortsSkills(t *testing.T) {
 	}
 }
 
-func TestWorkerKeyIncludesBrowserGrant(t *testing.T) {
-	base := Options{
-		BinaryPath:       "/bin/pi",
-		CWD:              "/repo",
-		Model:            "claude-sonnet-4-6",
-		ResumeSession:    "/tmp/session.jsonl",
-		ExtensionPath:    "/ext/index.ts",
-		Provider:         "claude-cli",
-		BrowserGrantID:   "grant-1",
-		BrowserID:        "browser-1",
-		BrowserSessionID: "session-1",
-	}
-	a := NewWorkerKey(base)
-
-	cases := []struct {
-		name string
-		edit func(*Options)
-	}{
-		{name: "grant", edit: func(opts *Options) { opts.BrowserGrantID = "grant-2" }},
-		{name: "browser", edit: func(opts *Options) { opts.BrowserID = "browser-2" }},
-		{name: "session", edit: func(opts *Options) { opts.BrowserSessionID = "session-2" }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			other := base
-			tc.edit(&other)
-			if a == NewWorkerKey(other) {
-				t.Fatalf("worker key ignored browser %s", tc.name)
-			}
-		})
-	}
-}
-
 func TestWorkerKeyIncludesAgentTools(t *testing.T) {
 	base := Options{
 		BinaryPath:       "/bin/pi",

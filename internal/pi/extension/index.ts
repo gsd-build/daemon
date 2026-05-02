@@ -40,12 +40,6 @@ import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
 import {
-  browserGrantFromEnv,
-  browserToolDefinition,
-  registerBrowserExtension,
-  type BrowserGrant,
-} from "./browser-extension.js";
-import {
   isMinimalToolProfile,
   toolProfile,
 } from "./tool-policy.js";
@@ -97,24 +91,16 @@ function installClaudeSdkPipeGuard() {
 
 installClaudeSdkPipeGuard();
 
-export function buildClaudeCliBrowserTools(context: { browserGrant?: BrowserGrant }) {
-  return [browserToolDefinition()];
-}
-
-function piToolName(toolDef: PiTool | ReturnType<typeof browserToolDefinition>) {
+function piToolName(toolDef: PiTool) {
   return typeof toolDef.name === "string" ? toolDef.name : undefined;
 }
 
-export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserGrant?: BrowserGrant) {
+export function mergeClaudeCliTools(contextTools: PiTool[] | undefined) {
   if (isMinimalToolProfile()) return [];
   const merged: PiTool[] = [];
   const seenNames = new Set<string>();
-  const browserTools = buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[];
-  const visibleContextTools = ((contextTools ?? []) as PiTool[]).filter(
-    (toolDef) => browserGrant || piToolName(toolDef) !== "gsd_browser",
-  );
 
-  for (const toolDef of [...visibleContextTools, ...browserTools]) {
+  for (const toolDef of (contextTools ?? []) as PiTool[]) {
     const name = piToolName(toolDef);
     if (name) {
       if (seenNames.has(name)) continue;
@@ -235,7 +221,6 @@ function warmClaudeOptionsKey(model: Model<any>, context: Context) {
     model: model.id,
     systemPrompt: context.systemPrompt ?? "",
     tools,
-    browserGrant: browserGrantFromEnv() ?? null,
   });
 }
 
@@ -526,8 +511,7 @@ function streamClaudeSdk(
       sdkStderrTail = `${sdkStderrTail}${String(chunk)}`.slice(-4_000);
     };
 
-    const browserGrant = browserGrantFromEnv();
-    const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
+    const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined);
     const sdkTools = piTools.map((t) => piToolToSdkTool(t));
     emitProviderContextDiagnostics("claude-cli", model, context, piTools as any[]);
 
@@ -768,8 +752,7 @@ function streamWarmClaudeSdk(
   };
   stream.push({ type: "start", partial: output });
 
-  const browserGrant = browserGrantFromEnv();
-  const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined, browserGrant);
+  const piTools = mergeClaudeCliTools(context.tools as PiTool[] | undefined);
   const sdkTools = piTools.map((t) => piToolToSdkTool(t));
   emitProviderContextDiagnostics("claude-cli", model, context, piTools as any[]);
   const allowedTools = sdkTools.map((t: any) => `${MCP_PREFIX}${(t as any).name}`);
@@ -864,8 +847,6 @@ export default function (pi: ExtensionAPI) {
   const registeredTools: ToolRegistrationDiagnostic[] = [];
   if (!isMinimalToolProfile()) {
     registerAskHumanTool(pi, registeredTools);
-    registerBrowserExtension(pi);
-    registeredTools.push(describeRegisteredTool("browser", browserToolDefinition()));
     registerTrackedTool(pi, registeredTools, "human", askUserQuestionsTool as any);
     for (const backgroundTool of backgroundTools) {
       registerTrackedTool(pi, registeredTools, "shell", backgroundTool as any);

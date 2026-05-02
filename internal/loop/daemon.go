@@ -19,7 +19,6 @@ import (
 
 	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/api"
-	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/fs"
 	"github.com/gsd-build/daemon/internal/pi"
@@ -68,8 +67,6 @@ type Daemon struct {
 	previewHTTP          *preview.HTTPHandler
 	previewWS            *preview.WebSocketBridge
 	previewWork          chan struct{}
-	browserManager       *browser.Manager
-	browserRPCSocket     string
 	agentTouchedFiles    agentTouchedFileStore
 	runCtxMu             sync.RWMutex
 	runCtx               context.Context
@@ -471,7 +468,6 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		}
 	}
 	sockPath := filepath.Join(homeDir, ".gsd-cloud", "daemon.sock")
-	browserRPCSocket := filepath.Join(homeDir, ".gsd-cloud", "browser-rpc.sock")
 
 	manager := session.NewManager(session.ManagerOptions{
 		PiBinaryPath:     piBinaryPath,
@@ -484,14 +480,6 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		AgentTools:       agentControl,
 	})
 	previewRegistry := preview.NewRegistry()
-	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
-	if absDir, err := filepath.Abs(browserStateDir); err == nil {
-		browserStateDir = absDir
-	}
-	browserPath := os.Getenv("GSD_BROWSER_PATH")
-	if browserPath == "" {
-		browserPath = "gsd-browser"
-	}
 
 	d := &Daemon{
 		cfg:                  cfg,
@@ -511,11 +499,6 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 		previewWS:            preview.NewWebSocketBridge(previewRegistry, client),
 		previewWork:          make(chan struct{}, preview.DefaultMaxActiveStreams),
 		sockPath:             sockPath,
-		browserRPCSocket:     browserRPCSocket,
-		browserManager: browser.NewManager(browser.ManagerOptions{
-			Service: browser.LocalService{BinaryPath: browserPath, StateDir: browserStateDir},
-			Sender:  client,
-		}),
 	}
 
 	return d, nil
@@ -677,12 +660,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 			slog.Warn("socket API failed", "error", err)
 		}
 	}()
-	go func() {
-		if err := d.runBrowserRPC(ctx); err != nil {
-			slog.Warn("browser RPC socket failed", "error", err)
-		}
-	}()
-
 	go d.runTokenRefreshCheck(ctx)
 	go d.runAgentTouchedFileSweep(ctx)
 	go d.runHeartbeat(ctx)
@@ -767,31 +744,6 @@ func (d *Daemon) handleMessage(env *protocol.Envelope) error {
 		return d.handleCompactRequest(msg)
 	case *protocol.ContextStatsRequest:
 		return d.handleContextStatsRequest(msg)
-	case *protocol.BrowserSessionOpen:
-		return d.browserManager.Open(d.runtimeContext(), msg)
-	case *protocol.BrowserSessionClose:
-		return d.browserManager.Close(d.runtimeContext(), msg)
-	case *protocol.BrowserControlClaim:
-		return d.browserManager.Claim(d.runtimeContext(), msg)
-	case *protocol.BrowserControlClaimRequest:
-		return d.browserManager.Claim(d.runtimeContext(), &protocol.BrowserControlClaim{
-			Type:      protocol.MsgTypeBrowserControlClaim,
-			BrowserID: msg.BrowserID,
-			SessionID: msg.SessionID,
-			ChannelID: msg.ChannelID,
-			Owner:     msg.Owner,
-			Reason:    msg.ClaimID,
-		})
-	case *protocol.BrowserControlRelease:
-		return d.browserManager.Release(d.runtimeContext(), msg)
-	case *protocol.BrowserClaimAndInput:
-		return d.browserManager.ClaimAndInput(d.runtimeContext(), msg)
-	case *protocol.BrowserUserInput:
-		return d.browserManager.UserInput(d.runtimeContext(), msg)
-	case *protocol.BrowserToolCall:
-		return d.browserManager.Tool(d.runtimeContext(), msg)
-	case *protocol.BrowserSensitiveActionResponse:
-		return d.browserManager.SensitiveActionResponse(d.runtimeContext(), msg)
 	case *protocol.PreviewOpen:
 		return d.handlePreviewOpen(msg)
 	case *protocol.PreviewClose:
@@ -947,19 +899,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 		slog.Info("duplicate task ignored", "session", msg.SessionID, "taskId", msg.TaskID)
 		return nil
 	}
-	browserGrantID := ""
-	browserID := ""
-	browserGrant := msg.BrowserGrant
-	runtime := browser.ProbeRuntime(ctx, os.Getenv("GSD_BROWSER_PATH"))
-	if d.browserManager != nil {
-		if browserGrant, ok := d.browserManager.GrantForTask(msg.TaskID); ok {
-			browserGrantID = browserGrant.GrantID
-			browserID = browserGrant.BrowserID
-		} else if browserGrant, ok := d.browserManager.GrantForSession(msg.SessionID); ok {
-			browserGrantID = browserGrant.GrantID
-			browserID = browserGrant.BrowserID
-		}
-	}
 	if actor == nil {
 		var err error
 		serverURL := ""
@@ -971,28 +910,19 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			authToken = d.cfg.AuthToken
 		}
 		actor, err = d.manager.Spawn(ctx, session.Options{
-			SessionID:        msg.SessionID,
-			CWD:              msg.CWD,
-			Model:            msg.Model,
-			Provider:         msg.Provider,
-			Effort:           msg.Effort,
-			PermissionMode:   msg.PermissionMode,
-			ResumeSession:    msg.ClaudeSessionID,
-			PiBinaryPath:     d.piBinaryPath,
-			PiExtensionPath:  d.piExtensionPath,
-			ServerURL:        serverURL,
-			MachineID:        machineID,
-			AuthToken:        authToken,
-			DaemonSocketPath: d.sockPath,
-			BrowserGrantID:   browserGrantID,
-			BrowserID:        browserID,
-			BrowserGrant:     browserGrant,
-			BrowserRuntime: session.BrowserRuntimeSnapshot{
-				ErrorCode:    runtime.ErrorCode,
-				ErrorMessage: runtime.ErrorMessage,
-				Version:      runtime.Version,
-			},
-			BrowserRPCSocket:  d.browserRPCSocket,
+			SessionID:         msg.SessionID,
+			CWD:               msg.CWD,
+			Model:             msg.Model,
+			Provider:          msg.Provider,
+			Effort:            msg.Effort,
+			PermissionMode:    msg.PermissionMode,
+			ResumeSession:     msg.ClaudeSessionID,
+			PiBinaryPath:      d.piBinaryPath,
+			PiExtensionPath:   d.piExtensionPath,
+			ServerURL:         serverURL,
+			MachineID:         machineID,
+			AuthToken:         authToken,
+			DaemonSocketPath:  d.sockPath,
 			RecordTouchedFile: d.recordAgentTouchedFile,
 		})
 		if err != nil {
@@ -1006,18 +936,11 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 				Error:     err.Error(),
 			})
 		}
-	} else {
-		actor.SetBrowserContext(browserGrantID, browserID)
-		actor.SetBrowserGrant(browserGrant, session.BrowserRuntimeSnapshot{
-			ErrorCode:    runtime.ErrorCode,
-			ErrorMessage: runtime.ErrorMessage,
-			Version:      runtime.Version,
-		}, d.browserRPCSocket)
 	}
 
 	// Task execution errors (e.g. claude binary not found, executor not ready)
 	// must NOT propagate up — that would kill the relay connection and take the
-	// entire daemon offline. Report the failure to the browser and keep running.
+	// entire daemon offline. Report the failure to the relay and keep running.
 	if err := actor.SendTask(*msg); err != nil {
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
