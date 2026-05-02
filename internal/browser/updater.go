@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -55,15 +56,16 @@ func (u BrowserUpdater) Run(ctx context.Context, req BrowserUpdateRequest) error
 	if req.Rollback && req.ApprovalToken == "" {
 		return errors.New("rollback approval token is required")
 	}
-	if u.Fetch != nil {
-		bytes, err := u.Fetch(ctx, req.Source)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(bytes)
-		if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimPrefix(req.Digest, "sha256:")) {
-			return errors.New("digest mismatch")
-		}
+	if u.Fetch == nil {
+		return errors.New("fetch is required for digest verification")
+	}
+	bytes, err := u.Fetch(ctx, req.Source)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(bytes)
+	if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimPrefix(req.Digest, "sha256:")) {
+		return errors.New("digest mismatch")
 	}
 	if u.Runner == nil {
 		return nil
@@ -81,17 +83,18 @@ func allowedBrowserReleaseURL(raw string) bool {
 
 func RedactBrowserUpdateLog(value string) string {
 	redacted := value
-	if strings.Contains(redacted, "token=") {
-		redacted = strings.ReplaceAll(redacted, "token=", "token=[redacted]")
-	}
-	if strings.Contains(redacted, "approval_") {
-		redacted = strings.ReplaceAll(redacted, "approval_", "approval_[redacted]_")
-	}
+	redacted = browserUpdateSecretParamPattern.ReplaceAllString(redacted, "${1}=[redacted]")
+	redacted = browserUpdateApprovalPattern.ReplaceAllString(redacted, "approval_[redacted]")
 	if strings.HasPrefix(redacted, "/") {
 		return "[path]"
 	}
 	return redacted
 }
+
+var (
+	browserUpdateSecretParamPattern = regexp.MustCompile(`(?i)\b(token|approvalToken|approval_id|approvalId)=([^\s&]+)`)
+	browserUpdateApprovalPattern    = regexp.MustCompile(`approval_[A-Za-z0-9_-]+`)
+)
 
 func browserDigest(bytes []byte) string {
 	sum := sha256.Sum256(bytes)

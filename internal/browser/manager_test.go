@@ -309,6 +309,72 @@ func TestManagerBlocksSensitiveToolUntilApproval(t *testing.T) {
 	}
 }
 
+func TestManagerDeniesApprovalWithTerminalToolResultAndCleanup(t *testing.T) {
+	service := &fakeService{}
+	sender := &recordingSender{}
+	m := NewManager(ManagerOptions{Service: service, Sender: sender, FrameInterval: time.Hour})
+	openBrowserForTest(t, m, "browser_1")
+
+	_ = m.Tool(context.Background(), &protocol.BrowserToolCall{
+		Type:       protocol.MsgTypeBrowserToolCall,
+		BrowserID:  "browser_1",
+		GrantID:    "grant_1",
+		TaskID:     "task_1",
+		ToolUseID:  "tool_1",
+		Method:     "fill_form",
+		ParamsJSON: json.RawMessage(`{"origin":"https://example.com","value":"secret"}`),
+	})
+
+	var request *protocol.BrowserSensitiveActionRequest
+	for _, msg := range sender.snapshot() {
+		if typed, ok := msg.(*protocol.BrowserSensitiveActionRequest); ok {
+			request = typed
+		}
+	}
+	if request == nil {
+		t.Fatalf("expected sensitive action request, got %#v", sender.snapshot())
+	}
+
+	err := m.SensitiveActionResponse(context.Background(), &protocol.BrowserSensitiveActionResponse{
+		Type:                   protocol.MsgTypeBrowserSensitiveActionResponse,
+		BrowserID:              request.BrowserID,
+		SessionID:              request.SessionID,
+		ChannelID:              request.ChannelID,
+		ApprovalID:             request.ApprovalID,
+		Nonce:                  request.Nonce,
+		ActorUserID:            request.ActorUserID,
+		GrantID:                request.GrantID,
+		ToolUseID:              request.ToolUseID,
+		Method:                 request.Method,
+		Category:               request.Category,
+		Origin:                 request.Origin,
+		ParameterHash:          request.ParameterHash,
+		ExpectedExternalEffect: request.ExpectedExternalEffect,
+		Sensitivity:            request.Sensitivity,
+		ExpiresAt:              request.ExpiresAt,
+		Approved:               false,
+		DeniedReason:           "not safe",
+	})
+	if err == nil {
+		t.Fatal("expected denied approval error")
+	}
+	if !sender.hasType(protocol.MsgTypeBrowserToolResult) {
+		t.Fatalf("expected terminal tool result, got %#v", sender.snapshot())
+	}
+	m.mu.Lock()
+	_, pending := m.pendingApprovals[request.ApprovalID]
+	m.mu.Unlock()
+	if pending {
+		t.Fatal("approval remained pending after denial")
+	}
+	service.mu.Lock()
+	toolCalls := service.toolCalls
+	service.mu.Unlock()
+	if toolCalls != 0 {
+		t.Fatalf("denied approval reached service")
+	}
+}
+
 func TestManagerSendsToolLifecycleEventsAndResultContext(t *testing.T) {
 	service := &fakeService{}
 	sender := &recordingSender{}

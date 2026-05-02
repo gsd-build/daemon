@@ -2,7 +2,9 @@ package browser
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -726,8 +728,8 @@ func (m *Manager) ToolResult(ctx context.Context, msg *protocol.BrowserToolCall)
 		state.owner = OwnerApproval
 		state.controlVersion++
 		nextVersion := state.controlVersion
-		approvalID := fmt.Sprintf("approval_%d", time.Now().UnixNano())
-		nonce := fmt.Sprintf("nonce_%d", time.Now().UnixNano())
+		approvalID := "approval_" + secureBrowserToken()
+		nonce := "nonce_" + secureBrowserToken()
 		expiresAt := time.Now().Add(2 * time.Minute)
 		parameterHash := browserParameterHash(msg.ParamsJSON)
 		m.pendingApprovals[approvalID] = &pendingApproval{
@@ -820,6 +822,7 @@ func (m *Manager) SensitiveActionResponse(ctx context.Context, msg *protocol.Bro
 	}
 	if time.Now().After(pending.ExpiresAt) {
 		pending.Consumed = true
+		delete(m.pendingApprovals, msg.ApprovalID)
 		m.restoreApprovalOwnerLocked(pending)
 		m.mu.Unlock()
 		return fmt.Errorf("browser approval expired")
@@ -829,13 +832,21 @@ func (m *Manager) SensitiveActionResponse(ctx context.Context, msg *protocol.Bro
 		return err
 	}
 	pending.Consumed = true
+	delete(m.pendingApprovals, msg.ApprovalID)
 	m.restoreApprovalOwnerLocked(pending)
 	toolCall := pending.ToolCall
 	req := pending.Request
 	m.mu.Unlock()
 
 	if !msg.Approved {
+		result := ToolResult{
+			OK:        false,
+			Error:     "browser action denied",
+			ErrorCode: "browser_action_denied",
+		}
 		_ = m.sendBrowserEvidence(ctx, req, toolCall.BrowserID, "denied", "approval", msg.DeniedReason)
+		_ = m.sendToolUpdated(ctx, &toolCall, req, "denied", browserToolSummary(toolCall.Method, classifyBrowserTool(toolCall.Method, toolCall.ParamsJSON)), nil)
+		_ = m.sendToolResult(ctx, &toolCall, req, result)
 		return fmt.Errorf("browser action denied")
 	}
 
@@ -882,6 +893,14 @@ func validateApprovalResponse(pending *pendingApproval, msg *protocol.BrowserSen
 func browserParameterHash(params json.RawMessage) string {
 	sum := sha256.Sum256(params)
 	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func secureBrowserToken() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(bytes[:])
 }
 
 func browserOrigin(params json.RawMessage) string {

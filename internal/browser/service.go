@@ -40,6 +40,9 @@ func (s LocalService) binaryPath() string {
 }
 
 func (s LocalService) Start(ctx context.Context, req OpenRequest) error {
+	if req.Mode == "identity" && req.IdentityKey == "" {
+		return fmt.Errorf("identity browser mode requires an identity key")
+	}
 	args := []string{"--session", req.GrantID}
 	if req.Mode == "identity" && req.IdentityKey != "" {
 		args = append(args, "--identity-scope", req.IdentityScope, "--identity-key", req.IdentityKey)
@@ -104,6 +107,8 @@ func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error
 		EncodedBytes       int     `json:"encodedBytes"`
 		Quality            int     `json:"quality"`
 		CapturePixelRatio  float64 `json:"capturePixelRatio"`
+		LatencyMS          int64   `json:"latencyMs"`
+		LatestAcceptedSeq  int64   `json:"latestAcceptedFrameSeq"`
 		CapturedAtMs       int64   `json:"capturedAtMs"`
 		URL                string  `json:"url"`
 		Title              string  `json:"title"`
@@ -112,26 +117,28 @@ func (s LocalService) Frame(ctx context.Context, browserID string) (Frame, error
 		return Frame{}, err
 	}
 	return Frame{
-		Sequence:           out.Sequence,
-		ContentType:        out.ContentType,
-		DataBase64:         out.DataBase64,
-		Width:              out.Width,
-		Height:             out.Height,
-		ViewportWidth:      out.ViewportWidth,
-		ViewportHeight:     out.ViewportHeight,
-		ViewportCSSWidth:   out.ViewportCSSWidth,
-		ViewportCSSHeight:  out.ViewportCSSHeight,
-		CapturePixelWidth:  out.CapturePixelWidth,
-		CapturePixelHeight: out.CapturePixelHeight,
-		DevicePixelRatio:   out.DevicePixelRatio,
-		CaptureScaleX:      out.CaptureScaleX,
-		CaptureScaleY:      out.CaptureScaleY,
-		EncodedBytes:       out.EncodedBytes,
-		Quality:            out.Quality,
-		CapturePixelRatio:  out.CapturePixelRatio,
-		CapturedAt:         time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano),
-		URL:                out.URL,
-		Title:              out.Title,
+		Sequence:               out.Sequence,
+		ContentType:            out.ContentType,
+		DataBase64:             out.DataBase64,
+		Width:                  out.Width,
+		Height:                 out.Height,
+		ViewportWidth:          out.ViewportWidth,
+		ViewportHeight:         out.ViewportHeight,
+		ViewportCSSWidth:       out.ViewportCSSWidth,
+		ViewportCSSHeight:      out.ViewportCSSHeight,
+		CapturePixelWidth:      out.CapturePixelWidth,
+		CapturePixelHeight:     out.CapturePixelHeight,
+		DevicePixelRatio:       out.DevicePixelRatio,
+		CaptureScaleX:          out.CaptureScaleX,
+		CaptureScaleY:          out.CaptureScaleY,
+		EncodedBytes:           out.EncodedBytes,
+		Quality:                out.Quality,
+		CapturePixelRatio:      out.CapturePixelRatio,
+		LatencyMS:              out.LatencyMS,
+		LatestAcceptedFrameSeq: out.LatestAcceptedSeq,
+		CapturedAt:             time.UnixMilli(out.CapturedAtMs).UTC().Format(time.RFC3339Nano),
+		URL:                    out.URL,
+		Title:                  out.Title,
 	}, nil
 }
 

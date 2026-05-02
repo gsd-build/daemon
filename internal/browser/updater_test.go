@@ -75,6 +75,26 @@ func TestBrowserUpdaterRejectsDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestBrowserUpdaterRequiresFetcherForDigestVerification(t *testing.T) {
+	updater := BrowserUpdater{Runner: &fakeUpdateRunner{}}
+	err := updater.Run(context.Background(), BrowserUpdateRequest{
+		Version:     "v0.1.22",
+		Source:      "https://github.com/gsd-build/browser/releases/download/v0.1.22/gsd-browser",
+		Digest:      browserDigest([]byte("binary")),
+		SignatureOK: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "fetch is required for digest verification") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRedactBrowserUpdateLogMasksWholeSecrets(t *testing.T) {
+	got := RedactBrowserUpdateLog("https://example.com/update?token=abc123&approvalToken=approval_abcdef123456")
+	if strings.Contains(got, "abc123") || strings.Contains(got, "abcdef123456") {
+		t.Fatalf("redacted log leaked secret: %s", got)
+	}
+}
+
 func TestBrowserUpdaterRejectsUnapprovedDowngrade(t *testing.T) {
 	err := (BrowserUpdater{}).Run(context.Background(), BrowserUpdateRequest{
 		Version:        "v0.1.20",

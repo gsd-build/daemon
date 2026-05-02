@@ -45,10 +45,24 @@ func validateBrowserToolPolicy(method string, params json.RawMessage) error {
 		AllowlistedPath string `json:"allowlistedPath"`
 	}
 	_ = json.Unmarshal(params, &payload)
-	if payload.FileToken != "" || payload.SelectedToken != "" || payload.AllowlistedPath != "" {
+	if validLexSelectedFileToken(payload.FileToken) || validLexSelectedFileToken(payload.SelectedToken) {
 		return nil
 	}
 	return ErrBrowserPolicy("upload_file requires a Lex-selected file token")
+}
+
+func validLexSelectedFileToken(token string) bool {
+	const prefix = "lex_file_"
+	if len(token) < len(prefix)+16 || token[:len(prefix)] != prefix {
+		return false
+	}
+	for _, r := range token[len(prefix):] {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 type ErrBrowserPolicy string

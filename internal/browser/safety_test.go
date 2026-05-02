@@ -28,8 +28,14 @@ func TestUploadRequiresLexSelectedFileToken(t *testing.T) {
 	if err := validateBrowserToolPolicy("upload_file", json.RawMessage(`{"path":"/tmp/secret.txt"}`)); err == nil {
 		t.Fatal("expected upload without file token to fail")
 	}
-	if err := validateBrowserToolPolicy("upload_file", json.RawMessage(`{"fileToken":"lex_file_1"}`)); err != nil {
+	if err := validateBrowserToolPolicy("upload_file", json.RawMessage(`{"fileToken":"lex_file_0123456789abcdef"}`)); err != nil {
 		t.Fatalf("upload with file token: %v", err)
+	}
+	if err := validateBrowserToolPolicy("upload_file", json.RawMessage(`{"allowlistedPath":"/tmp/secret.txt"}`)); err == nil {
+		t.Fatal("expected upload with path-only provenance to fail")
+	}
+	if err := validateBrowserToolPolicy("upload_file", json.RawMessage(`{"selectedFileToken":"agent_forged_0123456789abcdef"}`)); err == nil {
+		t.Fatal("expected upload with forged file token to fail")
 	}
 }
 
