@@ -19,7 +19,6 @@ import (
 	"github.com/coder/websocket"
 	"github.com/creack/pty"
 	"github.com/gsd-build/daemon/internal/agentterminal"
-	"github.com/gsd-build/daemon/internal/browser"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/preview"
@@ -568,112 +567,6 @@ func TestHandleTaskForcePiSetsEngine(t *testing.T) {
 	}
 }
 
-func TestHandleTaskUsesSessionScopedBrowserGrant(t *testing.T) {
-	browserManager := browser.NewManager(browser.ManagerOptions{
-		Service:       loopBrowserService{},
-		Sender:        &loopBrowserSender{},
-		FrameInterval: time.Hour,
-	})
-	if err := browserManager.Open(context.Background(), &protocol.BrowserSessionOpen{
-		Type:      protocol.MsgTypeBrowserSessionOpen,
-		RequestID: "req_1",
-		GrantID:   "grant_session",
-		SessionID: "sess-browser",
-		ChannelID: "ch-browser",
-		ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
-	}); err != nil {
-		t.Fatalf("open browser grant: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = browserManager.Close(context.Background(), &protocol.BrowserSessionClose{
-			Type:      protocol.MsgTypeBrowserSessionClose,
-			GrantID:   "grant_session",
-			BrowserID: "grant_session",
-			SessionID: "sess-browser",
-			ChannelID: "ch-browser",
-			Reason:    "test",
-		})
-	})
-
-	var captured session.Options
-	d := &Daemon{
-		cfg:            &config.Config{MachineID: "m1", RelayURL: "wss://localhost/ws"},
-		version:        "test",
-		client:         relayClientStub(false),
-		browserManager: browserManager,
-		manager: &mockManager{
-			spawnFn: func(ctx context.Context, opts session.Options) (*session.Actor, error) {
-				captured = opts
-				actor, err := session.NewActor(session.Options{
-					SessionID: opts.SessionID,
-					CWD:       opts.CWD,
-					Relay:     newLoopFakeRelay(),
-				})
-				if err != nil {
-					return nil, err
-				}
-				t.Cleanup(func() { _ = actor.Stop() })
-				return actor, nil
-			},
-		},
-	}
-
-	if err := d.handleTask(&protocol.Task{
-		TaskID:    "task-after-browser-open",
-		SessionID: "sess-browser",
-		ChannelID: "ch-browser",
-		CWD:       t.TempDir(),
-		Prompt:    "use browser",
-	}); err != nil {
-		t.Fatalf("handleTask: %v", err)
-	}
-	if captured.BrowserGrantID != "grant_session" {
-		t.Fatalf("BrowserGrantID = %q, want grant_session", captured.BrowserGrantID)
-	}
-	if captured.BrowserID != "grant_session" {
-		t.Fatalf("BrowserID = %q, want grant_session", captured.BrowserID)
-	}
-}
-
-func TestBrowserRPCEnsuresSessionAndRunsTool(t *testing.T) {
-	browserManager := browser.NewManager(browser.ManagerOptions{
-		Service:       loopBrowserService{},
-		Sender:        &loopBrowserSender{},
-		FrameInterval: time.Hour,
-	})
-	d := &Daemon{browserManager: browserManager}
-
-	resp := d.handleBrowserRPC(context.Background(), browserRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "browser_tool",
-		Params: browser.ToolRPCRequest{
-			GrantID:   "grant_rpc",
-			SessionID: "sess-rpc",
-			TaskID:    "task-rpc",
-			ChannelID: "ch-rpc",
-			ProjectID: "project-rpc",
-			MachineID: "machine-rpc",
-			ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339Nano),
-			ToolUseID: "tool-rpc",
-			Method:    "snapshot",
-		},
-	})
-	if resp.Error != nil {
-		t.Fatalf("rpc error = %+v", resp.Error)
-	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok || result["ok"] != true {
-		t.Fatalf("rpc result = %#v", resp.Result)
-	}
-	grant, ok := browserManager.GrantForTask("task-rpc")
-	if !ok {
-		t.Fatal("expected lazy browser grant")
-	}
-	if grant.BrowserID != "grant_rpc" || grant.ChannelID != "ch-rpc" {
-		t.Fatalf("grant = %+v", grant)
-	}
-}
-
 func TestDaemonHandlesPreviewOpen(t *testing.T) {
 	daemon, relayClient := newTestDaemonWithPreview(t)
 	err := daemon.handleMessage(&protocol.Envelope{
@@ -1080,51 +973,6 @@ func (m *mockManager) StopAll() {
 }
 func (m *mockManager) SessionInfos() []sockapi.SessionInfo  { return nil }
 func (m *mockManager) WorkerSnapshots() []pi.WorkerSnapshot { return nil }
-
-type loopBrowserService struct{}
-
-func (loopBrowserService) Open(ctx context.Context, req browser.OpenRequest) (browser.OpenResult, error) {
-	return browser.OpenResult{BrowserID: req.GrantID, URL: "about:blank", Title: "Blank"}, nil
-}
-
-func (loopBrowserService) Close(ctx context.Context, browserID string) error {
-	return nil
-}
-
-func (loopBrowserService) Frame(ctx context.Context, browserID string) (browser.Frame, error) {
-	return browser.Frame{
-		Sequence:    1,
-		ContentType: "image/jpeg",
-		DataBase64:  "aGVsbG8=",
-		Width:       1280,
-		Height:      720,
-		CapturedAt:  time.Now().UTC().Format(time.RFC3339Nano),
-		URL:         "about:blank",
-		Title:       "Blank",
-	}, nil
-}
-
-func (loopBrowserService) Refs(ctx context.Context, browserID string) (browser.Refs, error) {
-	return browser.Refs{
-		Version:    1,
-		Refs:       nil,
-		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}, nil
-}
-
-func (loopBrowserService) Tool(ctx context.Context, browserID string, method string, params []byte) (browser.ToolResult, error) {
-	return browser.ToolResult{OK: true, ResultJSON: []byte(`{"ok":true}`)}, nil
-}
-
-func (loopBrowserService) UserInput(ctx context.Context, browserID string, input *protocol.BrowserUserInput) error {
-	return nil
-}
-
-type loopBrowserSender struct{}
-
-func (loopBrowserSender) Send(ctx context.Context, msg any) error {
-	return nil
-}
 
 func relayClientStub(connected bool) *relay.Client {
 	c := relay.NewClient(relay.Config{

@@ -34,9 +34,6 @@ var piTUIFlags struct {
 	skillPaths             []string
 	disableSkills          bool
 	disableAgentTools      bool
-	browserGrantID         string
-	browserID              string
-	browserSessionID       string
 	taskID                 string
 	channelID              string
 	projectID              string
@@ -69,9 +66,6 @@ func init() {
 	piTUICmd.Flags().StringArrayVar(&piTUIFlags.skillPaths, "skill", nil, "Skill file or directory passed to Pi")
 	piTUICmd.Flags().BoolVar(&piTUIFlags.disableSkills, "no-skills", false, "Disable skill discovery and explicit skills")
 	piTUICmd.Flags().BoolVar(&piTUIFlags.disableAgentTools, "no-agent-tools", false, "Disable local agent-terminal tool backend")
-	piTUICmd.Flags().StringVar(&piTUIFlags.browserGrantID, "browser-grant-id", os.Getenv("GSD_BROWSER_GRANT_ID"), "Task browser grant id")
-	piTUICmd.Flags().StringVar(&piTUIFlags.browserID, "browser-id", os.Getenv("GSD_BROWSER_ID"), "Task browser id")
-	piTUICmd.Flags().StringVar(&piTUIFlags.browserSessionID, "browser-session-id", os.Getenv("GSD_BROWSER_SESSION_ID"), "Task browser session id")
 	piTUICmd.Flags().StringVar(&piTUIFlags.taskID, "task-id", "local-tui-task", "Task id used for tool scope")
 	piTUICmd.Flags().StringVar(&piTUIFlags.channelID, "channel-id", "local-tui-channel", "Channel id used for tool scope")
 	piTUICmd.Flags().StringVar(&piTUIFlags.projectID, "project-id", "local-tui-project", "Project id used for tool scope")
@@ -137,9 +131,6 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 		Provider:           strings.TrimSpace(piTUIFlags.provider),
 		SkillPaths:         piTUIFlags.skillPaths,
 		DisableSkills:      piTUIFlags.disableSkills,
-		BrowserGrantID:     strings.TrimSpace(piTUIFlags.browserGrantID),
-		BrowserID:          strings.TrimSpace(piTUIFlags.browserID),
-		BrowserSessionID:   strings.TrimSpace(piTUIFlags.browserSessionID),
 		WarmClaudeSDK:      piTUIWarmClaudeSDK(),
 		DaemonSocketPath:   filepath.Join(homeDir, ".gsd-cloud", "daemon.sock"),
 	}

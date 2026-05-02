@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -59,34 +58,24 @@ func piExitError(code int, stderr string) error {
 
 // Options configures a pi process.
 type Options struct {
-	BinaryPath                 string // pi binary; defaults to "pi"
-	CWD                        string
-	Model                      string // forwarded as --model
-	ResumeSession              string // forwarded as --session <path>; empty = --no-session
-	TaskID                     string
-	SessionID                  string
-	ChannelID                  string
-	Prompt                     string
-	CustomInstructions         string
-	ExtensionPath              string // forwarded as -e <path>
-	Provider                   string // forwarded as --provider <name>
-	SkillPaths                 []string
-	DisableSkills              bool
-	BrowserGrantID             string
-	BrowserID                  string
-	BrowserSessionID           string
-	BrowserProjectID           string
-	BrowserMachineID           string
-	BrowserGrantExpiresAt      string
-	BrowserRPCSocket           string
-	BrowserRuntimeErrorCode    string
-	BrowserRuntimeErrorMessage string
-	BrowserRuntimeVersion      string
-	WarmClaudeSDK              bool
-	DaemonSocketPath           string
-	AgentToolsSocket           string
-	AgentToolsToken            string
-	ToolProfile                string
+	BinaryPath         string // pi binary; defaults to "pi"
+	CWD                string
+	Model              string // forwarded as --model
+	ResumeSession      string // forwarded as --session <path>; empty = --no-session
+	TaskID             string
+	SessionID          string
+	ChannelID          string
+	Prompt             string
+	CustomInstructions string
+	ExtensionPath      string // forwarded as -e <path>
+	Provider           string // forwarded as --provider <name>
+	SkillPaths         []string
+	DisableSkills      bool
+	WarmClaudeSDK      bool
+	DaemonSocketPath   string
+	AgentToolsSocket   string
+	AgentToolsToken    string
+	ToolProfile        string
 }
 
 // ProviderOrDefault returns the Pi provider name to use for a task.
@@ -226,13 +215,10 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 	allowedBase := ensureUserIdentityEnv(allowlistedBaseEnv(base, provider))
 	return daemonSocketEnv(
 		warmClaudeSDKEnv(
-			browserEnv(
-				agentToolsEnv(
-					toolProfileEnv(
-						providerEnv(ctx, allowedBase, provider),
-						opts.ToolProfile,
-					),
-					opts,
+			agentToolsEnv(
+				toolProfileEnv(
+					providerEnv(ctx, allowedBase, provider),
+					opts.ToolProfile,
 				),
 				opts,
 			),
@@ -446,7 +432,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"runtimePromptLen", len(runtimeIdentityPrompt(e.opts, time.Now())),
 		"toolProfile", strings.TrimSpace(e.opts.ToolProfile),
 		"agentTools", e.opts.AgentToolsSocket != "",
-		"browserGrant", e.opts.BrowserGrantID != "",
 	)
 	logScaffoldDiagnostics("daemon", map[string]any{
 		"taskId":                  e.opts.TaskID,
@@ -461,7 +446,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"disableSkills":           e.opts.DisableSkills,
 		"toolProfile":             strings.TrimSpace(e.opts.ToolProfile),
 		"agentTools":              e.opts.AgentToolsSocket != "",
-		"browserGrant":            e.opts.BrowserGrantID != "",
 	})
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
@@ -701,53 +685,6 @@ func serviceManagerEnv(ctx context.Context, key string) string {
 	return ""
 }
 
-func browserEnv(base []string, opts Options) []string {
-	env := make([]string, 0, len(base)+10)
-	for _, entry := range base {
-		if strings.HasPrefix(entry, "GSD_BROWSER_") {
-			continue
-		}
-		if strings.HasPrefix(entry, "GSD_DAEMON_BROWSER_RPC_SOCKET=") {
-			continue
-		}
-		env = append(env, entry)
-	}
-	if opts.BrowserGrantID != "" && opts.BrowserSessionID != "" {
-		env = append(env,
-			"GSD_BROWSER_GRANT_ID="+opts.BrowserGrantID,
-			"GSD_BROWSER_SESSION_ID="+opts.BrowserSessionID,
-		)
-	}
-	if opts.BrowserID != "" {
-		env = append(env, "GSD_BROWSER_ID="+opts.BrowserID)
-	}
-	if opts.BrowserProjectID != "" {
-		env = append(env, "GSD_PROJECT_ID="+opts.BrowserProjectID)
-	}
-	if opts.BrowserMachineID != "" {
-		env = append(env, "GSD_MACHINE_ID="+opts.BrowserMachineID)
-	}
-	if opts.BrowserGrantExpiresAt != "" {
-		env = append(env, "GSD_BROWSER_GRANT_EXPIRES_AT="+opts.BrowserGrantExpiresAt)
-	}
-	if opts.BrowserRPCSocket != "" {
-		env = append(env, "GSD_DAEMON_BROWSER_RPC_SOCKET="+opts.BrowserRPCSocket)
-	}
-	if opts.BrowserRuntimeErrorCode != "" {
-		env = append(env, "GSD_BROWSER_RUNTIME_ERROR_CODE="+opts.BrowserRuntimeErrorCode)
-	}
-	if opts.BrowserRuntimeErrorMessage != "" {
-		env = append(env, "GSD_BROWSER_RUNTIME_ERROR_MESSAGE="+opts.BrowserRuntimeErrorMessage)
-	}
-	if opts.BrowserRuntimeVersion != "" {
-		env = append(env, "GSD_BROWSER_RUNTIME_VERSION="+opts.BrowserRuntimeVersion)
-	}
-	if opts.ExtensionPath != "" {
-		env = append(env, "GSD_BROWSER_SKILL_DIR="+filepath.Join(filepath.Dir(opts.ExtensionPath), "gsd-browser-skill"))
-	}
-	return env
-}
-
 func terminateProcessGroupAndWait(cmd *exec.Cmd, pid int, stdin io.Closer, timeout time.Duration) error {
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
 	if stdin != nil {
@@ -772,7 +709,7 @@ func terminateProcessGroupAndWait(cmd *exec.Cmd, pid int, stdin io.Closer, timeo
 }
 
 // streamPiEvents reads pi NDJSON from r, translates each event into the
-// claude stream-json shape the GSD browser dispatches on, calls onEvent for
+// claude stream-json shape the relay dispatches on, calls onEvent for
 // each translated event, and on `agent_end` synthesizes a stream-json
 // `result` so the actor's handleResult path can run. Signals agentEndCh
 // (non-blocking) when agent_end fires so the caller can SIGTERM pi.

@@ -55,11 +55,6 @@ type Options struct {
 	AuthToken         string
 	DaemonSocketPath  string
 	Uploader          ImageUploader // nil = image upload disabled
-	BrowserGrantID    string
-	BrowserID         string
-	BrowserGrant      *protocol.BrowserGrantContext
-	BrowserRuntime    BrowserRuntimeSnapshot
-	BrowserRPCSocket  string
 	RecordTouchedFile func(channelID string, cwd string, path string)
 	OnTaskIdle        func()
 	ProjectID         string
@@ -159,11 +154,6 @@ type taskContext struct {
 	ContextRefs        []protocol.ContextRef
 	CustomInstructions string
 	DisableSkills      bool
-	BrowserGrantID     string
-	BrowserID          string
-	BrowserGrant       *protocol.BrowserGrantContext
-	BrowserRuntime     BrowserRuntimeSnapshot
-	BrowserRPCSocket   string
 }
 
 func inferToolProfile(prompt string) string {
@@ -346,31 +336,6 @@ func (a *Actor) AllowedTools() []string {
 	out := make([]string, len(a.allowedTools))
 	copy(out, a.allowedTools)
 	return out
-}
-
-// SetBrowserContext sets the task-scoped browser grant used by the next task.
-func (a *Actor) SetBrowserContext(grantID string, browserID string) {
-	a.taskMu.Lock()
-	defer a.taskMu.Unlock()
-	a.opts.BrowserGrantID = grantID
-	a.opts.BrowserID = browserID
-}
-
-type BrowserRuntimeSnapshot struct {
-	ErrorCode    string
-	ErrorMessage string
-	Version      string
-}
-
-func (a *Actor) SetBrowserGrant(grant *protocol.BrowserGrantContext, runtime BrowserRuntimeSnapshot, rpcSocket string) {
-	a.taskMu.Lock()
-	defer a.taskMu.Unlock()
-	a.opts.BrowserGrant = grant
-	a.opts.BrowserRuntime = runtime
-	a.opts.BrowserRPCSocket = rpcSocket
-	if grant != nil {
-		a.opts.BrowserGrantID = grant.GrantID
-	}
 }
 
 func (a *Actor) SetProvider(provider string) {
@@ -666,11 +631,6 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		ContextRefs:        task.ContextRefs,
 		CustomInstructions: task.CustomInstructions,
 		DisableSkills:      task.DisableSkills,
-		BrowserGrantID:     a.opts.BrowserGrantID,
-		BrowserID:          a.opts.BrowserID,
-		BrowserGrant:       a.opts.BrowserGrant,
-		BrowserRuntime:     a.opts.BrowserRuntime,
-		BrowserRPCSocket:   a.opts.BrowserRPCSocket,
 	}
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
@@ -934,36 +894,22 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	opts := pi.Options{
-		BinaryPath:                 binaryPath,
-		CWD:                        a.opts.CWD,
-		Model:                      model,
-		ResumeSession:              sessionFile,
-		TaskID:                     tc.TaskID,
-		SessionID:                  a.opts.SessionID,
-		ChannelID:                  tc.ChannelID,
-		Prompt:                     prompt,
-		CustomInstructions:         tc.CustomInstructions,
-		ExtensionPath:              a.opts.PiExtensionPath,
-		Provider:                   provider,
-		SkillPaths:                 skillPaths,
-		DisableSkills:              tc.DisableSkills,
-		BrowserGrantID:             tc.BrowserGrantID,
-		BrowserID:                  tc.BrowserID,
-		BrowserSessionID:           a.opts.SessionID,
-		BrowserRPCSocket:           tc.BrowserRPCSocket,
-		BrowserRuntimeErrorCode:    tc.BrowserRuntime.ErrorCode,
-		BrowserRuntimeErrorMessage: tc.BrowserRuntime.ErrorMessage,
-		BrowserRuntimeVersion:      tc.BrowserRuntime.Version,
-		WarmClaudeSDK:              a.opts.WarmClaudeSDK,
-		DaemonSocketPath:           a.opts.DaemonSocketPath,
-		ToolProfile:                inferToolProfile(prompt),
-	}
-	if tc.BrowserGrant != nil {
-		opts.BrowserGrantID = tc.BrowserGrant.GrantID
-		opts.BrowserSessionID = tc.BrowserGrant.SessionID
-		opts.BrowserProjectID = tc.BrowserGrant.ProjectID
-		opts.BrowserMachineID = tc.BrowserGrant.MachineID
-		opts.BrowserGrantExpiresAt = tc.BrowserGrant.ExpiresAt
+		BinaryPath:         binaryPath,
+		CWD:                a.opts.CWD,
+		Model:              model,
+		ResumeSession:      sessionFile,
+		TaskID:             tc.TaskID,
+		SessionID:          a.opts.SessionID,
+		ChannelID:          tc.ChannelID,
+		Prompt:             prompt,
+		CustomInstructions: tc.CustomInstructions,
+		ExtensionPath:      a.opts.PiExtensionPath,
+		Provider:           provider,
+		SkillPaths:         skillPaths,
+		DisableSkills:      tc.DisableSkills,
+		WarmClaudeSDK:      a.opts.WarmClaudeSDK,
+		DaemonSocketPath:   a.opts.DaemonSocketPath,
+		ToolProfile:        inferToolProfile(prompt),
 	}
 	if a.opts.AgentTools != nil {
 		control, err := a.opts.AgentTools.StartTask(taskCtx, agentterminal.TaskScope{

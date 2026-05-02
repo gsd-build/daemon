@@ -19,9 +19,6 @@ type WorkerKey struct {
 	Provider            string
 	SkillPaths          string
 	DisableSkills       bool
-	BrowserGrantID      string
-	BrowserID           string
-	BrowserSessionID    string
 	AgentToolsSocket    string
 	AgentToolsTokenHash string
 }
@@ -51,9 +48,6 @@ func NewWorkerKey(opts Options) WorkerKey {
 		Provider:           ProviderOrDefault(opts.Provider),
 		SkillPaths:         strings.Join(skills, "\x00"),
 		DisableSkills:      opts.DisableSkills,
-		BrowserGrantID:     opts.BrowserGrantID,
-		BrowserID:          opts.BrowserID,
-		BrowserSessionID:   opts.BrowserSessionID,
 	}
 	key.AgentToolsSocket = opts.AgentToolsSocket
 	if opts.AgentToolsToken != "" {
