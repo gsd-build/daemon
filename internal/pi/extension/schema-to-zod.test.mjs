@@ -92,7 +92,7 @@ assert.equal(operationSchema.safeParse({
   items: [{}],
 }).success, true);
 assert.equal(operationSchema.safeParse({
-  type: "create_plan",
+  type: "create_workflow",
   title: "Legacy value",
   items: [{}],
 }).success, false);
