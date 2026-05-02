@@ -38,7 +38,6 @@ func TestPiExtensionPackageIncludesRuntimeImports(t *testing.T) {
 		"ask-user-questions.js",
 		"schema-to-zod.js",
 		"usage-estimator.js",
-		"plan-tools.js",
 		"codex-appserver-provider.ts",
 		"openrouter-provider.ts",
 		"gsd-browser-skill/SKILL.md",

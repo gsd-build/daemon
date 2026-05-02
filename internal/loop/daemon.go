@@ -1005,6 +1005,7 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			SessionID:        msg.SessionID,
 			CWD:              msg.CWD,
 			Model:            msg.Model,
+			Provider:         msg.Provider,
 			Effort:           msg.Effort,
 			PermissionMode:   msg.PermissionMode,
 			ResumeSession:    msg.ClaudeSessionID,

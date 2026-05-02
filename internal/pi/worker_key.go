@@ -22,9 +22,6 @@ type WorkerKey struct {
 	BrowserGrantID      string
 	BrowserID           string
 	BrowserSessionID    string
-	PlanAPIBaseURL      string
-	PlanTokenHash       string
-	PlanExpiresAt       string
 	SubagentTokenHash   string
 	AgentToolsSocket    string
 	AgentToolsTokenHash string
@@ -58,11 +55,6 @@ func NewWorkerKey(opts Options) WorkerKey {
 		BrowserGrantID:     opts.BrowserGrantID,
 		BrowserID:          opts.BrowserID,
 		BrowserSessionID:   opts.BrowserSessionID,
-	}
-	if opts.PlanCapability != nil {
-		key.PlanAPIBaseURL = opts.PlanCapability.APIBaseURL
-		key.PlanTokenHash = hashString(opts.PlanCapability.Token)
-		key.PlanExpiresAt = opts.PlanCapability.ExpiresAt
 	}
 	if opts.SubagentAuthToken != "" {
 		key.SubagentTokenHash = hashString(opts.SubagentAuthToken)

@@ -19,7 +19,7 @@ This plan implements daemon runtime process ownership and safety. Cloud-app prov
 - Create: `internal/pi/worker_key.go`
   - Defines `WorkerKey`, `WorkerSnapshot`, and `NewWorkerKey`.
 - Create: `internal/pi/worker_key_test.go`
-  - Verifies key equality, sorting, browser grant identity, plan capability identity, and default provider behavior.
+  - Verifies key equality, sorting, browser grant identity, and default provider behavior.
 - Create: `internal/pi/worker.go`
   - Owns one warm Pi RPC process, prompt execution, process-group cleanup, and idle metadata.
 - Create: `internal/pi/worker_test.go`
@@ -246,7 +246,7 @@ func TestNewWorkerKeyDefaultsProviderAndSortsSkills(t *testing.T) {
 	}
 }
 
-func TestWorkerKeyIncludesBrowserAndPlanCapability(t *testing.T) {
+func TestWorkerKeyIncludesBrowserGrant(t *testing.T) {
 	base := Options{
 		BinaryPath:       "/bin/pi",
 		CWD:              "/repo",
@@ -257,52 +257,25 @@ func TestWorkerKeyIncludesBrowserAndPlanCapability(t *testing.T) {
 		BrowserGrantID:   "grant-1",
 		BrowserID:        "browser-1",
 		BrowserSessionID: "session-1",
-		PlanCapability: &protocol.PlanCapability{
-			Token:      "token-1",
-			APIBaseURL: "https://api.gsd.build",
-			ExpiresAt:  "2026-04-29T20:00:00Z",
-		},
 	}
 	a := NewWorkerKey(base)
 
-	withoutBrowser := base
-	withoutBrowser.BrowserGrantID = ""
-	withoutBrowser.BrowserID = ""
-	if a == NewWorkerKey(withoutBrowser) {
-		t.Fatal("worker key ignored browser grant")
+	cases := []struct {
+		name string
+		edit func(*Options)
+	}{
+		{name: "grant", edit: func(opts *Options) { opts.BrowserGrantID = "grant-2" }},
+		{name: "browser", edit: func(opts *Options) { opts.BrowserID = "browser-2" }},
+		{name: "session", edit: func(opts *Options) { opts.BrowserSessionID = "session-2" }},
 	}
-
-	otherPlan := base
-	otherPlan.PlanCapability = &protocol.PlanCapability{
-		Token:      "token-2",
-		APIBaseURL: "https://api.gsd.build",
-		ExpiresAt:  "2026-04-29T20:00:00Z",
-	}
-	if a == NewWorkerKey(otherPlan) {
-		t.Fatal("worker key ignored plan capability")
-	}
-}
-
-func TestWorkerKeyRedactsPlanTokenInHash(t *testing.T) {
-	key := NewWorkerKey(Options{
-		BinaryPath:    "/bin/pi",
-		CWD:           "/repo",
-		Model:         "claude-sonnet-4-6",
-		ResumeSession: "/tmp/session.jsonl",
-		ExtensionPath: "/ext/index.ts",
-		Provider:      "claude-cli",
-		PlanCapability: &protocol.PlanCapability{
-			Token:      "secret-token",
-			APIBaseURL: "https://api.gsd.build",
-			ExpiresAt:  "2026-04-29T20:00:00Z",
-		},
-	})
-
-	if key.Hash() == "" {
-		t.Fatal("expected stable non-empty hash")
-	}
-	if key.Hash() == "secret-token" {
-		t.Fatal("hash exposed raw plan token")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			other := base
+			tc.edit(&other)
+			if a == NewWorkerKey(other) {
+				t.Fatalf("worker key ignored browser %s", tc.name)
+			}
+		})
 	}
 }
 ```
@@ -345,9 +318,6 @@ type WorkerKey struct {
 	BrowserGrantID     string
 	BrowserID          string
 	BrowserSessionID   string
-	PlanAPIBaseURL     string
-	PlanTokenHash      string
-	PlanExpiresAt      string
 }
 
 type WorkerSnapshot struct {
@@ -377,11 +347,6 @@ func NewWorkerKey(opts Options) WorkerKey {
 		BrowserGrantID:     opts.BrowserGrantID,
 		BrowserID:          opts.BrowserID,
 		BrowserSessionID:   opts.BrowserSessionID,
-	}
-	if opts.PlanCapability != nil {
-		key.PlanAPIBaseURL = opts.PlanCapability.APIBaseURL
-		key.PlanTokenHash = hashString(opts.PlanCapability.Token)
-		key.PlanExpiresAt = opts.PlanCapability.ExpiresAt
 	}
 	return key
 }
@@ -556,10 +521,7 @@ func processArgs(opts Options) []string {
 }
 
 func processEnv(base []string, opts Options) []string {
-	return planCapabilityEnv(
-		browserEnv(base, opts.BrowserGrantID, opts.BrowserID, opts.BrowserSessionID),
-		opts.PlanCapability,
-	)
+	return browserEnv(base, opts)
 }
 ```
 
@@ -1828,6 +1790,13 @@ export class WarmClaudeSdkWorker {
   }
 
   async stop() {
+    const err = new Error("WarmClaudeSdkWorker stopped");
+    this.pumpError = err;
+    if (this.active) {
+      const active = this.active;
+      this.active = null;
+      active.reject(err);
+    }
     this.prompt.close();
   }
 

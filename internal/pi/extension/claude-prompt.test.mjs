@@ -106,12 +106,12 @@ test("finalizeActivePiToolCall uses the completed streamed JSON arguments", () =
   assert.deepEqual(finalizeActivePiToolCall({
     idx: 0,
     id: "toolu_789",
-    name: "plan_done",
+    name: "task_done",
     jsonAcc: "{\"status\":\"completed\"}",
   }, {}), {
     type: "toolCall",
     id: "toolu_789",
-    name: "plan_done",
+    name: "task_done",
     arguments: { status: "completed" },
   });
 
@@ -122,14 +122,14 @@ test("finalizeActivePiToolCall rejects malformed streamed JSON arguments", () =>
   assert.throws(() => finalizeActivePiToolCall({
     idx: 0,
     id: "toolu_bad",
-    name: "plan_done",
+    name: "task_done",
     jsonAcc: "{\"status\":",
-  }, {}), /Failed to parse tool_use input for plan_done/);
+  }, {}), /Failed to parse tool_use input for task_done/);
 
   assert.throws(() => finalizeActivePiToolCall({
     idx: 0,
     id: "toolu_array",
-    name: "plan_done",
+    name: "task_done",
     jsonAcc: "[\"completed\"]",
   }, {}), /tool_use input must be a JSON object/);
 });

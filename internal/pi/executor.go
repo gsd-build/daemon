@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/claude"
-	protocol "github.com/gsd-build/protocol-go"
 )
 
 const openRouterAPIKeyEnv = "OPENROUTER_API_KEY"
@@ -84,7 +83,6 @@ type Options struct {
 	BrowserRuntimeErrorMessage string
 	BrowserRuntimeVersion      string
 	WarmClaudeSDK              bool
-	PlanCapability             *protocol.PlanCapability
 	DaemonSocketPath           string
 	SubagentAuthToken          string
 	ParentSessionID            string
@@ -235,18 +233,15 @@ func processEnv(ctx context.Context, base []string, opts Options) []string {
 	allowedBase := ensureUserIdentityEnv(allowlistedBaseEnv(base, provider))
 	return subagentEnv(
 		warmClaudeSDKEnv(
-			planCapabilityEnv(
-				browserEnv(
-					agentToolsEnv(
-						toolProfileEnv(
-							providerEnv(ctx, allowedBase, provider),
-							opts.ToolProfile,
-						),
-						opts,
+			browserEnv(
+				agentToolsEnv(
+					toolProfileEnv(
+						providerEnv(ctx, allowedBase, provider),
+						opts.ToolProfile,
 					),
 					opts,
 				),
-				opts.PlanCapability,
+				opts,
 			),
 			opts.WarmClaudeSDK,
 		),
@@ -478,7 +473,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"toolProfile", strings.TrimSpace(e.opts.ToolProfile),
 		"agentTools", e.opts.AgentToolsSocket != "",
 		"browserGrant", e.opts.BrowserGrantID != "",
-		"planCapability", e.opts.PlanCapability != nil,
 	)
 	logScaffoldDiagnostics("daemon", map[string]any{
 		"taskId":                  e.opts.TaskID,
@@ -495,7 +489,6 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"toolProfile":             strings.TrimSpace(e.opts.ToolProfile),
 		"agentTools":              e.opts.AgentToolsSocket != "",
 		"browserGrant":            e.opts.BrowserGrantID != "",
-		"planCapability":          e.opts.PlanCapability != nil,
 	})
 
 	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
@@ -778,26 +771,6 @@ func browserEnv(base []string, opts Options) []string {
 	}
 	if opts.ExtensionPath != "" {
 		env = append(env, "GSD_BROWSER_SKILL_DIR="+filepath.Join(filepath.Dir(opts.ExtensionPath), "gsd-browser-skill"))
-	}
-	return env
-}
-
-func planCapabilityEnv(base []string, cap *protocol.PlanCapability) []string {
-	env := make([]string, 0, len(base)+5)
-	for _, entry := range base {
-		if strings.HasPrefix(entry, "GSD_PLAN_") {
-			continue
-		}
-		env = append(env, entry)
-	}
-	if cap != nil {
-		env = append(env,
-			"GSD_PLAN_CAPABILITY_ID="+cap.ID,
-			"GSD_PLAN_CAPABILITY_ATTEMPT_ID="+cap.AttemptID,
-			"GSD_PLAN_API_BASE_URL="+cap.APIBaseURL,
-			"GSD_PLAN_CAPABILITY_TOKEN="+cap.Token,
-			"GSD_PLAN_CAPABILITY_EXPIRES_AT="+cap.ExpiresAt,
-		)
 	}
 	return env
 }

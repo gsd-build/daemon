@@ -44,6 +44,7 @@ type Options struct {
 	CWD                string
 	Relay              RelaySender
 	Model              string
+	Provider           string
 	Effort             string
 	PermissionMode     string
 	WarmPiWorkers      bool
@@ -98,6 +99,7 @@ type Actor struct {
 	taskStartedAt *time.Time // when current task started; nil when idle
 	idleSince     *time.Time // when actor became idle; nil when executing
 	piModel       string     // Pi model used for context-window fallbacks
+	piProvider    string     // Pi provider used for control subprocess environment
 
 	// taskTimeout is the per-task deadline. Zero means no timeout.
 	// Set by the Manager from config before calling Run.
@@ -166,8 +168,6 @@ type taskContext struct {
 	BrowserGrant       *protocol.BrowserGrantContext
 	BrowserRuntime     BrowserRuntimeSnapshot
 	BrowserRPCSocket   string
-	PlanCapability     *protocol.PlanCapability
-	PlanRuntime        *planRuntimeReporter
 }
 
 func inferToolProfile(prompt string) string {
@@ -204,6 +204,7 @@ func NewActor(opts Options) (*Actor, error) {
 		permCh:             make(chan permResponse, 1),
 		questionCh:         make(map[string]chan string),
 		stopCh:             make(chan struct{}),
+		piProvider:         pi.ProviderOrDefault(opts.Provider),
 		lastActiveAt:       time.Now(),
 		interactionTimeout: defaultInteractionTimeout,
 		now:                time.Now,
@@ -224,6 +225,7 @@ func NewActor(opts Options) (*Actor, error) {
 			CWD:         actor.opts.CWD,
 			SessionFile: sessionFile,
 			Model:       actor.currentPiModel(),
+			Provider:    actor.currentPiProvider(),
 			Command:     command,
 			OnEvent:     onEvent,
 		})
@@ -373,6 +375,10 @@ func (a *Actor) SetBrowserGrant(grant *protocol.BrowserGrantContext, runtime Bro
 	if grant != nil {
 		a.opts.BrowserGrantID = grant.GrantID
 	}
+}
+
+func (a *Actor) SetProvider(provider string) {
+	a.setPiProvider(provider)
 }
 
 // SendTask queues a task for execution. Non-blocking if the channel has capacity.
@@ -669,10 +675,7 @@ func (a *Actor) executeTask(ctx context.Context, task protocol.Task) error {
 		BrowserGrant:       a.opts.BrowserGrant,
 		BrowserRuntime:     a.opts.BrowserRuntime,
 		BrowserRPCSocket:   a.opts.BrowserRPCSocket,
-		PlanCapability:     task.PlanCapability,
 	}
-	tc.PlanRuntime = newPlanRuntimeReporter(tc.TaskID, tc.PlanCapability)
-	defer tc.PlanRuntime.Finish(context.Background())
 
 	logAttrs := []any{"task", task.TaskID, "session", a.opts.SessionID, "promptLen", len(task.Prompt)}
 	if task.RequestID != "" {
@@ -908,6 +911,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	model = normalizePiModel(model)
 	a.setPiModel(model)
 	provider := pi.ProviderOrDefault(tc.Provider)
+	a.setPiProvider(provider)
 	binaryPath := a.opts.PiBinaryPath
 	if binaryPath == "" {
 		binaryPath = "pi"
@@ -975,7 +979,6 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		BrowserRuntimeErrorMessage: tc.BrowserRuntime.ErrorMessage,
 		BrowserRuntimeVersion:      tc.BrowserRuntime.Version,
 		WarmClaudeSDK:              a.opts.WarmClaudeSDK,
-		PlanCapability:             tc.PlanCapability,
 		DaemonSocketPath:           a.opts.DaemonSocketPath,
 		SubagentAuthToken:          subagentAuthToken,
 		ParentSessionID:            a.opts.SessionID,
@@ -1015,8 +1018,8 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	exec := pi.NewExecutor(opts)
 	a.attachPiPIDCallbacks(exec, tc.TaskID)
 	lifecycleSink := actorLifecycleSink{relay: a.opts.Relay, tc: tc, model: model, provider: provider}
-	toolStart := a.capturePiToolStartWithEvidence(coordinator, tc.PlanRuntime)
-	toolEnd := a.capturePiToolEndWithEvidence(tc.ChannelID, tc.PlanRuntime)
+	toolStart := a.capturePiToolStart(coordinator)
+	toolEnd := a.capturePiToolEnd(tc.ChannelID)
 
 	resultRaw, err := a.forwardExecutorEvents(actorCtx, taskCtx, tc, func(ctx context.Context, onEvent func(claude.Event) error) error {
 		supervisor := NewTurnSupervisor(TurnSupervisorOptions{
@@ -1120,8 +1123,8 @@ func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, t
 			Message:              prompt,
 			OnEvent:              onEvent,
 			OnUIRequest:          a.makePiUIHandler(ctx, tc, coordinator),
-			OnToolExecutionStart: a.capturePiToolStartWithEvidence(coordinator, tc.PlanRuntime),
-			OnToolExecutionEnd:   a.capturePiToolEndWithEvidence(tc.ChannelID, tc.PlanRuntime),
+			OnToolExecutionStart: a.capturePiToolStart(coordinator),
+			OnToolExecutionEnd:   a.capturePiToolEnd(tc.ChannelID),
 		})
 	})
 	if err != nil {
@@ -1130,26 +1133,6 @@ func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, t
 	}
 
 	return a.handleResult(taskCtx, tc, resultRaw)
-}
-
-func (a *Actor) capturePiToolStartWithEvidence(coordinator *structuredQuestionCoordinator, reporter *planRuntimeReporter) func(pi.ToolExecutionStart) {
-	base := a.capturePiToolStart(coordinator)
-	return func(event pi.ToolExecutionStart) {
-		if reporter != nil {
-			reporter.RecordToolStart(event)
-		}
-		base(event)
-	}
-}
-
-func (a *Actor) capturePiToolEndWithEvidence(channelID string, reporter *planRuntimeReporter) func(pi.ToolExecutionEnd) {
-	base := a.capturePiToolEnd(channelID)
-	return func(event pi.ToolExecutionEnd) {
-		if reporter != nil {
-			reporter.RecordToolEnd(event)
-		}
-		base(event)
-	}
 }
 
 func (a *Actor) capturePiToolStart(coordinator *structuredQuestionCoordinator) func(pi.ToolExecutionStart) {
@@ -1319,6 +1302,21 @@ func (a *Actor) currentPiModel() string {
 		return a.piModel
 	}
 	return normalizePiModel(a.opts.Model)
+}
+
+func (a *Actor) setPiProvider(provider string) {
+	a.taskMu.Lock()
+	a.piProvider = pi.ProviderOrDefault(provider)
+	a.taskMu.Unlock()
+}
+
+func (a *Actor) currentPiProvider() string {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	if a.piProvider != "" {
+		return a.piProvider
+	}
+	return pi.ProviderOrDefault("")
 }
 
 func (a *Actor) attachPiPIDCallbacks(exec *pi.Executor, taskID string) {
