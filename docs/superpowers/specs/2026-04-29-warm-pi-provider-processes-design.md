@@ -80,7 +80,6 @@ A worker is reusable only when the task execution key matches exactly:
 - browser grant id
 - browser id
 - browser session id
-- plan capability presence and routing values
 
 The browser grant tuple is part of the key because the extension reads browser access from process environment variables. A task with a different browser grant uses a restarted worker. A task with no browser grant uses a separate key from a task with an active browser grant.
 
