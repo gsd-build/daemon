@@ -44,6 +44,7 @@ type ControlOptions struct {
 	CWD           string
 	SessionFile   string
 	Model         string
+	Provider      string
 	ContextWindow int64
 	Command       ControlCommand
 	OnEvent       func(ControlEvent)
@@ -136,7 +137,7 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("open pi stderr: %w", err)
 	}
-	cmd.Env = planCapabilityEnv(os.Environ(), nil)
+	cmd.Env = processEnv(ctx, os.Environ(), Options{Provider: opts.Provider})
 
 	if err := cmd.Start(); err != nil {
 		return ControlResult{}, fmt.Errorf("start pi control process: %w", err)

@@ -113,41 +113,39 @@ printf '%s\n' '{"type":"extension_ui_request","id":"request_1","method":"setWidg
 	}
 }
 
-func TestRunControlStripsPlanCapabilityEnv(t *testing.T) {
+func TestRunControlExcludesUnrelatedHostSecrets(t *testing.T) {
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("OPENROUTER_API_KEY", "openrouter-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+
 	outDir := t.TempDir()
 	envPath := filepath.Join(outDir, "env.txt")
-	t.Setenv("GSD_PLAN_API_BASE_URL", "https://app.test")
-	t.Setenv("GSD_PLAN_CAPABILITY_TOKEN", "gsd_plan_parent")
-	t.Setenv("GSD_PLAN_CAPABILITY_EXPIRES_AT", "2026-04-29T12:00:00Z")
-
 	fakePi := writeFakePi(t, `
-{
-  printf 'GSD_PLAN_API_BASE_URL=%s\n' "${GSD_PLAN_API_BASE_URL:-}"
-  printf 'GSD_PLAN_CAPABILITY_TOKEN=%s\n' "${GSD_PLAN_CAPABILITY_TOKEN:-}"
-  printf 'GSD_PLAN_CAPABILITY_EXPIRES_AT=%s\n' "${GSD_PLAN_CAPABILITY_EXPIRES_AT:-}"
-} > "`+envPath+`"
-cat >/dev/null
+env | sort > "`+envPath+`"
 printf '%s\n' '{"type":"control_result","ok":true}'
 `)
 
-	if _, err := RunControl(context.Background(), ControlOptions{
+	_, err := RunControl(context.Background(), ControlOptions{
 		BinaryPath:  fakePi,
 		CWD:         outDir,
 		SessionFile: filepath.Join(outDir, "session.jsonl"),
+		Provider:    "openrouter",
 		Command:     ControlCommand{Type: ControlCommandGetSessionStats},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("RunControl returned error: %v", err)
 	}
 
-	data, err := os.ReadFile(envPath)
+	raw, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatalf("read env capture: %v", err)
 	}
-	got := string(data)
-	if strings.Contains(got, "gsd_plan_parent") ||
-		strings.Contains(got, "https://app.test") ||
-		strings.Contains(got, "2026-04-29T12:00:00Z") {
-		t.Fatalf("plan capability leaked into control env: %s", got)
+	got := string(raw)
+	if strings.Contains(got, "AWS_SECRET_ACCESS_KEY=") || strings.Contains(got, "ANTHROPIC_API_KEY=") {
+		t.Fatalf("control env leaked unrelated secret: %s", got)
+	}
+	if !strings.Contains(got, "OPENROUTER_API_KEY=openrouter-secret") {
+		t.Fatalf("control env missing selected provider credential: %s", got)
 	}
 }
 

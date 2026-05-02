@@ -36,7 +36,6 @@ import {
 import { schemaToZod } from "./schema-to-zod.js";
 import { askUserQuestionsTool } from "./ask-user-questions.js";
 import { backgroundTools } from "./background-tools.js";
-import { registerPlanTools } from "./plan-tools.js";
 import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
@@ -62,7 +61,7 @@ const CLAUDE_BUILTINS = [
   "Bash", "BashOutput", "KillShell",
   "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
   "Glob", "Grep", "WebFetch", "WebSearch",
-  "Task", "Agent", "TodoWrite", "ExitPlanMode", "EnterPlanMode",
+  "Task", "Agent", "TodoWrite", "EnterPlanMode", "ExitPlanMode",
   "ListMcpResourcesTool", "ReadMcpResourceTool",
   "AskUserQuestion", "PushNotification", "ScheduleWakeup", "Monitor", "Skill", "ToolSearch",
   "TeamCreate", "TeamDelete", "SendMessage",
@@ -900,11 +899,6 @@ export default function (pi: ExtensionAPI) {
     registerTrackedTool(pi, registeredTools, "human", askUserQuestionsTool as any);
     for (const backgroundTool of backgroundTools) {
       registerVisibleTool(pi, subagentAllowedTools, "shell", backgroundTool as any, registeredTools);
-    }
-    if (isToolAllowed("plan", subagentAllowedTools) || !hasSubagentToolPolicy()) {
-      registerPlanTools(pi as any, process.env, (category: string, definition: any) => {
-        registeredTools.push(describeRegisteredTool(category, definition));
-      });
     }
     if (!hasSubagentToolPolicy()) {
       registerSubagentTool(pi as any, process.env, {

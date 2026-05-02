@@ -29,7 +29,6 @@ export function isMinimalToolProfile(env = process.env) {
 export function categoryForToolName(name) {
   if (!name) return null;
   if (name === "gsd_browser") return "browser";
-  if (name.startsWith("plan_")) return "plan";
   if (name.startsWith("background_") || name === "shell_exec") return "shell";
   if (/^(read|view|cat|file_read|read_file)(_|$)/.test(name) || name === "read") return "read";
   if (/^(search|grep|glob|find|list)(_|$)/.test(name) || name === "search") return "search";

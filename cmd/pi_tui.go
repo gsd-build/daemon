@@ -17,7 +17,6 @@ import (
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/update"
-	protocol "github.com/gsd-build/protocol-go"
 	"github.com/spf13/cobra"
 )
 
@@ -146,7 +145,6 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 		BrowserID:          strings.TrimSpace(piTUIFlags.browserID),
 		BrowserSessionID:   strings.TrimSpace(piTUIFlags.browserSessionID),
 		WarmClaudeSDK:      piTUIWarmClaudeSDK(),
-		PlanCapability:     piTUIPlanCapabilityFromEnv(),
 		DaemonSocketPath:   filepath.Join(homeDir, ".gsd-cloud", "daemon.sock"),
 		ParentSessionID:    strings.TrimSpace(piTUIFlags.sessionID),
 		AgentDir:           agentDir,
@@ -354,22 +352,6 @@ func piTUIWarmClaudeSDK() bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func piTUIPlanCapabilityFromEnv() *protocol.PlanCapability {
-	token := strings.TrimSpace(os.Getenv("GSD_PLAN_CAPABILITY_TOKEN"))
-	apiBaseURL := strings.TrimSpace(os.Getenv("GSD_PLAN_API_BASE_URL"))
-	expiresAt := strings.TrimSpace(os.Getenv("GSD_PLAN_CAPABILITY_EXPIRES_AT"))
-	if token == "" || apiBaseURL == "" || expiresAt == "" {
-		return nil
-	}
-	return &protocol.PlanCapability{
-		ID:         strings.TrimSpace(os.Getenv("GSD_PLAN_CAPABILITY_ID")),
-		AttemptID:  strings.TrimSpace(os.Getenv("GSD_PLAN_CAPABILITY_ATTEMPT_ID")),
-		Token:      token,
-		APIBaseURL: apiBaseURL,
-		ExpiresAt:  expiresAt,
 	}
 }
 

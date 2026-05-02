@@ -1,10 +1,6 @@
 package pi
 
-import (
-	"testing"
-
-	protocol "github.com/gsd-build/protocol-go"
-)
+import "testing"
 
 func TestNewWorkerKeyDefaultsProviderAndSortsSkills(t *testing.T) {
 	a := NewWorkerKey(Options{
@@ -30,7 +26,7 @@ func TestNewWorkerKeyDefaultsProviderAndSortsSkills(t *testing.T) {
 	}
 }
 
-func TestWorkerKeyIncludesBrowserAndPlanCapability(t *testing.T) {
+func TestWorkerKeyIncludesBrowserGrant(t *testing.T) {
 	base := Options{
 		BinaryPath:       "/bin/pi",
 		CWD:              "/repo",
@@ -41,52 +37,25 @@ func TestWorkerKeyIncludesBrowserAndPlanCapability(t *testing.T) {
 		BrowserGrantID:   "grant-1",
 		BrowserID:        "browser-1",
 		BrowserSessionID: "session-1",
-		PlanCapability: &protocol.PlanCapability{
-			Token:      "token-1",
-			APIBaseURL: "https://api.gsd.build",
-			ExpiresAt:  "2026-04-29T20:00:00Z",
-		},
 	}
 	a := NewWorkerKey(base)
 
-	withoutBrowser := base
-	withoutBrowser.BrowserGrantID = ""
-	withoutBrowser.BrowserID = ""
-	if a == NewWorkerKey(withoutBrowser) {
-		t.Fatal("worker key ignored browser grant")
+	cases := []struct {
+		name string
+		edit func(*Options)
+	}{
+		{name: "grant", edit: func(opts *Options) { opts.BrowserGrantID = "grant-2" }},
+		{name: "browser", edit: func(opts *Options) { opts.BrowserID = "browser-2" }},
+		{name: "session", edit: func(opts *Options) { opts.BrowserSessionID = "session-2" }},
 	}
-
-	otherPlan := base
-	otherPlan.PlanCapability = &protocol.PlanCapability{
-		Token:      "token-2",
-		APIBaseURL: "https://api.gsd.build",
-		ExpiresAt:  "2026-04-29T20:00:00Z",
-	}
-	if a == NewWorkerKey(otherPlan) {
-		t.Fatal("worker key ignored plan capability")
-	}
-}
-
-func TestWorkerKeyRedactsPlanTokenInHash(t *testing.T) {
-	key := NewWorkerKey(Options{
-		BinaryPath:    "/bin/pi",
-		CWD:           "/repo",
-		Model:         "claude-sonnet-4-6",
-		ResumeSession: "/tmp/session.jsonl",
-		ExtensionPath: "/ext/index.ts",
-		Provider:      "claude-cli",
-		PlanCapability: &protocol.PlanCapability{
-			Token:      "secret-token",
-			APIBaseURL: "https://api.gsd.build",
-			ExpiresAt:  "2026-04-29T20:00:00Z",
-		},
-	})
-
-	if key.Hash() == "" {
-		t.Fatal("expected stable non-empty hash")
-	}
-	if key.Hash() == "secret-token" {
-		t.Fatal("hash exposed raw plan token")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			other := base
+			tc.edit(&other)
+			if a == NewWorkerKey(other) {
+				t.Fatalf("worker key ignored browser %s", tc.name)
+			}
+		})
 	}
 }
 

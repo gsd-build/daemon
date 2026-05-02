@@ -46,7 +46,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/scenarios", s.handleScenarios)
 	s.mux.HandleFunc("/api/file", s.handleFile)
 	s.mux.HandleFunc("/api/browse", s.handleBrowse)
-	s.mux.HandleFunc("/api/agent-plan/", s.handlePlan)
 	s.mux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
 	s.mux.HandleFunc("/", s.handleIndex)
 	if s.relay != nil {
@@ -95,11 +94,6 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, err := daemonfs.BrowseDir(path, s.cwd)
 	writeJSON(w, map[string]any{"path": path, "entries": entries}, err)
-}
-
-func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
-	_ = s.store.Append("plan.request", map[string]any{"method": r.Method, "path": r.URL.Path})
-	writeJSON(w, map[string]any{"ok": true}, nil)
 }
 
 func writeJSON(w http.ResponseWriter, value any, err error) {

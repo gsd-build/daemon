@@ -30,11 +30,7 @@ if [ -n "$FAKE_PI_PROMPT_FILE" ]; then
   printf '%s\n' "$prompt_frame" > "$FAKE_PI_PROMPT_FILE"
 fi
 if [ -n "$FAKE_PI_ENV_FILE" ]; then
-  {
-    printf 'GSD_PLAN_API_BASE_URL=%s\n' "${GSD_PLAN_API_BASE_URL:-}"
-    printf 'GSD_PLAN_CAPABILITY_TOKEN=%s\n' "${GSD_PLAN_CAPABILITY_TOKEN:-}"
-    printf 'GSD_PLAN_CAPABILITY_EXPIRES_AT=%s\n' "${GSD_PLAN_CAPABILITY_EXPIRES_AT:-}"
-  } > "$FAKE_PI_ENV_FILE"
+  env > "$FAKE_PI_ENV_FILE"
 fi
 if [ -n "$FAKE_PI_SLEEP" ]; then
   sleep "$FAKE_PI_SLEEP"
@@ -304,6 +300,32 @@ func TestActorPiExecutorPassesTaskProvider(t *testing.T) {
 	}
 }
 
+func TestActorSeedsControlProviderFromOptions(t *testing.T) {
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID: "sess-control-provider",
+		Relay:     newFakeRelay(),
+		Model:     "z-ai/glm-4.7-flash",
+		Provider:  "openrouter",
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	if got := actor.currentPiProvider(); got != "openrouter" {
+		t.Fatalf("current pi provider = %q, want openrouter", got)
+	}
+
+	actor.SetProvider("zai")
+	if got := actor.currentPiProvider(); got != "zai" {
+		t.Fatalf("current pi provider after update = %q, want zai", got)
+	}
+
+	actor.SetProvider("")
+	if got, want := actor.currentPiProvider(), pi.ProviderOrDefault(""); got != want {
+		t.Fatalf("current pi provider after empty update = %q, want %s", got, want)
+	}
+}
+
 func TestActorPiExecutorDefaultsEmptyProviderToClaudeCli(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "pi.args")
 	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
@@ -370,48 +392,6 @@ func TestActorPiExecutorPassesCustomInstructions(t *testing.T) {
 	}
 	if !strings.Contains(systemPrompt, "<runtime_context>") {
 		t.Fatalf("append system prompt missing runtime context: %q", systemPrompt)
-	}
-}
-
-func TestActorPiExecutorPassesPlanCapability(t *testing.T) {
-	envFile := filepath.Join(t.TempDir(), "pi.env")
-	t.Setenv("FAKE_PI_ENV_FILE", envFile)
-
-	actor, err := NewActor(testPiOptions(t, Options{
-		SessionID: "sess-plan-capability",
-		Relay:     newFakeRelay(),
-	}))
-	if err != nil {
-		t.Fatalf("new actor: %v", err)
-	}
-
-	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
-		TaskID:    "task-plan-capability",
-		ChannelID: "ch-plan-capability",
-		Engine:    "pi",
-		PlanCapability: &protocol.PlanCapability{
-			APIBaseURL: "https://app.test",
-			Token:      "gsd_plan_actor_secret",
-			ExpiresAt:  "2026-04-28T22:30:00Z",
-		},
-	}, "remember this")
-	if err != nil {
-		t.Fatalf("runPiExecutor: %v", err)
-	}
-
-	data, err := os.ReadFile(envFile)
-	if err != nil {
-		t.Fatalf("read env file: %v", err)
-	}
-	got := string(data)
-	if !strings.Contains(got, "GSD_PLAN_API_BASE_URL=https://app.test\n") {
-		t.Fatalf("env missing api base url: %s", got)
-	}
-	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_TOKEN=gsd_plan_actor_secret\n") {
-		t.Fatalf("env missing capability token: %s", got)
-	}
-	if !strings.Contains(got, "GSD_PLAN_CAPABILITY_EXPIRES_AT=2026-04-28T22:30:00Z\n") {
-		t.Fatalf("env missing expires at: %s", got)
 	}
 }
 
