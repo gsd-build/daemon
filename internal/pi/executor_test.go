@@ -315,8 +315,6 @@ func TestProcessEnvExcludesUnrelatedSecrets(t *testing.T) {
 		ChannelID:        "chan-1",
 		TaskID:           "task-1",
 		DaemonSocketPath: "/tmp/daemon.sock",
-		ParentSessionID:  "sess-1",
-		AgentDir:         "/tmp/agents",
 	})
 	got := strings.Join(env, "\n")
 	for _, want := range []string{
@@ -331,8 +329,6 @@ func TestProcessEnvExcludesUnrelatedSecrets(t *testing.T) {
 		"GSD_CHANNEL_ID=chan-1",
 		"GSD_TASK_ID=task-1",
 		"GSD_DAEMON_SOCKET=/tmp/daemon.sock",
-		"GSD_PARENT_SESSION_ID=sess-1",
-		"GSD_AGENT_DIR=/tmp/agents",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("env missing %q: %s", want, got)

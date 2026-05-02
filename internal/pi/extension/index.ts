@@ -39,7 +39,6 @@ import { backgroundTools } from "./background-tools.js";
 import { registerCodexAppServerProvider } from "./codex-appserver-provider.js";
 import { registerOpenRouterProvider } from "./openrouter-provider.js";
 import { WarmClaudeSdkWorker } from "./claude-sdk-worker.js";
-import { registerSubagentTool } from "./subagent.js";
 import {
   browserGrantFromEnv,
   browserToolDefinition,
@@ -47,12 +46,7 @@ import {
   type BrowserGrant,
 } from "./browser-extension.js";
 import {
-  filterToolsByPolicy,
-  hasSubagentToolPolicy,
   isMinimalToolProfile,
-  isToolAllowed,
-  parseAllowedTools,
-  registerIfAllowed,
   toolProfile,
 } from "./tool-policy.js";
 import { Type } from "@sinclair/typebox";
@@ -113,16 +107,12 @@ function piToolName(toolDef: PiTool | ReturnType<typeof browserToolDefinition>) 
 
 export function mergeClaudeCliTools(contextTools: PiTool[] | undefined, browserGrant?: BrowserGrant) {
   if (isMinimalToolProfile()) return [];
-  const allowed = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
   const merged: PiTool[] = [];
   const seenNames = new Set<string>();
-  const browserTools =
-    !hasSubagentToolPolicy() || isToolAllowed("browser", allowed)
-      ? (buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[])
-      : [];
-  const visibleContextTools = (
-    filterToolsByPolicy((contextTools ?? []) as any[], allowed) as PiTool[]
-  ).filter((toolDef) => browserGrant || piToolName(toolDef) !== "gsd_browser");
+  const browserTools = buildClaudeCliBrowserTools({ browserGrant }) as unknown as PiTool[];
+  const visibleContextTools = ((contextTools ?? []) as PiTool[]).filter(
+    (toolDef) => browserGrant || piToolName(toolDef) !== "gsd_browser",
+  );
 
   for (const toolDef of [...visibleContextTools, ...browserTools]) {
     const name = piToolName(toolDef);
@@ -237,23 +227,6 @@ function registerTrackedTool(
 ) {
   pi.registerTool(definition);
   registeredTools.push(describeRegisteredTool(category, definition));
-}
-
-function registerVisibleTool(
-  pi: ExtensionAPI,
-  allowed: Set<string>,
-  category: string,
-  definition: any,
-  registeredTools?: ToolRegistrationDiagnostic[],
-) {
-  if (!hasSubagentToolPolicy()) {
-    pi.registerTool(definition);
-    registeredTools?.push(describeRegisteredTool(category, definition));
-    return true;
-  }
-  const registered = registerIfAllowed(pi, allowed, category, definition);
-  if (registered) registeredTools?.push(describeRegisteredTool(category, definition));
-  return registered;
 }
 
 function warmClaudeOptionsKey(model: Model<any>, context: Context) {
@@ -887,25 +860,15 @@ function registerAskHumanTool(pi: ExtensionAPI, registeredTools?: ToolRegistrati
 }
 
 export default function (pi: ExtensionAPI) {
-  const subagentAllowedTools = parseAllowedTools(process.env.GSD_SUBAGENT_ALLOWED_TOOLS);
   const profile = toolProfile();
   const registeredTools: ToolRegistrationDiagnostic[] = [];
   if (!isMinimalToolProfile()) {
     registerAskHumanTool(pi, registeredTools);
-    if (isToolAllowed("browser", subagentAllowedTools) || !hasSubagentToolPolicy()) {
-      registerBrowserExtension(pi);
-      registeredTools.push(describeRegisteredTool("browser", browserToolDefinition()));
-    }
+    registerBrowserExtension(pi);
+    registeredTools.push(describeRegisteredTool("browser", browserToolDefinition()));
     registerTrackedTool(pi, registeredTools, "human", askUserQuestionsTool as any);
     for (const backgroundTool of backgroundTools) {
-      registerVisibleTool(pi, subagentAllowedTools, "shell", backgroundTool as any, registeredTools);
-    }
-    if (!hasSubagentToolPolicy()) {
-      registerSubagentTool(pi as any, process.env, {
-        onRegister: (category: string, definition: any) => {
-          registeredTools.push(describeRegisteredTool(category, definition));
-        },
-      });
+      registerTrackedTool(pi, registeredTools, "shell", backgroundTool as any);
     }
   }
   emitScaffoldDiagnostics(profile, registeredTools);

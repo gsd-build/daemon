@@ -4,7 +4,6 @@ package loop
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -52,37 +51,29 @@ type SessionManager interface {
 
 // Daemon is the running daemon state.
 type Daemon struct {
-	cfg                    *config.Config
-	version                string
-	manager                SessionManager
-	terminalManager        *terminal.Manager
-	agentTerminalManager   *agentterminal.Manager
-	agentToolControl       *agentterminal.ControlServer
-	client                 *relay.Client
-	startedAt              time.Time
-	channelRoots           sync.Map
-	uploader               *upload.Client
-	piBinaryPath           string
-	piExtensionPath        string
-	forcePi                bool
-	previewRegistry        *preview.Registry
-	previewHTTP            *preview.HTTPHandler
-	previewWS              *preview.WebSocketBridge
-	previewWork            chan struct{}
-	browserManager         *browser.Manager
-	browserRPCSocket       string
-	agentTouchedFiles      agentTouchedFileStore
-	runCtxMu               sync.RWMutex
-	runCtx                 context.Context
-	sockPath               string
-	subagentAuthSecret     string
-	agentDir               string
-	subagentMu             sync.Mutex
-	subagentStreams        map[string]*pi.ChildTranslator
-	subagentSeq            map[string]int64
-	subagentProcesses      map[string]int
-	subagentRunIDs         map[string]string
-	subagentParentSessions map[string]string
+	cfg                  *config.Config
+	version              string
+	manager              SessionManager
+	terminalManager      *terminal.Manager
+	agentTerminalManager *agentterminal.Manager
+	agentToolControl     *agentterminal.ControlServer
+	client               *relay.Client
+	startedAt            time.Time
+	channelRoots         sync.Map
+	uploader             *upload.Client
+	piBinaryPath         string
+	piExtensionPath      string
+	forcePi              bool
+	previewRegistry      *preview.Registry
+	previewHTTP          *preview.HTTPHandler
+	previewWS            *preview.WebSocketBridge
+	previewWork          chan struct{}
+	browserManager       *browser.Manager
+	browserRPCSocket     string
+	agentTouchedFiles    agentTouchedFileStore
+	runCtxMu             sync.RWMutex
+	runCtx               context.Context
+	sockPath             string
 }
 
 const (
@@ -481,23 +472,16 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	}
 	sockPath := filepath.Join(homeDir, ".gsd-cloud", "daemon.sock")
 	browserRPCSocket := filepath.Join(homeDir, ".gsd-cloud", "browser-rpc.sock")
-	agentDir := filepath.Join(homeDir, ".gsd-cloud", "agents")
-	subagentAuthSecret, err := generateSubagentAuthSecret()
-	if err != nil {
-		return nil, fmt.Errorf("generate subagent auth secret: %w", err)
-	}
 
 	manager := session.NewManager(session.ManagerOptions{
-		PiBinaryPath:       piBinaryPath,
-		PiExtensionPath:    piExtensionPath,
-		Relay:              client,
-		Config:             cfg,
-		PIDDir:             pidDir,
-		Uploader:           uploader,
-		DaemonSocketPath:   sockPath,
-		SubagentAuthSecret: subagentAuthSecret,
-		AgentDir:           agentDir,
-		AgentTools:         agentControl,
+		PiBinaryPath:     piBinaryPath,
+		PiExtensionPath:  piExtensionPath,
+		Relay:            client,
+		Config:           cfg,
+		PIDDir:           pidDir,
+		Uploader:         uploader,
+		DaemonSocketPath: sockPath,
+		AgentTools:       agentControl,
 	})
 	previewRegistry := preview.NewRegistry()
 	browserStateDir := filepath.Join(homeDir, ".gsd-browser")
@@ -510,31 +494,24 @@ func NewWithPiBinaryPath(cfg *config.Config, version, piBinaryOverride string) (
 	}
 
 	d := &Daemon{
-		cfg:                    cfg,
-		version:                version,
-		manager:                manager,
-		terminalManager:        terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
-		agentTerminalManager:   agentMgr,
-		agentToolControl:       agentControl,
-		client:                 client,
-		startedAt:              time.Now(),
-		uploader:               uploader,
-		piBinaryPath:           piBinaryPath,
-		piExtensionPath:        piExtensionPath,
-		forcePi:                forcePi,
-		previewRegistry:        previewRegistry,
-		previewHTTP:            &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
-		previewWS:              preview.NewWebSocketBridge(previewRegistry, client),
-		previewWork:            make(chan struct{}, preview.DefaultMaxActiveStreams),
-		sockPath:               sockPath,
-		browserRPCSocket:       browserRPCSocket,
-		subagentAuthSecret:     subagentAuthSecret,
-		agentDir:               agentDir,
-		subagentStreams:        make(map[string]*pi.ChildTranslator),
-		subagentSeq:            make(map[string]int64),
-		subagentProcesses:      make(map[string]int),
-		subagentRunIDs:         make(map[string]string),
-		subagentParentSessions: make(map[string]string),
+		cfg:                  cfg,
+		version:              version,
+		manager:              manager,
+		terminalManager:      terminal.NewManager(terminalRelaySender{client: client}, terminal.DefaultLimits()),
+		agentTerminalManager: agentMgr,
+		agentToolControl:     agentControl,
+		client:               client,
+		startedAt:            time.Now(),
+		uploader:             uploader,
+		piBinaryPath:         piBinaryPath,
+		piExtensionPath:      piExtensionPath,
+		forcePi:              forcePi,
+		previewRegistry:      previewRegistry,
+		previewHTTP:          &preview.HTTPHandler{Registry: previewRegistry, Sender: client},
+		previewWS:            preview.NewWebSocketBridge(previewRegistry, client),
+		previewWork:          make(chan struct{}, preview.DefaultMaxActiveStreams),
+		sockPath:             sockPath,
+		browserRPCSocket:     browserRPCSocket,
 		browserManager: browser.NewManager(browser.ManagerOptions{
 			Service: browser.LocalService{BinaryPath: browserPath, StateDir: browserStateDir},
 			Sender:  client,
@@ -694,7 +671,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.checkAndRefreshToken()
 
 	// Start Unix socket status API.
-	sockSrv := sockapi.NewServer(d.sockPath, d, d.subagentAuthSecret)
+	sockSrv := sockapi.NewServer(d.sockPath, d)
 	go func() {
 		if err := sockSrv.ListenAndServe(ctx); err != nil {
 			slog.Warn("socket API failed", "error", err)
@@ -720,14 +697,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("machine token has expired — run `gsd-cloud login` to re-pair this machine")
 	}
 	return err
-}
-
-func generateSubagentAuthSecret() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // getActiveTasks returns the list of currently executing task IDs.
@@ -1015,7 +984,6 @@ func (d *Daemon) handleTask(msg *protocol.Task) error {
 			MachineID:        machineID,
 			AuthToken:        authToken,
 			DaemonSocketPath: d.sockPath,
-			AgentDir:         d.agentDir,
 			BrowserGrantID:   browserGrantID,
 			BrowserID:        browserID,
 			BrowserGrant:     browserGrant,
@@ -1068,10 +1036,6 @@ func (d *Daemon) handleStop(msg *protocol.Stop) error {
 	actor := d.manager.Get(msg.SessionID)
 	if actor != nil {
 		actor.CancelTask()
-		d.cancelSubagentChildrenForParent(msg.SessionID)
-		return nil
-	}
-	if d.cancelSubagentChild(msg.SessionID) {
 		return nil
 	}
 	return nil

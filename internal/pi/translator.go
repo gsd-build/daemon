@@ -193,18 +193,7 @@ func translatePiEvent(piRaw json.RawMessage, state *translatorState) []rawEvent 
 				resultText += c.Text
 			}
 		}
-		var content any = resultText
-		if te.ToolName == "subagent" && te.Result.Details != nil {
-			details := make(map[string]any, len(te.Result.Details)+1)
-			for k, v := range te.Result.Details {
-				details[k] = v
-			}
-			if _, ok := details["finalText"]; !ok && resultText != "" {
-				details["finalText"] = resultText
-			}
-			content = details
-		}
-		return []rawEvent{makeToolResultUser(state, te.ToolCallID, content, te.IsError)}
+		return []rawEvent{makeToolResultUser(state, te.ToolCallID, resultText, te.IsError)}
 
 	case "tool_execution_update":
 		var tu piToolUpdate

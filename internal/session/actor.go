@@ -14,9 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gsd-build/daemon/internal/agents"
 	"github.com/gsd-build/daemon/internal/agentterminal"
-	"github.com/gsd-build/daemon/internal/api"
 	"github.com/gsd-build/daemon/internal/claude"
 	daemonfs "github.com/gsd-build/daemon/internal/fs"
 	daemonlogging "github.com/gsd-build/daemon/internal/logging"
@@ -40,34 +38,32 @@ type ImageUploader interface {
 
 // Options configures a new Actor.
 type Options struct {
-	SessionID          string
-	CWD                string
-	Relay              RelaySender
-	Model              string
-	Provider           string
-	Effort             string
-	PermissionMode     string
-	WarmPiWorkers      bool
-	WarmClaudeSDK      bool
-	ResumeSession      string
-	PiBinaryPath       string
-	PiExtensionPath    string
-	ServerURL          string
-	MachineID          string
-	AuthToken          string
-	DaemonSocketPath   string
-	SubagentAuthSecret string
-	AgentDir           string
-	Uploader           ImageUploader // nil = image upload disabled
-	BrowserGrantID     string
-	BrowserID          string
-	BrowserGrant       *protocol.BrowserGrantContext
-	BrowserRuntime     BrowserRuntimeSnapshot
-	BrowserRPCSocket   string
-	RecordTouchedFile  func(channelID string, cwd string, path string)
-	OnTaskIdle         func()
-	ProjectID          string
-	AgentTools         AgentToolController
+	SessionID         string
+	CWD               string
+	Relay             RelaySender
+	Model             string
+	Provider          string
+	Effort            string
+	PermissionMode    string
+	WarmPiWorkers     bool
+	WarmClaudeSDK     bool
+	ResumeSession     string
+	PiBinaryPath      string
+	PiExtensionPath   string
+	ServerURL         string
+	MachineID         string
+	AuthToken         string
+	DaemonSocketPath  string
+	Uploader          ImageUploader // nil = image upload disabled
+	BrowserGrantID    string
+	BrowserID         string
+	BrowserGrant      *protocol.BrowserGrantContext
+	BrowserRuntime    BrowserRuntimeSnapshot
+	BrowserRPCSocket  string
+	RecordTouchedFile func(channelID string, cwd string, path string)
+	OnTaskIdle        func()
+	ProjectID         string
+	AgentTools        AgentToolController
 }
 
 // Actor drives a single agent session using spawn-per-task execution.
@@ -937,26 +933,6 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		}
 	}
 
-	subagentsPrompt := ""
-	if definitions, err := a.syncSubagents(taskCtx); err != nil {
-		slog.Warn("sync subagents failed", "sessionId", a.opts.SessionID, "err", err)
-	} else {
-		subagentsPrompt = agents.BuildPrompt(definitions)
-	}
-
-	subagentAuthToken := ""
-	if a.opts.SubagentAuthSecret != "" {
-		token, err := sockapi.NewSubagentAuthToken(a.opts.SubagentAuthSecret, sockapi.SubagentAuthClaims{
-			ParentSessionID: a.opts.SessionID,
-			Operation:       "*",
-			ExpiresAt:       time.Now().Add(24 * time.Hour).Unix(),
-		})
-		if err != nil {
-			return fmt.Errorf("create subagent auth token: %w", err)
-		}
-		subagentAuthToken = token
-	}
-
 	opts := pi.Options{
 		BinaryPath:                 binaryPath,
 		CWD:                        a.opts.CWD,
@@ -980,10 +956,6 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		BrowserRuntimeVersion:      tc.BrowserRuntime.Version,
 		WarmClaudeSDK:              a.opts.WarmClaudeSDK,
 		DaemonSocketPath:           a.opts.DaemonSocketPath,
-		SubagentAuthToken:          subagentAuthToken,
-		ParentSessionID:            a.opts.SessionID,
-		AgentDir:                   a.opts.AgentDir,
-		SubagentsPrompt:            subagentsPrompt,
 		ToolProfile:                inferToolProfile(prompt),
 	}
 	if tc.BrowserGrant != nil {
@@ -1065,37 +1037,6 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	return a.handleResult(taskCtx, tc, resultRaw)
-}
-
-func (a *Actor) syncSubagents(ctx context.Context) ([]agents.Definition, error) {
-	if a.opts.ServerURL == "" || a.opts.MachineID == "" || a.opts.AuthToken == "" {
-		return nil, nil
-	}
-	if a.opts.AgentDir == "" {
-		return nil, nil
-	}
-	resp, err := api.NewClient(a.opts.ServerURL).ListSubagents(ctx, api.ListSubagentsRequest{
-		MachineID: a.opts.MachineID,
-		AuthToken: a.opts.AuthToken,
-		SessionID: a.opts.SessionID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	defs := make([]agents.Definition, 0, len(resp.Agents))
-	for _, agent := range resp.Agents {
-		defs = append(defs, agents.Definition{
-			Name:         agent.Name,
-			Description:  agent.Description,
-			SystemPrompt: agent.SystemPrompt,
-			Model:        agent.Model,
-			Tools:        agent.Tools,
-		})
-	}
-	if err := agents.SyncDefinitions(a.opts.AgentDir, defs); err != nil {
-		return nil, err
-	}
-	return defs, nil
 }
 
 func (a *Actor) runPiWorker(actorCtx context.Context, taskCtx context.Context, tc *taskContext, prompt string, opts pi.Options, coordinator *structuredQuestionCoordinator) error {

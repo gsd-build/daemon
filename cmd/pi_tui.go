@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gsd-build/daemon/internal/agents"
 	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/config"
 	"github.com/gsd-build/daemon/internal/pi"
@@ -110,8 +108,6 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 	if err != nil {
 		return err
 	}
-	agentDir := filepath.Join(homeDir, ".gsd-cloud", "agents")
-	subagentsPrompt := piTUISubagentsPrompt(agentDir)
 	taskID := strings.TrimSpace(piTUIFlags.taskID)
 	if taskID == "" {
 		taskID = "local-tui-task"
@@ -146,13 +142,9 @@ func runPiTUI(parent context.Context, initialMessages []string) error {
 		BrowserSessionID:   strings.TrimSpace(piTUIFlags.browserSessionID),
 		WarmClaudeSDK:      piTUIWarmClaudeSDK(),
 		DaemonSocketPath:   filepath.Join(homeDir, ".gsd-cloud", "daemon.sock"),
-		ParentSessionID:    strings.TrimSpace(piTUIFlags.sessionID),
-		AgentDir:           agentDir,
-		SubagentsPrompt:    subagentsPrompt,
 	}
 	if piOpts.SessionID == "" {
 		piOpts.SessionID = "local-tui"
-		piOpts.ParentSessionID = piOpts.SessionID
 	}
 
 	var stopAgentTools func()
@@ -361,36 +353,6 @@ func piTUIMachineID() string {
 		return strings.TrimSpace(cfg.MachineID)
 	}
 	return "local-tui-machine"
-}
-
-func piTUISubagentsPrompt(agentDir string) string {
-	defs := readPiTUIAgents(agentDir)
-	return agents.BuildPrompt(defs)
-}
-
-func readPiTUIAgents(agentDir string) []agents.Definition {
-	entries, err := os.ReadDir(agentDir)
-	if err != nil {
-		return nil
-	}
-	defs := make([]agents.Definition, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(agentDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		var def agents.Definition
-		if err := json.Unmarshal(data, &def); err != nil {
-			continue
-		}
-		if strings.TrimSpace(def.Name) != "" {
-			defs = append(defs, def)
-		}
-	}
-	return defs
 }
 
 func startPiTUIAgentTools(ctx context.Context, scope agentterminal.TaskScope) (agentterminal.TaskControl, func(), error) {
