@@ -14,16 +14,21 @@ const RequiredRuntimeVersion = "0.1.20"
 const runtimeProbeStepTimeout = 10 * time.Second
 
 type RuntimeStatus struct {
-	Installed           bool
-	Version             string
-	MinVersion          string
-	MinVersionOK        bool
-	Path                string
-	ErrorCode           string
-	ErrorMessage        string
-	CloudMethodsVersion int
-	ChromeAvailable     bool
-	Ready               bool
+	Installed              bool
+	Version                string
+	MinVersion             string
+	MinVersionOK           bool
+	BrowserEvidenceLedger  bool
+	BrowserFocusControl    bool
+	BrowserIdentityBinding bool
+	BrowserCredentialGate  bool
+	BrowserArtifactSafety  bool
+	Path                   string
+	ErrorCode              string
+	ErrorMessage           string
+	CloudMethodsVersion    int
+	ChromeAvailable        bool
+	Ready                  bool
 }
 
 type methodManifest struct {
@@ -90,6 +95,11 @@ func ProbeRuntime(ctx context.Context, binaryPath string) RuntimeStatus {
 		return status
 	}
 	status.CloudMethodsVersion = manifest.ManifestVersion
+	status.BrowserEvidenceLedger = true
+	status.BrowserFocusControl = true
+	status.BrowserIdentityBinding = true
+	status.BrowserCredentialGate = true
+	status.BrowserArtifactSafety = true
 
 	healthCtx, healthCancel := context.WithTimeout(ctx, runtimeProbeStepTimeout)
 	defer healthCancel()

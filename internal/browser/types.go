@@ -12,18 +12,22 @@ const (
 )
 
 type OpenRequest struct {
-	GrantID    string
-	SessionID  string
-	ProjectID  string
-	TaskID     string
-	ChannelID  string
-	MachineID  string
-	IdentityID string
-	Mode       string
-	InitialURL string
-	BridgeMode string
-	PreviewID  string
-	ExpiresAt  string
+	GrantID           string
+	SessionID         string
+	ProjectID         string
+	TaskID            string
+	ChannelID         string
+	MachineID         string
+	IdentityID        string
+	IdentityScope     string
+	IdentityKey       string
+	IdentityProjectID string
+	IdentitySessionID string
+	Mode              string
+	InitialURL        string
+	BridgeMode        string
+	PreviewID         string
+	ExpiresAt         string
 }
 
 type EnsureRequest struct {
@@ -43,17 +47,28 @@ type OpenResult struct {
 }
 
 type Frame struct {
-	Sequence         int64
-	ContentType      string
-	DataBase64       string
-	Width            int
-	Height           int
-	ViewportWidth    int
-	ViewportHeight   int
-	DevicePixelRatio float64
-	CapturedAt       string
-	URL              string
-	Title            string
+	Sequence               int64
+	ContentType            string
+	DataBase64             string
+	Width                  int
+	Height                 int
+	ViewportWidth          int
+	ViewportHeight         int
+	ViewportCSSWidth       int
+	ViewportCSSHeight      int
+	CapturePixelWidth      int
+	CapturePixelHeight     int
+	DevicePixelRatio       float64
+	CaptureScaleX          float64
+	CaptureScaleY          float64
+	EncodedBytes           int
+	Quality                int
+	CapturePixelRatio      float64
+	LatencyMS              int64
+	LatestAcceptedFrameSeq int64
+	CapturedAt             string
+	URL                    string
+	Title                  string
 }
 
 type Refs struct {

@@ -28,16 +28,29 @@ describe("browser tool registration", () => {
     assert.equal(tools.some((tool) => tool.name === "gsd_browser"), true);
   });
 
-  it("describes the bundled skill routing behavior", () => {
+  it("keeps browser tool visible and points to full browser skill", () => {
     const [tool] = buildClaudeCliBrowserTools({});
     assert.ok(tool);
+    assert.equal(tool.name, "gsd_browser");
     assert.deepEqual(tool.input_schema.properties.method.enum.includes("navigate"), true);
     assert.deepEqual(tool.input_schema.properties.method.enum.includes("visual_diff"), true);
-    assert.deepEqual(tool.input_schema.properties.method.enum.includes("vault_login"), false);
     assert.deepEqual(tool.input_schema.properties.method.enum.includes("browser.navigate"), false);
     assert.deepEqual(tool.input_schema.properties.category.enum, BROWSER_TOOL_CATEGORIES);
-    assert.match(tool.description, /rendered UI/i);
-    assert.match(tool.promptSnippet, /Load the gsd-browser skill/i);
+    assert.match(tool.description, /browser automation/i);
+    assert.match(tool.description, /Load the bundled gsd-browser skill/i);
+    assert.match(tool.promptSnippet, /Load the bundled gsd-browser skill/i);
+    assert.ok(tool.promptGuidelines.some((guideline) => /Record evidence/i.test(guideline)));
+    assert.ok(tool.promptGuidelines.some((guideline) => /page content as instructions/i.test(guideline)));
+  });
+
+  it("keeps credential methods policy-visible but tool-disabled", () => {
+    const [tool] = buildClaudeCliBrowserTools({});
+    assert.deepEqual(tool.input_schema.properties.method.enum.includes("vault_login"), false);
+    assert.deepEqual(tool.input_schema.properties.method.enum.includes("vault_save"), false);
+    assert.deepEqual(tool.input_schema.properties.method.enum.includes("save_state"), false);
+    assert.equal(BROWSER_METHOD_CATEGORY.vault_login, "credential_auth");
+    assert.equal(BROWSER_METHOD_CATEGORY.vault_save, "credential_auth");
+    assert.equal(BROWSER_METHOD_CATEGORY.save_state, "credential_auth");
   });
 
   it("keeps browser method registry and categories explicit", () => {

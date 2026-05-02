@@ -5,12 +5,13 @@ import "encoding/json"
 type BrowserRisk string
 
 const (
-	BrowserRiskInspection         BrowserRisk = "inspection"
-	BrowserRiskInteraction        BrowserRisk = "interaction"
-	BrowserRiskExternalEffect     BrowserRisk = "external_effect"
-	BrowserRiskNetworkMutation    BrowserRisk = "network_mutation"
-	BrowserRiskCredentialAuth     BrowserRisk = "credential_auth"
-	BrowserRiskArtifactGeneration BrowserRisk = "artifact_generation"
+	BrowserRiskInspection          BrowserRisk = "inspection"
+	BrowserRiskInteraction         BrowserRisk = "interaction"
+	BrowserRiskExternalEffect      BrowserRisk = "external_effect"
+	BrowserRiskNetworkMutation     BrowserRisk = "network_mutation"
+	BrowserRiskCredentialAuth      BrowserRisk = "credential_auth"
+	BrowserRiskArtifactGeneration  BrowserRisk = "artifact_generation"
+	BrowserRiskModelVisibleCapture BrowserRisk = "model_visible_capture"
 )
 
 func classifyBrowserTool(method string, params json.RawMessage) BrowserRisk {
@@ -23,13 +24,51 @@ func classifyBrowserTool(method string, params json.RawMessage) BrowserRisk {
 		return BrowserRiskNetworkMutation
 	case "save_state", "restore_state", "vault_save", "vault_login", "vault_list":
 		return BrowserRiskCredentialAuth
-	case "upload_file", "debug_bundle", "screenshot", "zoom_region", "save_pdf", "visual_diff", "generate_test", "har_export", "trace_start", "trace_stop":
+	case "screenshot", "snapshot", "page_source", "dom_extract", "console_read", "network_read", "artifact_create":
+		return BrowserRiskModelVisibleCapture
+	case "upload_file", "debug_bundle", "zoom_region", "save_pdf", "visual_diff", "generate_test", "har_export", "trace_start", "trace_stop":
 		return BrowserRiskArtifactGeneration
 	case "batch":
 		return classifyBrowserBatch(params)
 	default:
 		return BrowserRiskInspection
 	}
+}
+
+func validateBrowserToolPolicy(method string, params json.RawMessage) error {
+	if method != "upload_file" {
+		return nil
+	}
+	var payload struct {
+		FileToken       string `json:"fileToken"`
+		SelectedToken   string `json:"selectedFileToken"`
+		AllowlistedPath string `json:"allowlistedPath"`
+	}
+	_ = json.Unmarshal(params, &payload)
+	if validLexSelectedFileToken(payload.FileToken) || validLexSelectedFileToken(payload.SelectedToken) {
+		return nil
+	}
+	return ErrBrowserPolicy("upload_file requires a Lex-selected file token")
+}
+
+func validLexSelectedFileToken(token string) bool {
+	const prefix = "lex_file_"
+	if len(token) < len(prefix)+16 || token[:len(prefix)] != prefix {
+		return false
+	}
+	for _, r := range token[len(prefix):] {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+type ErrBrowserPolicy string
+
+func (e ErrBrowserPolicy) Error() string {
+	return string(e)
 }
 
 func classifyBrowserBatch(params json.RawMessage) BrowserRisk {
@@ -90,6 +129,8 @@ func riskRank(risk BrowserRisk) int {
 		return 4
 	case BrowserRiskExternalEffect:
 		return 3
+	case BrowserRiskModelVisibleCapture:
+		return 2
 	case BrowserRiskArtifactGeneration:
 		return 2
 	case BrowserRiskInteraction:
