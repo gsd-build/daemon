@@ -1189,7 +1189,9 @@ func TestHandleTaskIgnoresDuplicateTaskID(t *testing.T) {
 	if !relaySink.waitForTaskCompletes(t, 6*time.Second, "dup-task-1", 1) {
 		t.Fatal("expected task to complete")
 	}
-	time.Sleep(1500 * time.Millisecond)
+	if relaySink.waitForTaskCompletes(t, 1500*time.Millisecond, "dup-task-1", 2) {
+		t.Fatal("duplicate task produced a second completion")
+	}
 
 	if got := relaySink.countTaskCompletes("dup-task-1"); got != 1 {
 		t.Fatalf("expected duplicate task to be ignored, got %d TaskComplete frames", got)
