@@ -175,6 +175,7 @@ func TestRunControlExcludesUnrelatedHostSecrets(t *testing.T) {
 	envPath := filepath.Join(outDir, "env.txt")
 	fakePi := writeFakePi(t, `
 env | sort > "`+envPath+`"
+cat >/dev/null
 printf '%s\n' '{"type":"control_result","ok":true}'
 `)
 
@@ -205,6 +206,7 @@ printf '%s\n' '{"type":"control_result","ok":true}'
 func TestRunControlDoesNotUseStatsTokenAccountingAsContextUsage(t *testing.T) {
 	outDir := t.TempDir()
 	fakePi := writeFakePi(t, `
+cat >/dev/null
 printf '%s\n' '{"type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"session.jsonl","sessionId":"session_1","tokens":{"input":185000,"output":3000,"cacheRead":90000,"cacheWrite":0,"total":278000}}}'
 `)
 
@@ -228,6 +230,7 @@ printf '%s\n' '{"type":"response","command":"get_session_stats","success":true,"
 func TestRunControlParsesNullStatsContextUsage(t *testing.T) {
 	outDir := t.TempDir()
 	fakePi := writeFakePi(t, `
+cat >/dev/null
 printf '%s\n' '{"type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"session.jsonl","sessionId":"session_1","contextUsage":{"tokens":null,"contextWindow":1000000,"percent":null}}}'
 `)
 
@@ -316,6 +319,7 @@ printf '%s\n' '{"type":"response","command":"compact","success":true,"data":{"su
 func TestRunControlRequiresTerminalResultFrame(t *testing.T) {
 	outDir := t.TempDir()
 	fakePi := writeFakePi(t, `
+cat >/dev/null
 printf '%s\n' '{"type":"compaction_start","reason":"manual"}'
 `)
 

@@ -1084,6 +1084,30 @@ func (r *loopFakeRelay) waitForTaskStarted(t *testing.T, timeout time.Duration, 
 	}
 }
 
+func (r *loopFakeRelay) waitForTaskCompletes(t *testing.T, timeout time.Duration, taskID string, count int) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for {
+		got := 0
+		for _, frame := range r.frames {
+			if tc, ok := frame.(*protocol.TaskComplete); ok && tc.TaskID == taskID {
+				got++
+			}
+		}
+		if got >= count {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		r.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		r.mu.Lock()
+	}
+}
+
 func writeFakePiBinary(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
@@ -1162,7 +1186,12 @@ func TestHandleTaskIgnoresDuplicateTaskID(t *testing.T) {
 		t.Fatalf("duplicate handleTask: %v", err)
 	}
 
-	time.Sleep(3500 * time.Millisecond)
+	if !relaySink.waitForTaskCompletes(t, 6*time.Second, "dup-task-1", 1) {
+		t.Fatal("expected task to complete")
+	}
+	if relaySink.waitForTaskCompletes(t, 1500*time.Millisecond, "dup-task-1", 2) {
+		t.Fatal("duplicate task produced a second completion")
+	}
 
 	if got := relaySink.countTaskCompletes("dup-task-1"); got != 1 {
 		t.Fatalf("expected duplicate task to be ignored, got %d TaskComplete frames", got)
