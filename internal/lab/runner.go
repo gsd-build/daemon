@@ -17,6 +17,7 @@ type RunnerOptions struct {
 	AuthToken     string
 	FakeMode      bool
 	PiBinary      string
+	WarmWorkers   *bool
 	ExtensionPath string
 }
 
@@ -47,6 +48,9 @@ func (r *Runner) WriteConfig() error {
 		"taskTimeoutMinutes": 30,
 		"logLevel":           "debug",
 	}
+	if r.opts.WarmWorkers != nil {
+		cfg["warmWorkersEnabled"] = *r.opts.WarmWorkers
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -69,11 +73,14 @@ func (r *Runner) Start(ctx context.Context) error {
 		r.opts.PiBinary = piPath
 	}
 	r.cmd = exec.CommandContext(ctx, r.opts.BinaryPath, "start", "--foreground")
-	r.cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"HOME="+r.HomeDir(),
-		"GSD_PI_BINARY="+r.opts.PiBinary,
 		"GSD_PI_EXTENSION_PATH="+r.opts.ExtensionPath,
 	)
+	if r.opts.PiBinary != "" {
+		env = append(env, "GSD_PI_BINARY="+r.opts.PiBinary)
+	}
+	r.cmd.Env = env
 	r.cmd.Stdout = os.Stdout
 	r.cmd.Stderr = os.Stderr
 	return r.cmd.Start()

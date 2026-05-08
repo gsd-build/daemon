@@ -59,6 +59,7 @@ func piExitError(code int, stderr string) error {
 // Options configures a pi process.
 type Options struct {
 	BinaryPath         string // pi binary; defaults to "pi"
+	Runtime            Runtime
 	CWD                string
 	Model              string // forwarded as --model
 	ResumeSession      string // forwarded as --session <path>; empty = --no-session
@@ -110,16 +111,22 @@ func NewExecutor(opts Options) *Executor {
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = "pi"
 	}
+	opts.Runtime = opts.Runtime.normalize(opts.BinaryPath)
 	opts.Provider = ProviderOrDefault(opts.Provider)
 	return &Executor{opts: opts}
 }
 
-func piRPCCommand(ctx context.Context, binaryPath string, cwd string, sessionFile string, args ...string) *exec.Cmd {
-	baseArgs := []string{"-p", "--mode", "rpc"}
-	baseArgs = append(baseArgs, args...)
-	if sessionFile != "" {
-		baseArgs = append(baseArgs, "--session", sessionFile)
+func piRPCCommand(ctx context.Context, runtime Runtime, binaryPath string, cwd string, sessionFile string, args ...string) *exec.Cmd {
+	var baseArgs []string
+	if runtime == RuntimeRust {
+		baseArgs = []string{"--mode", "rpc"}
 	} else {
+		baseArgs = []string{"-p", "--mode", "rpc"}
+	}
+	baseArgs = append(baseArgs, args...)
+	if runtime == RuntimeStock && sessionFile != "" {
+		baseArgs = append(baseArgs, "--session", sessionFile)
+	} else if runtime == RuntimeStock {
 		baseArgs = append(baseArgs, "--no-session")
 	}
 	cmd := exec.CommandContext(ctx, binaryPath, baseArgs...)
@@ -130,6 +137,13 @@ func piRPCCommand(ctx context.Context, binaryPath string, cwd string, sessionFil
 }
 
 func processArgs(opts Options) []string {
+	if opts.runtime() == RuntimeRust {
+		return processArgsRust(opts)
+	}
+	return processArgsStock(opts)
+}
+
+func processArgsStock(opts Options) []string {
 	args := []string{
 		"-e", opts.ExtensionPath,
 		"--provider", ProviderOrDefault(opts.Provider),
@@ -153,9 +167,50 @@ func processArgs(opts Options) []string {
 	return args
 }
 
+func processArgsRust(opts Options) []string {
+	args := []string{
+		"--provider", providerForRuntime(RuntimeRust, opts.Provider),
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.CWD != "" {
+		args = append(args, "--cwd", opts.CWD)
+	}
+	if systemPrompt := appendedSystemPrompt(opts); systemPrompt != "" {
+		args = append(args, "--system-prompt", systemPrompt)
+	}
+	if !opts.DisableSkills {
+		for _, path := range opts.SkillPaths {
+			if path != "" {
+				args = append(args, "--skill", path)
+			}
+		}
+	}
+	return args
+}
+
 // ProcessArgs returns the daemon Pi flags shared by RPC and TUI launchers.
 func ProcessArgs(opts Options) []string {
 	return processArgs(opts)
+}
+
+func writeSessionSwitchFrame(w io.Writer, runtime Runtime, sessionFile string) error {
+	if runtime != RuntimeRust || strings.TrimSpace(sessionFile) == "" {
+		return nil
+	}
+	frame, err := json.Marshal(map[string]any{
+		"id":          "switch-session",
+		"type":        "switch_session",
+		"sessionPath": sessionFile,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal pi-rust session switch frame: %w", err)
+	}
+	if _, err := w.Write(append(frame, '\n')); err != nil {
+		return fmt.Errorf("write pi-rust session switch frame: %w", err)
+	}
+	return nil
 }
 
 func appendedSystemPrompt(opts Options) string {
@@ -168,7 +223,7 @@ func appendedSystemPrompt(opts Options) string {
 }
 
 func runtimeIdentityPrompt(opts Options, now time.Time) string {
-	provider := cleanRuntimeValue(ProviderOrDefault(opts.Provider))
+	provider := cleanRuntimeValue(providerForRuntime(opts.runtime(), opts.Provider))
 	model := cleanRuntimeValue(strings.TrimSpace(opts.Model))
 	if model == "" {
 		model = "default"
@@ -211,7 +266,7 @@ func cleanRuntimeValue(value string) string {
 }
 
 func processEnv(ctx context.Context, base []string, opts Options) []string {
-	provider := ProviderOrDefault(opts.Provider)
+	provider := providerForRuntime(opts.runtime(), opts.Provider)
 	allowedBase := ensureUserIdentityEnv(allowlistedBaseEnv(base, provider))
 	return daemonSocketEnv(
 		warmClaudeSDKEnv(
@@ -282,14 +337,14 @@ func ensureUserIdentityEnv(env []string) []string {
 }
 
 func allowlistedBaseEnv(base []string, provider string) []string {
-	providerKey := providerCredentialKey(provider)
+	providerKeys := providerEnvironmentKeys(provider)
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok || key == "" {
 			continue
 		}
-		if isAllowedBaseEnvKey(key) || (providerKey != "" && key == providerKey) {
+		if isAllowedBaseEnvKey(key) || providerKeys[key] {
 			out = append(out, entry)
 		}
 	}
@@ -304,14 +359,55 @@ func isAllowedBaseEnvKey(key string) bool {
 	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "FAKE_PI_")
 }
 
-func providerCredentialKey(provider string) string {
+func providerEnvironmentKeys(provider string) map[string]bool {
 	switch ProviderOrDefault(provider) {
 	case "openrouter", "zai", "kimi-coding":
-		return openRouterAPIKeyEnv
-	case "claude-cli":
-		return "ANTHROPIC_API_KEY"
+		return map[string]bool{openRouterAPIKeyEnv: true}
+	case "claude-cli", "anthropic":
+		return map[string]bool{"ANTHROPIC_API_KEY": true}
+	case "openai-responses":
+		return map[string]bool{"OPENAI_API_KEY": true}
+	case "azure-openai-responses":
+		return map[string]bool{
+			"AZURE_OPENAI_API_KEY":       true,
+			"AZURE_OPENAI_API_VERSION":   true,
+			"AZURE_OPENAI_BASE_URL":      true,
+			"AZURE_OPENAI_RESOURCE_NAME": true,
+		}
+	case "openai-codex", "openai-codex-responses":
+		return map[string]bool{"OPENAI_CODEX_API_KEY": true, "OPENAI_CODEX_BASE_URL": true}
+	case "github-copilot":
+		return map[string]bool{"COPILOT_GITHUB_TOKEN": true, "GH_TOKEN": true, "GITHUB_TOKEN": true}
+	case "google", "gemini":
+		return map[string]bool{"GEMINI_API_KEY": true}
+	case "google-vertex":
+		return map[string]bool{"GOOGLE_CLOUD_API_KEY": true, "GOOGLE_VERTEX_BASE_URL": true}
+	case "mistral":
+		return map[string]bool{"MISTRAL_API_KEY": true}
+	case "cloudflare-workers-ai":
+		return map[string]bool{"CLOUDFLARE_API_KEY": true, "CLOUDFLARE_ACCOUNT_ID": true}
+	case "cloudflare-ai-gateway":
+		return map[string]bool{
+			"CLOUDFLARE_API_KEY":    true,
+			"CLOUDFLARE_ACCOUNT_ID": true,
+			"CLOUDFLARE_GATEWAY_ID": true,
+			"OPENAI_API_KEY":        true,
+			"ANTHROPIC_API_KEY":     true,
+		}
+	case "amazon-bedrock":
+		return map[string]bool{
+			"AWS_ACCESS_KEY_ID":                true,
+			"AWS_BEARER_TOKEN_BEDROCK":         true,
+			"AWS_BEDROCK_SKIP_AUTH":            true,
+			"AWS_DEFAULT_REGION":               true,
+			"AWS_ENDPOINT_URL_BEDROCK_RUNTIME": true,
+			"AWS_PROFILE":                      true,
+			"AWS_REGION":                       true,
+			"AWS_SECRET_ACCESS_KEY":            true,
+			"AWS_SESSION_TOKEN":                true,
+		}
 	default:
-		return ""
+		return nil
 	}
 }
 
@@ -410,11 +506,14 @@ type ToolExecutionStart struct {
 // onEvent receives claude.Event in the claude stream-json shape (translated
 // from pi NDJSON). The existing relay forwarding path consumes this unmodified.
 func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, onUIRequest UIRequestHandler) error {
-	if e.opts.ExtensionPath == "" {
+	runtime := e.opts.runtime()
+	if runtime == RuntimeStock && e.opts.ExtensionPath == "" {
 		return fmt.Errorf("pi extension path is required")
 	}
-	if _, err := os.Stat(e.opts.ExtensionPath); err != nil {
-		return fmt.Errorf("pi extension not found at %s: %w", e.opts.ExtensionPath, err)
+	if runtime == RuntimeStock {
+		if _, err := os.Stat(e.opts.ExtensionPath); err != nil {
+			return fmt.Errorf("pi extension not found at %s: %w", e.opts.ExtensionPath, err)
+		}
 	}
 
 	args := processArgs(e.opts)
@@ -448,7 +547,7 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		"agentTools":              e.opts.AgentToolsSocket != "",
 	})
 
-	cmd := piRPCCommand(ctx, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
+	cmd := piRPCCommand(ctx, runtime, e.opts.BinaryPath, e.opts.CWD, e.opts.ResumeSession, args...)
 	cmd.Env = processEnv(ctx, os.Environ(), e.opts)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -526,7 +625,19 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 		}
 	}()
 
-	// Send the prompt as the first RPC frame.
+	if err := writeSessionSwitchFrame(stdin, runtime, e.opts.ResumeSession); err != nil {
+		if e.OnLifecycle.CleanupStarted != nil {
+			e.OnLifecycle.CleanupStarted(pid)
+		}
+		_ = terminateProcessGroupAndWait(cmd, pid, stdin, 2*time.Second)
+		if e.OnLifecycle.CleanupFinished != nil {
+			e.OnLifecycle.CleanupFinished(pid, "process_group_killed")
+		}
+		<-stderrDone
+		return err
+	}
+
+	// Send the prompt as the first task RPC frame.
 	promptFrame, _ := json.Marshal(map[string]any{
 		"id":      "task-prompt",
 		"type":    "prompt",
@@ -625,19 +736,16 @@ func (e *Executor) Run(ctx context.Context, onEvent func(claude.Event) error, on
 }
 
 func providerEnv(ctx context.Context, base []string, provider string) []string {
-	key := providerCredentialKey(provider)
-	if key == "" {
+	keys := providerEnvironmentKeys(provider)
+	if !keys[openRouterAPIKeyEnv] {
 		return base
 	}
-	if envHasKey(base, key) {
+	if envHasKey(base, openRouterAPIKeyEnv) {
 		return base
 	}
-	if key != openRouterAPIKeyEnv {
-		return base
-	}
-	if value := strings.TrimSpace(lookupServiceManagerEnv(ctx, key)); value != "" {
+	if value := strings.TrimSpace(lookupServiceManagerEnv(ctx, openRouterAPIKeyEnv)); value != "" {
 		env := make([]string, 0, len(base)+1)
-		prefix := key + "="
+		prefix := openRouterAPIKeyEnv + "="
 		for _, entry := range base {
 			if strings.HasPrefix(entry, prefix) {
 				continue

@@ -11,6 +11,8 @@ type SessionConfig struct {
 	Effort         string `json:"effort"`
 	PermissionMode string `json:"permissionMode"`
 	FakeMode       bool   `json:"fakeMode"`
+	PiBinary       string `json:"piBinary,omitempty"`
+	WarmWorkers    *bool  `json:"warmWorkers,omitempty"`
 }
 
 type SessionStoreOptions struct {

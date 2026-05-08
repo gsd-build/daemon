@@ -206,12 +206,19 @@ func NewActor(opts Options) (*Actor, error) {
 		if binaryPath == "" {
 			binaryPath = "pi"
 		}
+		provider := actor.currentPiProvider()
+		runtime := pi.ResolveRuntime(binaryPath)
+		if runtime == pi.RuntimeRust && !pi.RuntimeSupportsProvider(runtime, provider) {
+			binaryPath = pi.StockBinaryPath()
+			runtime = pi.RuntimeStock
+		}
 		return pi.RunControl(ctx, pi.ControlOptions{
 			BinaryPath:  binaryPath,
+			Runtime:     runtime,
 			CWD:         actor.opts.CWD,
 			SessionFile: sessionFile,
 			Model:       actor.currentPiModel(),
-			Provider:    actor.currentPiProvider(),
+			Provider:    provider,
 			Command:     command,
 			OnEvent:     onEvent,
 		})
@@ -872,6 +879,11 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	if binaryPath == "" {
 		binaryPath = "pi"
 	}
+	runtime := pi.ResolveRuntime(binaryPath)
+	if runtime == pi.RuntimeRust && !pi.RuntimeSupportsProvider(runtime, provider) {
+		binaryPath = pi.StockBinaryPath()
+		runtime = pi.RuntimeStock
+	}
 	sessionFile, err := piSessionFileForSession(a.opts.SessionID)
 	if err != nil {
 		return err
@@ -895,6 +907,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 
 	opts := pi.Options{
 		BinaryPath:         binaryPath,
+		Runtime:            runtime,
 		CWD:                a.opts.CWD,
 		Model:              model,
 		ResumeSession:      sessionFile,
@@ -911,7 +924,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 		DaemonSocketPath:   a.opts.DaemonSocketPath,
 		ToolProfile:        inferToolProfile(prompt),
 	}
-	if a.opts.AgentTools != nil {
+	if runtime == pi.RuntimeStock && a.opts.AgentTools != nil {
 		control, err := a.opts.AgentTools.StartTask(taskCtx, agentterminal.TaskScope{
 			SessionID:  a.opts.SessionID,
 			ChannelID:  tc.ChannelID,
@@ -929,7 +942,7 @@ func (a *Actor) runPiExecutor(actorCtx context.Context, taskCtx context.Context,
 	}
 
 	coordinator := &structuredQuestionCoordinator{}
-	if a.useWarmPiWorker && a.opts.AgentTools == nil {
+	if a.useWarmPiWorker && runtime == pi.RuntimeStock && a.opts.AgentTools == nil {
 		return a.runPiWorker(actorCtx, taskCtx, tc, prompt, opts, coordinator)
 	}
 

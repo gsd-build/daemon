@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/gsd-build/daemon/internal/lab"
 	"github.com/spf13/cobra"
@@ -21,6 +22,8 @@ var labFlags struct {
 	effort         string
 	permissionMode string
 	fake           bool
+	piBinary       string
+	warmWorkers    string
 	port           int
 }
 
@@ -28,6 +31,10 @@ var labCmd = &cobra.Command{
 	Use:   "lab",
 	Short: "Run the local provider lab",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		warmWorkers, err := parseLabBoolPtr(labFlags.warmWorkers)
+		if err != nil {
+			return err
+		}
 		cwd := labFlags.cwd
 		if absCWD, err := filepath.Abs(cwd); err == nil {
 			cwd = absCWD
@@ -41,6 +48,7 @@ var labCmd = &cobra.Command{
 			Provider:      labFlags.provider,
 			Model:         labFlags.model,
 			FakeMode:      labFlags.fake,
+			PiBinary:      labFlags.piBinary,
 			ExtensionPath: extensionPath,
 		})
 		if !result.OK {
@@ -56,6 +64,8 @@ var labCmd = &cobra.Command{
 				Effort:         labFlags.effort,
 				PermissionMode: labFlags.permissionMode,
 				FakeMode:       labFlags.fake,
+				PiBinary:       labFlags.piBinary,
+				WarmWorkers:    warmWorkers,
 			},
 		})
 		if err != nil {
@@ -88,6 +98,8 @@ var labCmd = &cobra.Command{
 			MachineID:     "lab-machine",
 			AuthToken:     "lab-token",
 			FakeMode:      labFlags.fake,
+			PiBinary:      labFlags.piBinary,
+			WarmWorkers:   warmWorkers,
 			ExtensionPath: extensionPath,
 		})
 		ctx, cancel := context.WithCancel(cmd.Context())
@@ -130,7 +142,25 @@ func init() {
 	labCmd.Flags().StringVar(&labFlags.effort, "effort", "medium", "Reasoning effort")
 	labCmd.Flags().StringVar(&labFlags.permissionMode, "permission-mode", "acceptEdits", "Permission mode")
 	labCmd.Flags().BoolVar(&labFlags.fake, "fake", false, "Use fake Pi mode")
+	labCmd.Flags().StringVar(&labFlags.piBinary, "pi-binary", "", "Pi binary path for the child daemon")
+	labCmd.Flags().StringVar(&labFlags.warmWorkers, "warm-workers", "", "Warm worker setting: on or off")
 	labCmd.Flags().IntVar(&labFlags.port, "port", 0, "Local lab port")
 	labCmd.AddCommand(labAnalyzeCmd)
 	rootCmd.AddCommand(labCmd)
+}
+
+func parseLabBoolPtr(value string) (*bool, error) {
+	clean := strings.ToLower(strings.TrimSpace(value))
+	switch clean {
+	case "1", "true", "yes", "on":
+		enabled := true
+		return &enabled, nil
+	case "0", "false", "no", "off":
+		enabled := false
+		return &enabled, nil
+	case "":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unsupported --warm-workers value %q; use on or off", value)
+	}
 }

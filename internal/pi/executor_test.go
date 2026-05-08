@@ -232,6 +232,80 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"
 	}
 }
 
+func TestExecutorUsesPiRustRPCContract(t *testing.T) {
+	outDir := t.TempDir()
+	argsFile := filepath.Join(outDir, "pi.args")
+	stdinFile := filepath.Join(outDir, "stdin.jsonl")
+	cwd := t.TempDir()
+	sessionFile := filepath.Join(outDir, "session.jsonl")
+	skillPath := filepath.Join(outDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("# test skill"), 0o600); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	fakePiRust := writeFakePiNamed(t, "pi-rust", `
+: > "`+argsFile+`"
+for arg in "$@"; do
+  printf '%s\000' "$arg" >> "`+argsFile+`"
+done
+: > "`+stdinFile+`"
+for _ in 1 2; do
+  IFS= read -r frame || true
+  printf '%s\n' "$frame" >> "`+stdinFile+`"
+done
+printf '%s\n' '{"type":"response","command":"switch_session","success":true,"id":"switch-session"}'
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ok"},"message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}}}}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"provider":"anthropic","model":"claude-sonnet-4-6","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}}]}'
+`)
+
+	exec := NewExecutor(Options{
+		BinaryPath:         fakePiRust,
+		CWD:                cwd,
+		Provider:           "claude-cli",
+		Model:              "claude-sonnet-4-6",
+		ResumeSession:      sessionFile,
+		Prompt:             "hello",
+		CustomInstructions: "Keep answers short.",
+		ExtensionPath:      filepath.Join(outDir, "missing-stock-extension.ts"),
+		SkillPaths:         []string{skillPath},
+	})
+
+	if err := exec.Run(context.Background(), func(claude.Event) error { return nil }, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	for _, denied := range []string{"-e", "--no-extensions", "--no-prompt-templates", "--offline", "--append-system-prompt", "--session", "--no-session", "--no-skills"} {
+		if argIndex(args, denied) >= 0 {
+			t.Fatalf("pi-rust args include stock-only flag %q: %v", denied, args)
+		}
+	}
+	assertArgValue(t, args, "--mode", "rpc")
+	assertArgValue(t, args, "--provider", "anthropic")
+	assertArgValue(t, args, "--model", "claude-sonnet-4-6")
+	assertArgValue(t, args, "--cwd", cwd)
+	assertArgValue(t, args, "--skill", skillPath)
+	systemPrompt := argValue(t, args, "--system-prompt")
+	if !strings.Contains(systemPrompt, "Keep answers short.") || !strings.Contains(systemPrompt, "<runtime_context>") {
+		t.Fatalf("pi-rust system prompt missing daemon context: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Provider: anthropic") {
+		t.Fatalf("pi-rust system prompt should describe runtime provider: %q", systemPrompt)
+	}
+
+	frames := readJSONLines(t, stdinFile)
+	if len(frames) != 2 {
+		t.Fatalf("stdin frames = %d, want 2: %#v", len(frames), frames)
+	}
+	if frames[0]["type"] != "switch_session" || frames[0]["sessionPath"] != sessionFile {
+		t.Fatalf("first frame = %#v, want switch_session for %s", frames[0], sessionFile)
+	}
+	if frames[1]["type"] != "prompt" || frames[1]["message"] != "hello" {
+		t.Fatalf("second frame = %#v, want prompt", frames[1])
+	}
+}
+
 func TestExecutorPassesAgentToolsEnv(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin",
@@ -271,6 +345,26 @@ func TestExecutorPassesAgentToolsEnv(t *testing.T) {
 		if strings.Contains(got, stale) {
 			t.Fatalf("env kept stale agent tool value %q: %s", stale, got)
 		}
+	}
+}
+
+func TestProcessEnvUsesPiRustProviderAlias(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_API_KEY=sk-anthropic",
+		"OPENROUTER_API_KEY=sk-openrouter",
+	}
+
+	env := processEnv(context.Background(), base, Options{
+		Runtime:  RuntimeRust,
+		Provider: "claude-cli",
+	})
+	got := strings.Join(env, "\n")
+	if !strings.Contains(got, "ANTHROPIC_API_KEY=sk-anthropic") {
+		t.Fatalf("pi-rust claude alias env missing anthropic credential: %s", got)
+	}
+	if strings.Contains(got, "OPENROUTER_API_KEY=") {
+		t.Fatalf("pi-rust claude alias env leaked unrelated provider credential: %s", got)
 	}
 }
 
@@ -344,6 +438,77 @@ func TestProcessEnvExcludesUnrelatedSecrets(t *testing.T) {
 		if strings.Contains(got, denied) {
 			t.Fatalf("env leaked %q: %s", denied, got)
 		}
+	}
+}
+
+func TestProcessEnvAllowsPiRustProviderEnvironment(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"AZURE_OPENAI_API_KEY=azure-key",
+		"AZURE_OPENAI_RESOURCE_NAME=azure-resource",
+		"AWS_ACCESS_KEY_ID=aws-access",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"AWS_SESSION_TOKEN=aws-session",
+		"AWS_REGION=us-east-1",
+		"CLOUDFLARE_API_KEY=cf-key",
+		"CLOUDFLARE_ACCOUNT_ID=cf-account",
+		"CLOUDFLARE_GATEWAY_ID=cf-gateway",
+		"GOOGLE_CLOUD_API_KEY=vertex-key",
+		"GOOGLE_VERTEX_BASE_URL=https://vertex.example",
+		"OPENAI_API_KEY=openai-key",
+		"SECRET_TOKEN=arbitrary-secret",
+	}
+
+	cases := []struct {
+		provider string
+		want     []string
+	}{
+		{
+			provider: "azure-openai-responses",
+			want: []string{
+				"AZURE_OPENAI_API_KEY=azure-key",
+				"AZURE_OPENAI_RESOURCE_NAME=azure-resource",
+			},
+		},
+		{
+			provider: "amazon-bedrock",
+			want: []string{
+				"AWS_ACCESS_KEY_ID=aws-access",
+				"AWS_SECRET_ACCESS_KEY=aws-secret",
+				"AWS_SESSION_TOKEN=aws-session",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			provider: "cloudflare-ai-gateway",
+			want: []string{
+				"CLOUDFLARE_API_KEY=cf-key",
+				"CLOUDFLARE_ACCOUNT_ID=cf-account",
+				"CLOUDFLARE_GATEWAY_ID=cf-gateway",
+				"OPENAI_API_KEY=openai-key",
+			},
+		},
+		{
+			provider: "google-vertex",
+			want: []string{
+				"GOOGLE_CLOUD_API_KEY=vertex-key",
+				"GOOGLE_VERTEX_BASE_URL=https://vertex.example",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			env := processEnv(context.Background(), base, Options{Runtime: RuntimeRust, Provider: tc.provider})
+			got := strings.Join(env, "\n")
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("env missing %q: %s", want, got)
+				}
+			}
+			if strings.Contains(got, "SECRET_TOKEN=") {
+				t.Fatalf("env leaked unrelated secret: %s", got)
+			}
+		})
 	}
 }
 

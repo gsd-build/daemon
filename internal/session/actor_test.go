@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gsd-build/daemon/internal/agentterminal"
 	"github.com/gsd-build/daemon/internal/pi"
 	protocol "github.com/gsd-build/protocol-go"
 )
@@ -67,6 +68,28 @@ func writeWarmFakePi(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "fake-pi-warm")
+	return writeWarmFakePiAtPath(t, path)
+}
+
+func writeWarmFakePiRust(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "pi-rust")
+	return writeWarmFakePiAtPath(t, path)
+}
+
+func writeFailingPiRust(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pi-rust")
+	script := "#!/bin/sh\nexit 99\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write failing pi-rust: %v", err)
+	}
+	return path
+}
+
+func writeWarmFakePiAtPath(t *testing.T, path string) string {
+	t.Helper()
 	script := `#!/bin/sh
 count=0
 while IFS= read -r line; do
@@ -139,6 +162,17 @@ func argValues(args []string, flag string) []string {
 		}
 	}
 	return values
+}
+
+func assertArgValue(t *testing.T, args []string, flag string, want string) {
+	t.Helper()
+	values := argValues(args, flag)
+	if len(values) == 0 {
+		t.Fatalf("args missing %s: %v", flag, args)
+	}
+	if values[0] != want {
+		t.Fatalf("%s = %q, want %q; args=%v", flag, values[0], want, args)
+	}
 }
 
 func TestNormalizePiModelStripsBracketSuffix(t *testing.T) {
@@ -298,6 +332,70 @@ func TestActorPiExecutorPassesTaskProvider(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestActorPiRustFallsBackToStockForUnsupportedProvider(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+	t.Setenv("GSD_PI_STOCK_BINARY", writeFakePi(t))
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID:    "sess-pi-rust-fallback",
+		Relay:        newFakeRelay(),
+		PiBinaryPath: writeFailingPiRust(t),
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:    "task-pi-rust-fallback",
+		ChannelID: "ch-pi-rust-fallback",
+		Engine:    "pi",
+		Provider:  "codex-appserver",
+		Model:     "gpt-5.5",
+	}, "ask a question")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	if argIndex(args, "-e") < 0 {
+		t.Fatalf("fallback args missing stock extension flag: %v", args)
+	}
+	assertArgValue(t, args, "--provider", "codex-appserver")
+	assertArgValue(t, args, "--model", "gpt-5.5")
+}
+
+func TestActorPiRustFallsBackToStockForDefaultClaudeWithoutAnthropicKey(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "pi.args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+	t.Setenv("GSD_PI_STOCK_BINARY", writeFakePi(t))
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID:    "sess-pi-rust-claude-fallback",
+		Relay:        newFakeRelay(),
+		PiBinaryPath: writeFailingPiRust(t),
+	}))
+	if err != nil {
+		t.Fatalf("new actor: %v", err)
+	}
+
+	err = actor.runPiExecutor(context.Background(), context.Background(), &taskContext{
+		TaskID:    "task-pi-rust-claude-fallback",
+		ChannelID: "ch-pi-rust-claude-fallback",
+		Engine:    "pi",
+	}, "ask a question")
+	if err != nil {
+		t.Fatalf("runPiExecutor: %v", err)
+	}
+
+	args := readNulArgsFile(t, argsFile)
+	if argIndex(args, "-e") < 0 {
+		t.Fatalf("fallback args missing stock extension flag: %v", args)
+	}
+	assertArgValue(t, args, "--provider", "claude-cli")
 }
 
 func TestActorSeedsControlProviderFromOptions(t *testing.T) {
@@ -824,6 +922,67 @@ func TestActorReusesWarmPiWorkerForMatchingTasks(t *testing.T) {
 	}
 	if got := actor.workerPIDForTest(); got != firstPID {
 		t.Fatalf("worker PID = %d, want reused PID %d", got, firstPID)
+	}
+}
+
+type fakeAgentTools struct {
+	starts int
+	stops  int
+}
+
+func (f *fakeAgentTools) StartTask(context.Context, agentterminal.TaskScope) (agentterminal.TaskControl, error) {
+	f.starts++
+	return agentterminal.TaskControl{SocketPath: "/tmp/agent-tools.sock", Token: "token"}, nil
+}
+
+func (f *fakeAgentTools) StopTask(string) {
+	f.stops++
+}
+
+func TestActorUsesColdPiRustExecutorWithAgentToolsConfigured(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	relay := newFakeRelay()
+	agentTools := &fakeAgentTools{}
+	actor, err := NewActor(testPiOptions(t, Options{
+		SessionID:    "sess-pi-rust-warm",
+		CWD:          t.TempDir(),
+		Relay:        relay,
+		PiBinaryPath: writeWarmFakePiRust(t),
+		AgentTools:   agentTools,
+	}))
+	if err != nil {
+		t.Fatalf("NewActor: %v", err)
+	}
+	actor.useWarmPiWorker = true
+	defer actor.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		_ = actor.Run(ctx)
+	}()
+
+	if err := actor.SendTask(protocol.Task{TaskID: "t1", SessionID: "sess-pi-rust-warm", ChannelID: "ch", Prompt: "first", Engine: "pi", Provider: "openrouter", Model: "z-ai/glm-4.7-flash"}); err != nil {
+		t.Fatalf("send t1: %v", err)
+	}
+	if !relay.waitForTaskCompleteID(t, "t1", 5*time.Second) {
+		t.Fatal("t1 did not complete")
+	}
+	if got := actor.workerPIDForTest(); got != 0 {
+		t.Fatalf("worker PID = %d, want no warm pi-rust worker", got)
+	}
+
+	if err := actor.SendTask(protocol.Task{TaskID: "t2", SessionID: "sess-pi-rust-warm", ChannelID: "ch", Prompt: "second", Engine: "pi", Provider: "openrouter", Model: "z-ai/glm-4.7-flash"}); err != nil {
+		t.Fatalf("send t2: %v", err)
+	}
+	if !relay.waitForTaskCompleteID(t, "t2", 5*time.Second) {
+		t.Fatal("t2 did not complete")
+	}
+	if got := actor.workerPIDForTest(); got != 0 {
+		t.Fatalf("worker PID = %d, want no warm pi-rust worker", got)
+	}
+	if agentTools.starts != 0 || agentTools.stops != 0 {
+		t.Fatalf("pi-rust should not start stock agent tools, starts=%d stops=%d", agentTools.starts, agentTools.stops)
 	}
 }
 
