@@ -55,3 +55,17 @@ func TestWorkerKeyIncludesAgentTools(t *testing.T) {
 		t.Fatalf("agent tool token hash = %q", a.AgentToolsTokenHash)
 	}
 }
+
+func TestWorkerKeyUsesPiRustRuntimeProvider(t *testing.T) {
+	key := NewWorkerKey(Options{
+		BinaryPath: "/opt/bin/pi-rust",
+		Provider:   "claude-cli",
+	})
+
+	if key.Runtime != RuntimeRust {
+		t.Fatalf("runtime = %q, want %q", key.Runtime, RuntimeRust)
+	}
+	if key.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", key.Provider)
+	}
+}

@@ -113,6 +113,59 @@ printf '%s\n' '{"type":"extension_ui_request","id":"request_1","method":"setWidg
 	}
 }
 
+func TestRunControlUsesPiRustRPCContract(t *testing.T) {
+	outDir := t.TempDir()
+	stdinPath := filepath.Join(outDir, "stdin.jsonl")
+	argsPath := filepath.Join(outDir, "pi.args")
+	sessionFile := filepath.Join(outDir, "session.jsonl")
+	fakePiRust := writeFakePiNamed(t, "pi-rust", `
+: > "`+argsPath+`"
+for arg in "$@"; do
+  printf '%s\000' "$arg" >> "`+argsPath+`"
+done
+cat > "`+stdinPath+`"
+printf '%s\n' '{"type":"response","command":"switch_session","success":true,"id":"switch-session"}'
+printf '%s\n' '{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":42,"contextWindow":200000,"percent":0.021}}}'
+`)
+
+	result, err := RunControl(context.Background(), ControlOptions{
+		BinaryPath:  fakePiRust,
+		CWD:         outDir,
+		SessionFile: sessionFile,
+		Provider:    "claude-cli",
+		Model:       "claude-sonnet-4-6",
+		Command:     ControlCommand{Type: ControlCommandGetSessionStats},
+	})
+	if err != nil {
+		t.Fatalf("RunControl returned error: %v", err)
+	}
+	if result.ContextUsage == nil || result.ContextUsage.Tokens == nil || *result.ContextUsage.Tokens != 42 {
+		t.Fatalf("context usage = %+v", result.ContextUsage)
+	}
+
+	args := readNulArgsFile(t, argsPath)
+	for _, denied := range []string{"-e", "--session", "--no-session"} {
+		if argIndex(args, denied) >= 0 {
+			t.Fatalf("pi-rust control args include stock-only flag %q: %v", denied, args)
+		}
+	}
+	assertArgValue(t, args, "--mode", "rpc")
+	assertArgValue(t, args, "--provider", "anthropic")
+	assertArgValue(t, args, "--model", "claude-sonnet-4-6")
+	assertArgValue(t, args, "--cwd", outDir)
+
+	frames := readJSONLines(t, stdinPath)
+	if len(frames) != 2 {
+		t.Fatalf("stdin frames = %d, want 2: %#v", len(frames), frames)
+	}
+	if frames[0]["type"] != "switch_session" || frames[0]["sessionPath"] != sessionFile {
+		t.Fatalf("first frame = %#v, want switch_session for %s", frames[0], sessionFile)
+	}
+	if frames[1]["type"] != string(ControlCommandGetSessionStats) {
+		t.Fatalf("second frame = %#v, want get_session_stats", frames[1])
+	}
+}
+
 func TestRunControlExcludesUnrelatedHostSecrets(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	t.Setenv("OPENROUTER_API_KEY", "openrouter-secret")

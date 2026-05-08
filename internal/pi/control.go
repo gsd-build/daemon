@@ -41,6 +41,7 @@ type ControlCommand struct {
 
 type ControlOptions struct {
 	BinaryPath    string
+	Runtime       Runtime
 	CWD           string
 	SessionFile   string
 	Model         string
@@ -123,7 +124,8 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 		return ControlResult{}, errors.New("pi session file is required")
 	}
 
-	cmd := piRPCCommand(ctx, opts.BinaryPath, opts.CWD, opts.SessionFile)
+	runtime := opts.Runtime.normalize(opts.BinaryPath)
+	cmd := piRPCCommand(ctx, runtime, opts.BinaryPath, opts.CWD, opts.SessionFile, controlProcessArgs(opts, runtime)...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -137,13 +139,16 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("open pi stderr: %w", err)
 	}
-	cmd.Env = processEnv(ctx, os.Environ(), Options{Provider: opts.Provider})
+	cmd.Env = processEnv(ctx, os.Environ(), Options{Provider: opts.Provider, Runtime: runtime})
 
 	if err := cmd.Start(); err != nil {
 		return ControlResult{}, fmt.Errorf("start pi control process: %w", err)
 	}
 
-	writeErr := writeControlCommand(stdin, opts.Command)
+	writeErr := writeSessionSwitchFrame(stdin, runtime, opts.SessionFile)
+	if writeErr == nil {
+		writeErr = writeControlCommand(stdin, opts.Command)
+	}
 	_ = stdin.Close()
 	if writeErr != nil {
 		_ = cmd.Wait()
@@ -182,6 +187,20 @@ func RunControl(ctx context.Context, opts ControlOptions) (ControlResult, error)
 		return result, errors.New("pi control command failed")
 	}
 	return result, nil
+}
+
+func controlProcessArgs(opts ControlOptions, runtime Runtime) []string {
+	if runtime != RuntimeRust {
+		return nil
+	}
+	args := []string{"--provider", providerForRuntime(runtime, opts.Provider)}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.CWD != "" {
+		args = append(args, "--cwd", opts.CWD)
+	}
+	return args
 }
 
 func writeControlCommand(w io.Writer, command ControlCommand) error {

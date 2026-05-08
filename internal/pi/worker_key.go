@@ -11,6 +11,7 @@ import (
 
 type WorkerKey struct {
 	BinaryPath          string
+	Runtime             Runtime
 	CWD                 string
 	Model               string
 	ResumeSession       string
@@ -40,12 +41,13 @@ func NewWorkerKey(opts Options) WorkerKey {
 	sort.Strings(skills)
 	key := WorkerKey{
 		BinaryPath:         opts.BinaryPath,
+		Runtime:            opts.runtime(),
 		CWD:                opts.CWD,
 		Model:              opts.Model,
 		ResumeSession:      opts.ResumeSession,
 		CustomInstructions: strings.TrimSpace(opts.CustomInstructions),
 		ExtensionPath:      opts.ExtensionPath,
-		Provider:           ProviderOrDefault(opts.Provider),
+		Provider:           providerForRuntime(opts.runtime(), opts.Provider),
 		SkillPaths:         strings.Join(skills, "\x00"),
 		DisableSkills:      opts.DisableSkills,
 	}

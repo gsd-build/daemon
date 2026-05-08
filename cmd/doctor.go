@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gsd-build/daemon/internal/config"
+	"github.com/gsd-build/daemon/internal/pi"
 	"github.com/gsd-build/daemon/internal/sockapi"
 	"github.com/spf13/cobra"
 )
@@ -164,21 +165,33 @@ func checkPi() checkResult {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, piPath, "--version").Output()
-	if err != nil {
+	versionCtx, versionCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	out, err := exec.CommandContext(versionCtx, piPath, "--version").Output()
+	versionCancel()
+	if err == nil {
 		return checkResult{
-			name:    "pi binary on PATH",
-			passed:  false,
-			detail:  fmt.Sprintf("(at %s but failed to run)", piPath),
-			fixHint: "reinstall pi: npm install -g @mariozechner/pi-coding-agent",
+			name:   "pi binary on PATH",
+			passed: true,
+			detail: fmt.Sprintf("(v%s)", strings.TrimSpace(string(out))),
+		}
+	}
+	if pi.ResolveRuntime(piPath) == pi.RuntimeRust {
+		helpCtx, helpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		helpOut, _ := exec.CommandContext(helpCtx, piPath, "--help").CombinedOutput()
+		helpCancel()
+		if strings.Contains(strings.ToLower(string(helpOut)), "pi-rust") {
+			return checkResult{
+				name:   "pi binary on PATH",
+				passed: true,
+				detail: "(pi-rust)",
+			}
 		}
 	}
 	return checkResult{
-		name:   "pi binary on PATH",
-		passed: true,
-		detail: fmt.Sprintf("(v%s)", strings.TrimSpace(string(out))),
+		name:    "pi binary on PATH",
+		passed:  false,
+		detail:  fmt.Sprintf("(at %s but failed to run)", piPath),
+		fixHint: "reinstall pi: npm install -g @mariozechner/pi-coding-agent",
 	}
 }
 

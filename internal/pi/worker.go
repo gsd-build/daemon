@@ -49,6 +49,7 @@ func NewWorker(opts Options) *Worker {
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = "pi"
 	}
+	opts.Runtime = opts.Runtime.normalize(opts.BinaryPath)
 	opts.Provider = ProviderOrDefault(opts.Provider)
 	return &Worker{opts: opts, key: NewWorkerKey(opts)}
 }
@@ -97,14 +98,17 @@ func (w *Worker) startLocked() error {
 	if w.cmd != nil && !w.broken {
 		return nil
 	}
-	if w.opts.ExtensionPath == "" {
+	runtime := w.opts.runtime()
+	if runtime == RuntimeStock && w.opts.ExtensionPath == "" {
 		return fmt.Errorf("pi extension path is required")
 	}
-	if _, err := os.Stat(w.opts.ExtensionPath); err != nil {
-		return fmt.Errorf("pi extension not found at %s: %w", w.opts.ExtensionPath, err)
+	if runtime == RuntimeStock {
+		if _, err := os.Stat(w.opts.ExtensionPath); err != nil {
+			return fmt.Errorf("pi extension not found at %s: %w", w.opts.ExtensionPath, err)
+		}
 	}
 
-	cmd := piRPCCommand(context.Background(), w.opts.BinaryPath, w.opts.CWD, w.opts.ResumeSession, processArgs(w.opts)...)
+	cmd := piRPCCommand(context.Background(), runtime, w.opts.BinaryPath, w.opts.CWD, w.opts.ResumeSession, processArgs(w.opts)...)
 	cmd.Env = processEnv(context.Background(), os.Environ(), w.opts)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -209,6 +213,9 @@ func (w *Worker) Prompt(ctx context.Context, req PromptRequest) error {
 		"type":    "prompt",
 		"message": req.Message,
 	})
+	if err := writeSessionSwitchFrame(stdin, w.opts.runtime(), w.opts.ResumeSession); err != nil {
+		return w.stopAfterFailure(err)
+	}
 	if _, err := stdin.Write(append(frame, '\n')); err != nil {
 		return w.stopAfterFailure(fmt.Errorf("write prompt frame: %w", err))
 	}

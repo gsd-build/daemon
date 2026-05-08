@@ -21,11 +21,21 @@ async function loadConfig() {
   const response = await fetch("/api/config");
   const config = await response.json();
   document.getElementById("cwd").value = config.cwd || "";
-  document.getElementById("provider").value = config.provider || "claude-cli";
+  setSelectValue(document.getElementById("provider"), config.provider || "claude-cli");
   document.getElementById("model").value = config.model || "claude-sonnet-4-6";
-  document.getElementById("effort").value = config.effort || "medium";
-  document.getElementById("permissionMode").value = config.permissionMode || "acceptEdits";
+  setSelectValue(document.getElementById("effort"), config.effort || "medium");
+  setSelectValue(document.getElementById("permissionMode"), config.permissionMode || "acceptEdits");
   await loadFiles(config.cwd || "");
+}
+
+function setSelectValue(select, value) {
+  if (!Array.from(select.options).some((option) => option.value === value)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  }
+  select.value = value;
 }
 
 async function loadFiles(path) {
