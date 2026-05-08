@@ -31,6 +31,10 @@ var labCmd = &cobra.Command{
 	Use:   "lab",
 	Short: "Run the local provider lab",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		warmWorkers, err := parseLabBoolPtr(labFlags.warmWorkers)
+		if err != nil {
+			return err
+		}
 		cwd := labFlags.cwd
 		if absCWD, err := filepath.Abs(cwd); err == nil {
 			cwd = absCWD
@@ -61,7 +65,7 @@ var labCmd = &cobra.Command{
 				PermissionMode: labFlags.permissionMode,
 				FakeMode:       labFlags.fake,
 				PiBinary:       labFlags.piBinary,
-				WarmWorkers:    parseLabBoolPtr(labFlags.warmWorkers),
+				WarmWorkers:    warmWorkers,
 			},
 		})
 		if err != nil {
@@ -95,7 +99,7 @@ var labCmd = &cobra.Command{
 			AuthToken:     "lab-token",
 			FakeMode:      labFlags.fake,
 			PiBinary:      labFlags.piBinary,
-			WarmWorkers:   parseLabBoolPtr(labFlags.warmWorkers),
+			WarmWorkers:   warmWorkers,
 			ExtensionPath: extensionPath,
 		})
 		ctx, cancel := context.WithCancel(cmd.Context())
@@ -145,15 +149,18 @@ func init() {
 	rootCmd.AddCommand(labCmd)
 }
 
-func parseLabBoolPtr(value string) *bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
+func parseLabBoolPtr(value string) (*bool, error) {
+	clean := strings.ToLower(strings.TrimSpace(value))
+	switch clean {
 	case "1", "true", "yes", "on":
 		enabled := true
-		return &enabled
+		return &enabled, nil
 	case "0", "false", "no", "off":
 		enabled := false
-		return &enabled
+		return &enabled, nil
+	case "":
+		return nil, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("unsupported --warm-workers value %q; use on or off", value)
 	}
 }
